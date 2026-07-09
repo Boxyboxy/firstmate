@@ -82,7 +82,7 @@ if [ -z "$HARNESS" ]; then
 fi
 
 case "$HARNESS" in
-  claude|codex|opencode|pi|grok) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
+  claude|codex|opencode|pi|grok|omp) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
 [ -f "$SNIPPET" ] || SNIPPET="$DOC_DIR/unknown.md"
@@ -148,6 +148,9 @@ repair_line() {
       ;;
     grok)
       printf '%s%s\n' "$prefix" 'resume supervision with bin/fm-watch-arm.sh as its own Grok tracked background task, never shell &.'
+      ;;
+    omp)
+      printf '%s%s\n' "$prefix" 'resume supervision with bin/fm-watch-arm.sh as its own omp background async job, never shell &.'
       ;;
     *)
       printf '%s%s\n' "$prefix" 'resume supervision according to the session-start block for this harness; do not use shell &.'

@@ -227,6 +227,13 @@ if [ "$PRIMARY_HARNESS" = pi ]; then
     || ! pi_extension_loaded "$PI_TURNEND_MARKER" "$PI_TURNEND_VERSION" "$PI_LOCK"; then
     printf 'PI_WATCH_EXTENSION: not loaded - restart pi with -e %s -e %s for background wake supervision and turn-end guard coverage\n' "$PI_TURNEND_EXT" "$PI_EXT"
   fi
+elif [ "$PRIMARY_HARNESS" = omp ]; then
+  # omp auto-discovers tracked .omp/extensions/*.ts, so there is no bridge to
+  # generate (skip generation entirely). Just verify the primary turn-end guard
+  # actually auto-loaded; alarm loudly if discovery silently failed.
+  if ! pi_extension_loaded "$STATE/.omp-turnend-extension-loaded" "$(hash_file "$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts")" "$STATE/.lock"; then
+    printf 'OMP_TURNEND_EXTENSION: not loaded - the .omp/extensions guard did not auto-discover; check omp extension discovery / disabledExtensions / --no-extensions before relying on turn-end guard coverage\n'
+  fi
 fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \
   --harness "$PRIMARY_HARNESS" \

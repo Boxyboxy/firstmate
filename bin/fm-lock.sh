@@ -14,8 +14,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
 mkdir -p "$STATE"
 
-# Known harness command names; extend when a new adapter is verified.
-HARNESS_RE='claude|codex|opencode|grok|^pi$'
+# Known harness command names; extend when a new adapter is verified. Names that
+# could match as substrings (pi, omp) are anchored (^pi$, ^omp$).
+HARNESS_RE='claude|codex|opencode|grok|^pi$|^omp$'
 
 harness_pid() {
   local pid=$$ comm args

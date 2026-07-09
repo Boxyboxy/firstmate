@@ -42,10 +42,17 @@ All verified primary harnesses have a tracked integration:
 - `grok`: `.grok/hooks/fm-primary-turnend-guard.json` registers a `Stop` hook that invokes `bin/fm-turnend-guard-grok.sh`.
   The adapter runs the shared guard and, when it returns 2, invokes `grok --resume <sessionId> -p <guard-reason>` with `GROK_TURNEND_GUARD_ACTIVE=1`.
   It does not pass `--permission-mode`, so the passive Stop hook cannot grant stronger tool permissions than Grok's resumed-session default.
+- `omp`: `.omp/extensions/fm-primary-turnend-guard.ts` is a tracked file under omp's native `.omp/extensions/` auto-discovery root, so it loads on launch with no `-e` wiring.
+  It listens for `session_stop`, marks the extension version loaded for session-start checks, runs the shared guard, and returns `{ continue: true, additionalContext }` to force one continuation when the guard returns 2.
+  A one-shot in-process flag plus omp's own 8-continuation cap bound it to at most one forced continuation per stop episode.
 
 Claude and Codex support a direct blocking Stop hook.
 For those harnesses, exit status 2 plus stderr from `bin/fm-turnend-guard.sh` blocks the stop and feeds the reason back into the model.
 Both payloads include `stop_hook_active`; when it is true, the shared guard exits 0 so the harness can end after one forced continuation.
+
+omp is a third mechanism: direct-blocking via the `session_stop` handler's return value rather than an exit-2 hook process.
+Its extension runs the same shared guard and, when the guard returns 2, returns `{ continue: true, additionalContext }` so omp forces one more turn with the guard reason as context.
+omp always pipes `stop_hook_active:false`, so it never relies on the exit-2 loop-guard field; a one-shot in-process flag plus omp's built-in 8-continuation cap bound the forced continuation instead.
 
 OpenCode, Pi, and Grok expose passive turn-end events for this purpose.
 Their adapters fail open at the hook boundary to avoid corrupting a user session, but they force one follow-up turn when the shared predicate blocks.
@@ -101,8 +108,15 @@ Project-local Grok hooks did not fire in scratch single mode without a trust gra
 The primary integration therefore requires the primary firstmate checkout to be trusted for Grok hooks, which can be done with `/hooks-trust` or launch-time `--trust`.
 If Grok declines to load project hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 
+omp 16.3.12 was validated with scratch extensions and a committed extension probe.
+Hook file used: a scratch `ext.ts` matching `.omp/extensions/fm-primary-turnend-guard.ts`, plus a committed `.omp/extensions/*.ts` probe for auto-discovery.
+Command run: `omp -p -e "$scratch/ext.ts" --auto-approve 'Say hi in exactly one word.'`.
+Observed output: a static `session_stop` handler returning `{ continue: true }` (BANANA probe) forced a continuation, and an async `session_stop` handler that awaited a spawned exit-2 subprocess (MANGO probe, mirroring `runGuard`) also forced the continuation.
+Auto-discovery was confirmed separately: a committed `.omp/extensions/*.ts` file fired its `session_start` handler on launch with no `-e` wiring and no trust block, writing its load marker.
+omp caps forced continuations at 8 and skips subagents, so the extension's one-shot flag is belt-and-suspenders with omp's own cap.
+
 ## Tests
 
-`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, loop-safety, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, loop-safety, fail-open behavior without `jq`, tracked hook registration for all six harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
 These tests do not invoke live harnesses.
 Live harness validation is the empirical evidence recorded above.
