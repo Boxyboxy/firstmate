@@ -884,6 +884,32 @@ test_grok_hook_invokes_adapter() {
   pass ".grok primary hook: Stop hook invokes the grok adapter"
 }
 
+test_omp_extension_forces_continuation() {
+  local ext content
+  ext="$ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+  [ -f "$ext" ] || fail "tracked omp primary extension is missing"
+  # omp only auto-discovers COMMITTED .omp/extensions/*.ts, so the guard MUST be
+  # git-tracked or it silently never loads and the primary turns blind.
+  git -C "$ROOT" ls-files --error-unmatch .omp/extensions/fm-primary-turnend-guard.ts >/dev/null 2>&1 \
+    || fail "omp primary extension must be git-tracked so omp auto-discovers it"
+  content=$(cat "$ext")
+  # POSITIVE: omp is direct-blocking via the session_stop return value.
+  assert_contains "$content" 'session_stop' "omp extension must hook session_stop"
+  assert_contains "$content" 'fm-turnend-guard.sh' "omp extension must invoke the shared guard"
+  assert_contains "$content" 'continue' "omp extension must force a continuation via the return value"
+  assert_contains "$content" 'additionalContext' "omp extension must pass the guard reason as additionalContext"
+  assert_contains "$content" 'forcedThisEpisode' "omp extension must carry a one-shot per-episode loop guard"
+  assert_contains "$content" '.omp-turnend-extension-loaded' "omp extension must write its loaded marker for session-start diagnostics"
+  assert_contains "$content" 'lockOwnership' "omp extension loaded marker must respect the session lock"
+  assert_contains "$content" 'session-start operating block' "omp extension must use harness-neutral repair wording"
+  # NEGATIVE: catch a lazy copy of the pi extension (which uses a different shape).
+  assert_not_contains "$content" 'sendUserMessage' "omp extension must block via the return value, not pi's sendUserMessage"
+  assert_not_contains "$content" 'turn_end' "omp extension must hook session_stop, not pi's turn_end"
+  assert_not_contains "$content" 'skipNextTurnEnd' "omp extension must use forcedThisEpisode, not pi's skipNextTurnEnd"
+  assert_not_contains "$content" '.pi-turnend-extension-loaded' "omp extension must write the omp marker, not pi's"
+  pass ".omp primary extension: session_stop forces one continuation through the shared guard"
+}
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -924,3 +950,4 @@ test_pi_extension_forces_followup
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_grok_hook_invokes_adapter
+test_omp_extension_forces_continuation

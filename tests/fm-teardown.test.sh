@@ -1263,6 +1263,29 @@ SH
   pass "herdr teardown removes pane-owned escalation dedupe state"
 }
 
+test_teardown_removes_omp_crewmate_ext() {
+  local case_dir rc wt_head
+  case_dir=$(make_case teardown-omp-ext)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "omp crewmate work"
+  # Land the work into local main so the safety check ALLOWs and teardown reaches
+  # its state cleanup (mirrors test_local_only_merged_to_local_main_allows).
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  # The turn-end SIGNAL extension fm-spawn wrote outside the worktree for an omp crewmate.
+  printf '// omp turn-end signal\n' > "$case_dir/state/task-x1.omp-ext.ts"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "omp-ext: teardown should succeed for landed omp crewmate work"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "omp-ext: teardown printed a REFUSED line"
+  assert_absent "$case_dir/state/task-x1.omp-ext.ts" "teardown did not remove the omp crewmate turn-end ext file"
+  pass "torn-down omp crewmate removes state/<id>.omp-ext.ts"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -1293,3 +1316,4 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+test_teardown_removes_omp_crewmate_ext
