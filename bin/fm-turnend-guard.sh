@@ -13,6 +13,10 @@
 # Claude and codex can block directly by preserving exit status 2 and stderr.
 # OpenCode, pi, and grok adapters use the same predicate and force one bounded
 # follow-up because their turn-end events are passive.
+# omp is a third shape: its session_stop extension is direct-blocking via a
+# {continue:true} return value (not exit-2). It pipes stop_hook_active:false and
+# forces one continuation on guard exit 2, bounded by omp's built-in
+# 8-continuation cap plus the extension's one-shot in-process flag.
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
 #
@@ -30,8 +34,9 @@
 # payloads carry stop_hook_active=true when the CURRENT stop attempt was itself
 # already forced by an earlier block this turn; on that signal we always allow
 # the stop, whether or not watcher supervision actually got resumed. Passive
-# harness adapters provide their own one-follow-up guard before calling this
-# script.
+# harness adapters, and omp's session_stop extension, always pipe
+# stop_hook_active:false and provide their own one-follow-up in-process guard
+# (omp additionally caps continuations at 8) before calling this script.
 # That bounds this to at most one forced continuation per turn - never a wedged,
 # un-endable session - while still nagging again on a later turn if the problem
 # persists.
