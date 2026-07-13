@@ -321,7 +321,7 @@ extract_tmux_busy_default() {
   sed -n "s/.*FM_TMUX_BUSY_REGEX_DEFAULT='\(.*\)'.*/\1/p" "$TMUX_LIB"
 }
 
-# Busy 12 (REQUIRED): the shipped busy regex matches omp's ⟦esc⟧ interrupt hint,
+# Busy 11 (REQUIRED): the shipped busy regex matches omp's ⟦esc⟧ interrupt hint,
 # ignores a clean idle line, and does NOT match omp's unicode-ellipsis "Working…"
 # via the ASCII "Working\.\.\." token; plus the two defaults stay in parity.
 # Both fm-watch.sh and fm-tmux-lib.sh consume the default with `grep -qiE`.

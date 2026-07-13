@@ -20,7 +20,7 @@ TMP_ROOT=$(fm_test_tmproot fm-lock)
 # ancestry walk (ps -o comm=/-o args=/-o ppid= -p <pid>) as if the queried
 # process were <comm>, with the parent chain terminating at pid 1.
 make_ancestry_ps() {
-  local fakebin=$1 comm=$2
+  local fakebin=$1 comm=$2 args=${3:-"$2 --resume s1"}
   cat > "$fakebin/ps" <<SH
 #!/usr/bin/env bash
 set -u
@@ -34,7 +34,7 @@ while [ "\$#" -gt 0 ]; do
 done
 case "\$field" in
   comm=) printf '%s\n' '$comm' ;;
-  args=) printf '%s\n' '$comm --resume s1' ;;
+  args=) printf '%s\n' '$args' ;;
   ppid=) printf '1\n' ;;
 esac
 exit 0
@@ -81,7 +81,52 @@ test_fm_lock_rejects_non_harness_ancestor() {
   pass "fm-lock.sh does not mistake a bare shell ancestor for a harness (control)"
 }
 
+# fm-lock 13: holder_alive() must match the holder's command name separately
+# from its arguments, or anchored short names such as ^omp$ can never match.
+test_fm_lock_preserves_live_omp_holder() {
+  local dir state fakebin out status holder_pid
+  dir="$TMP_ROOT/live-omp-holder"
+  state="$dir/state"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$state"
+  make_ancestry_ps "$fakebin" omp
+
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$state/.lock"
+
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$LOCK" 2>&1)
+  status=$?
+  expect_code 1 "$status" "fm-lock must not steal a live omp holder's lock"
+  assert_contains "$out" "another live firstmate session holds the lock" "fm-lock did not report the live omp holder"
+  [ "$(cat "$state/.lock")" = "$holder_pid" ] || fail "fm-lock overwrote the live omp holder"
+
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$LOCK" status)
+  assert_contains "$out" "lock: held by live harness pid $holder_pid" "fm-lock status misreported the live omp holder"
+
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  pass "fm-lock.sh preserves and reports a live omp session holder"
+}
+
+test_fm_lock_recognizes_pi_interpreter_script() {
+  local dir state fakebin out status
+  dir="$TMP_ROOT/pi-interpreter"
+  state="$dir/state"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$state"
+  make_ancestry_ps "$fakebin" node 'node /usr/local/bin/pi --resume s1'
+
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" "$LOCK" 2>&1)
+  status=$?
+  expect_code 0 "$status" "fm-lock should recognize pi through the interpreter script path"
+  assert_contains "$out" "lock acquired: harness pid" "fm-lock did not recognize the pi interpreter script"
+  pass "fm-lock.sh matches an interpreted harness by script basename without scanning prompt arguments"
+}
+
 test_fm_lock_recognizes_omp_ancestor
 test_fm_lock_rejects_non_harness_ancestor
+test_fm_lock_preserves_live_omp_holder
+test_fm_lock_recognizes_pi_interpreter_script
 
 echo "# all fm-lock tests passed"
