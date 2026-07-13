@@ -41,6 +41,7 @@ If the captain asks for a new harness, propose verifying it first: spawn a trivi
 - `bin/backends/tmux.sh`: the tmux agent-process liveness classification, when the harness can launch a secondmate.
 - `bin/fm-bootstrap.sh`: the crew-dispatch `verified()` list, the `effort_ok` effort group, and the secondmate-liveness verified-set case.
 - `bin/fm-session-start.sh`: the primary turn-end load-health check, when the harness loads its guard through an extension or hook.
+- The primary PreToolUse-equivalent hook, `docs/arm-pretool-check.md`, and `docs/cd-guard.md`: wire both shared seatbelts when the harness exposes a blocking pre-tool callback.
 - `bin/fm-teardown.sh`: cleanup of any per-task turn-end extension or hook files, at both the primary and secondmate-child sites.
 - `bin/fm-turnend-guard.sh`: the header classification comment (direct-blocking vs passive vs return-value).
 - `bin/fm-supervision-instructions.sh`: the `SNIPPET` case and the `repair_line()` per-harness arm.
@@ -74,7 +75,7 @@ When changing any primary turn-end hook, validate the real harness behavior in a
 
 Every verified primary harness also has a wired PreToolUse-equivalent hook that denies a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
 `claude` and `codex` block directly through PreToolUse hooks; `grok` blocks the same way but requires every `$VAR` reference in its hook `command` string to carry an inline `:-default` or it fails to launch the hook entirely.
-`opencode` and `pi` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
+`opencode`, `pi`, and `omp` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
 When changing any primary PreToolUse hook, validate the real harness behavior in a scratch project before trusting it, then update that doc.
 
@@ -313,6 +314,9 @@ omp auto-executes any committed `.omp/extensions/*.ts` on launch with no trust g
 Combined with the `--auto-approve` that firstmate passes for unattended runs, opening an untrusted project repo on omp runs that repo's extension code, so treat opening an untrusted repo on omp as running its extension code and never point an `--auto-approve` omp launch at a repo you would not execute.
 omp 16.4.8's help says explicit `-e` paths still work with `--no-extensions`, but live probes found that `--no-extensions` suppressed both explicit `-e` and `--hook` files.
 Firstmate therefore cannot disable project auto-discovery without also losing its required crewmate turn-end extension, so the untrusted-repository restriction remains a real safety boundary rather than documentation-only caution.
+`fm-spawn.sh` enforces that boundary by refusing an omp crewmate or scout when the project tracks `.omp/extensions` code.
+The sole exception is an exact copy of Firstmate's own sole tracked primary guard for firstmate-on-itself work.
+The `--allow-project-omp-extensions` override requires explicit captain approval and prints every approved tracked path.
 
 **Fast-forward re-verification checklist (when omp updates).**
 Re-check each fact and patch the named location if it changed:

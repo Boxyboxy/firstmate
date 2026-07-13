@@ -65,14 +65,53 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
   child.stderr.on("data", (chunk) => {
     stderr += chunk.toString();
   });
+  child.stdin.on("error", () => {});
   child.on("error", () => resolveResult({ code: 0, stderr: "" }));
   child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
   child.stdin.end('{"stop_hook_active":false}');
   return promise;
 }
 
+// omp 16.4.8 exposes Pi's tool_call API and honors {block: true} before bash
+// execution. Both shared checkers own their own decisions and fail open when
+// unavailable; this extension owns only the harness transport.
+function runChecker(script: string, command: string): Promise<{ code: number; stderr: string }> {
+  const { promise, resolve: resolveResult } = Promise.withResolvers<{ code: number; stderr: string }>();
+  const child = spawn(`${root}/bin/${script}`, ["--command", command], {
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString();
+  });
+  child.on("error", () => resolveResult({ code: 0, stderr: "" }));
+  child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
+  return promise;
+}
+
+function runPretoolCheck(command: string): Promise<{ code: number; stderr: string }> {
+  return runChecker("fm-arm-pretool-check.sh", command);
+}
+
+function runCdCheck(command: string): Promise<{ code: number; stderr: string }> {
+  return runChecker("fm-cd-pretool-check.sh", command);
+}
+
 export default function (pi: ExtensionAPI) {
   pi.on?.("session_start", markLoaded);
+
+  pi.on("tool_call", async (event) => {
+    if (event.type !== "tool_call" || event.toolName !== "bash") return {};
+    const command = String((event.input as { command?: unknown })?.command ?? "");
+    if (!command) return {};
+    const cdResult = await runCdCheck(command);
+    if (cdResult.code === 2) {
+      return { block: true, reason: cdResult.stderr.trim() || "denied by the cd-guard PreToolUse seatbelt" };
+    }
+    const result = await runPretoolCheck(command);
+    if (result.code !== 2) return {};
+    return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
+  });
 
   pi.on("session_stop", async () => {
     if (forcedThisEpisode) {

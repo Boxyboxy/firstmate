@@ -525,6 +525,20 @@ test_pi_extension_carries_pretool_check() {
   pass ".pi primary extension: tool_call handler invokes the shared checker and can block"
 }
 
+test_omp_extension_carries_pretool_check() {
+  local ext content
+  ext="$ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+  [ -f "$ext" ] || fail "tracked omp primary extension is missing"
+  content=$(cat "$ext")
+  assert_contains "$content" 'tool_call' "omp extension must hook tool_call for the pretool seatbelt"
+  assert_contains "$content" 'fm-arm-pretool-check.sh' "omp extension must invoke the shared checker"
+  assert_contains "$content" 'String((event.input as { command?: unknown })?.command ?? "")' "omp must extract and string-coerce event.input.command exactly"
+  assert_contains "$content" 'const result = await runPretoolCheck(command);' "omp must forward the exact command to the checker"
+  assert_contains "$content" 'if (result.code !== 2) return {};' "omp must block only for checker exit 2"
+  assert_contains "$content" 'block: true' "omp extension must return block:true to deny"
+  pass ".omp primary extension: tool_call handler invokes the shared checker and can block"
+}
+
 # --- shellcheck (belt-and-suspenders; CI/CONTRIBUTING.md also runs this) -----
 
 test_shellcheck_clean() {
@@ -556,4 +570,5 @@ test_claude_settings_pretool_hook_wired
 test_codex_hooks_pretool_wired
 test_opencode_pretool_plugin_wired
 test_pi_extension_carries_pretool_check
+test_omp_extension_carries_pretool_check
 test_shellcheck_clean
