@@ -24,6 +24,13 @@ test_script_parses() {
   pass "fm-brief.sh: bash -n succeeds"
 }
 
+test_help_includes_entire_header() {
+  local help
+  help=$("$ROOT/bin/fm-brief.sh" --help)
+  assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
+  pass "fm-brief.sh: --help renders the complete header"
+}
+
 # Registry with one project per delivery mode, so each ship-mode DOD branch is
 # exercised. A project absent from the registry defaults to no-mistakes.
 write_registry() {
@@ -161,6 +168,46 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
+test_secondmate_no_projects_charter() {
+  local home brief status
+  home="$TMP_ROOT/no-projects-home"
+  mkdir -p "$home/data"
+
+  # The deliberate --no-projects signal scaffolds a valid project-less charter for
+  # a domain whose subject is the firstmate repo itself (no clones needed).
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
+    FM_SECONDMATE_SCOPE='firstmate repo work' \
+    "$ROOT/bin/fm-brief.sh" fdev --secondmate --no-projects >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "--no-projects secondmate brief should exit 0"
+  brief="$home/data/fdev/brief.md"
+  assert_present "$brief" "project-less charter was not scaffolded"
+  assert_grep "# Project clones" "$brief" "project-less charter dropped the Project clones heading"
+  assert_grep "None. This is a project-less domain" "$brief" \
+    "project-less charter did not render a sensible no-clones note"
+  assert_grep "its crews take pooled worktrees of that repo" "$brief" \
+    "project-less charter operating model lost the pooled-worktree note"
+  assert_no_grep "The projects above are local clones" "$brief" \
+    "project-less charter kept the with-projects operating-model line"
+  if grep -nE '^-[[:space:]]*$' "$brief" >/dev/null; then
+    fail "project-less charter left a stray empty project bullet"
+  fi
+
+  # Accidental omission (no projects, no signal) still fails loudly, writing nothing.
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='x' "$ROOT/bin/fm-brief.sh" oops --secondmate >/dev/null 2>&1; status=$?
+  expect_code 1 "$status" "secondmate brief with no projects and no --no-projects must fail"
+  assert_absent "$home/data/oops/brief.md" "loud-failure secondmate brief still wrote a file"
+
+  # --no-projects is mutually exclusive with a project list.
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='x' "$ROOT/bin/fm-brief.sh" oops2 --secondmate --no-projects alpha >/dev/null 2>&1; status=$?
+  expect_code 1 "$status" "--no-projects combined with a project list must fail"
+
+  # --no-projects applies only to secondmate charters, never a ship/scout brief.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oops3 somerepo --no-projects >/dev/null 2>&1; status=$?
+  expect_code 1 "$status" "--no-projects on a ship brief must fail"
+
+  pass "fm-brief.sh: --no-projects scaffolds a project-less charter and guards misuse"
+}
+
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
   local home brief status=0
   home="$TMP_ROOT/herdr-kind-home"
@@ -177,7 +224,44 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
   pass "fm-brief.sh: Herdr lab contract covers scouts and rejects secondmate misuse"
 }
 
+test_pause_verb_override_renders_all_brief_scaffolds() {
+  local home kind id brief
+  home="$TMP_ROOT/pause-verb-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout secondmate; do
+    id="brief-pause-verb-$kind"
+    case "$kind" in
+      ship)
+        FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
+          "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+        ;;
+      scout)
+        FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
+          "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+        ;;
+      secondmate)
+        FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
+          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
+      "$kind brief did not render the configured pause verb in its states list"
+    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+    assert_grep 'Use `awaiting: {why}`' "$brief" \
+      "$kind brief did not instruct the configured pause status"
+    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+    assert_no_grep '`paused: {why}`' "$brief" \
+      "$kind brief still instructs the default paused status"
+    assert_grep 'or a blocker clears' "$brief" \
+      "$kind brief did not require durable resolution when a blocker clears"
+  done
+  pass "fm-brief.sh: custom pause verb renders in every scaffold"
+}
+
 test_script_parses
+test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
@@ -185,3 +269,5 @@ test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
+test_secondmate_no_projects_charter
+test_pause_verb_override_renders_all_brief_scaffolds
