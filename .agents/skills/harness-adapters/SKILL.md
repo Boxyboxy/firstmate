@@ -101,7 +101,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Verified on pi 0.80.2. `max` prints an invalid-thinking warning, so firstmate omits Pi effort when the requested effort is `max`. |
-| omp | `--model <model>` | `--thinking <low\|medium\|high\|xhigh>` | Verified 2026-07-08 on omp (Oh My Pi) 16.3.12. Mirrors Pi's thinking axis; omp also accepts off/minimal/auto but firstmate omits `max` (omp has no max). |
+| omp | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Re-verified 2026-07-13 on omp (Oh My Pi) 16.4.8. omp also accepts off/minimal/auto outside Firstmate's shared effort axis. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
@@ -284,22 +284,22 @@ It does not pass `--permission-mode`, so the passive hook cannot escalate the pr
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
 
-## omp (VERIFIED 2026-07-08, omp 16.3.12)
+## omp (VERIFIED 2026-07-13, omp 16.4.8)
 
 omp (Oh My Pi) is Pi-derived - it shares Pi's `-e/--extension` wiring, `pi.on(...)` API, `--thinking` effort axis, `--smol`/`PI_SMOL_MODEL`, and `~/.omp/agent/` sessions - so `pi` is the closest launch template.
 But omp sets BOTH `OMPCODE=1` and `CLAUDECODE=1` (detection checks `OMPCODE` first), has a real approval system (`--auto-approve`), a named `omp` pane process (so secondmate liveness is confident), a native `.omp/extensions/*.ts` auto-discovery root, and a `session_stop` hook that blocks a turn by RETURNING `{ continue: true, additionalContext }` - a third turn-end class (direct-blocking-via-return-value), distinct from claude/codex exit-2 blocking and pi/grok/opencode passive follow-up.
 
 | Fact | Value | Evidence |
 |---|---|---|
-| Env marker | `OMPCODE=1` (also sets `CLAUDECODE=1`; does NOT set `PI_CODING_AGENT`) | live `env` dump |
+| Env marker | Tool subprocesses receive `OMPCODE=1` and `CLAUDECODE=1`, but not `PI_CODING_AGENT`; the extension host itself exposes `CLAUDECODE=1` without `OMPCODE`, so shell-tool detection remains the verified Firstmate path. | live extension-host and bash-tool env dumps |
 | Pane process name | `omp` | `tmux display -p '#{pane_current_command}'` |
 | Busy signature | `⟦esc⟧` (interrupt hint; present during thinking `⠧ Working… ⟦esc⟧` and tool `⠇ <verb> ⟦esc⟧`; absent when idle). Fixed byte string; matches under LC_ALL=C and UTF-8. omp's `Working…` uses U+2026 ellipsis, so the existing `Working\.\.\.` token does NOT match omp - `⟦esc⟧` is the only reliable token. | captured pane, both phases |
-| Interrupt | single Escape (INFERRED from the `⟦esc⟧` hint + Pi heritage; not cleanly observed - re-confirm) | UI hint |
+| Interrupt | single Escape cancels a running tool and returns to the idle composer. | live `sleep 30` cancellation |
 | Exit | `/quit` (slash popup; ~1s settle then Enter). Prints `Resume this session with omp --resume <id>` | live `/quit` -> shell |
 | Resume | `omp --resume <id>` (id printed on `/quit`); also `-c/--continue` | resume line |
 | Autonomy | `--auto-approve` (forces `tools.approvalMode: yolo`) | approval-mode.md + live unattended run |
 | Model flag | `--model <value>` | `omp --help` |
-| Effort flag | `--thinking <low\|medium\|high\|xhigh>` (also off/minimal/auto; firstmate omits `max`) | `omp --help` |
+| Effort flag | `--thinking <low\|medium\|high\|xhigh\|max>` (also off/minimal/auto) | `omp --help` plus live `--thinking max` run |
 | Crewmate turn-end | `pi.on("turn_end", ...)` | event list + live load |
 | Primary turn-end | `pi.on("session_stop", ...)` returning `{ continue: true, additionalContext }` forces a continuation (omp caps at 8; skips subagents). VERIFIED with BOTH a static return AND an async handler that awaits a spawned subprocess (mirrors runGuard) - both forced the continuation in `omp -p`. | 2 live probes (BANANA static, MANGO async+subprocess) |
 | Extension auto-discovery | `<cwd>/.omp/extensions/*.ts` (tracked/committed files) auto-load on launch, no trust block, gitignore:true does not exclude a tracked file | committed probe's `session_start` fired |
@@ -311,6 +311,8 @@ But omp sets BOTH `OMPCODE=1` and `CLAUDECODE=1` (detection checks `OMPCODE` fir
 **Security note.**
 omp auto-executes any committed `.omp/extensions/*.ts` on launch with no trust gate.
 Combined with the `--auto-approve` that firstmate passes for unattended runs, opening an untrusted project repo on omp runs that repo's extension code, so treat opening an untrusted repo on omp as running its extension code and never point an `--auto-approve` omp launch at a repo you would not execute.
+omp 16.4.8's help says explicit `-e` paths still work with `--no-extensions`, but live probes found that `--no-extensions` suppressed both explicit `-e` and `--hook` files.
+Firstmate therefore cannot disable project auto-discovery without also losing its required crewmate turn-end extension, so the untrusted-repository restriction remains a real safety boundary rather than documentation-only caution.
 
 **Fast-forward re-verification checklist (when omp updates).**
 Re-check each fact and patch the named location if it changed:
@@ -320,7 +322,7 @@ Re-check each fact and patch the named location if it changed:
 4. Launch flags: `omp --help` for `--auto-approve`, `--model`, `--thinking`, `-e`; patch `bin/fm-spawn.sh` if renamed.
 5. session_stop contract (LOAD + HONOR): re-run the async probe (an async `session_stop` handler awaiting a spawned exit-2 child, under `omp -p --auto-approve -e <ext> --no-session`) and confirm forced continuation; the load marker verifies LOAD, this probe verifies HONOR. Patch `.omp/extensions/fm-primary-turnend-guard.ts` if the return shape changed.
 6. Extension API/package + auto-discovery: confirm a committed `.omp/extensions/*.ts` still auto-loads and `pi.on(...)` still binds; confirm no default/global omp config disables extensions; confirm the no-`-e` secondmate launch still auto-loads the guard.
-7. Interrupt key: confirm Escape interrupts a running turn (INFERRED today; the one unverified runtime fact).
+7. Interrupt key: confirm Escape interrupts a running turn and returns to the idle composer.
 8. Idle-composer ghost text: confirm the idle composer still has no placeholder/ghost text (else add `FM_COMPOSER_IDLE_RE`).
 9. Exit + settle: confirm `/quit` + ~1s settle still exits and prints the resume line.
 10. Trust dialog: confirm no blocking trust prompt on a fresh git worktree (else add a peek-and-accept step).

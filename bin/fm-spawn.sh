@@ -486,10 +486,10 @@ effort_flag_for_harness() {
       esac
       ;;
     omp)
-      # omp accepts --thinking off|minimal|low|medium|high|xhigh|auto. firstmate's
-      # effort axis is low|medium|high|xhigh; omit max (omp has no max).
+      # omp accepts --thinking off|minimal|low|medium|high|xhigh|max|auto.
+      # Firstmate's full shared effort axis maps directly on omp 16.4.8.
       case "$effort" in
-        low|medium|high|xhigh) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     # opencode's interactive `opencode --prompt` launch has a verified --model
@@ -923,27 +923,20 @@ export const FmTurnEnd = async ({ \$ }) => ({
 EOF
       exclude_path '.opencode/plugins/fm-turn-end.js'
       ;;
-    pi*)
-      # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
-      # loaded from inside the project (verified live), but an explicit -e path
-      # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
-      cat > "$STATE/$ID.pi-ext.ts" <<EOF
+    pi*|omp*)
+      # Pi and omp share the same explicit -e loader and pi.on("turn_end") API.
+      # Keep this signal implementation in one arm and choose only the state path.
+      # The outside-worktree path avoids Pi's project-trust gate and prevents omp's
+      # per-task signal from polluting the project; teardown cleans both suffixes.
+      case "$HARNESS" in
+        pi*) signal_ext="$STATE/$ID.pi-ext.ts" ;;
+        *) signal_ext="$STATE/$ID.omp-ext.ts" ;;
+      esac
+      cat > "$signal_ext" <<EOF
 // Firstmate turn-end signal; written by fm-spawn.
 // Use "turn_end" (fires after each turn the agent finishes), not "agent_end"
 // (fires once, only when the whole run exits): the watcher needs a signal at
 // every turn boundary so an idle crewmate is surfaced, not just at shutdown.
-import { execFile } from "node:child_process";
-export default function (pi: any) {
-  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
-}
-EOF
-      ;;
-    omp*)
-      # Written OUTSIDE the worktree (state/), loaded via explicit -e below, so the
-      # crewmate turn-end signal never pollutes the project worktree. turn_end fires
-      # per completed turn (not agent_end, which is whole-run exit only).
-      cat > "$STATE/$ID.omp-ext.ts" <<EOF
-// Firstmate turn-end signal; written by fm-spawn.
 import { execFile } from "node:child_process";
 export default function (pi: any) {
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));

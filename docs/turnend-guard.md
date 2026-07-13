@@ -122,10 +122,10 @@ If Grok declines to load project hooks, this primary guard fails open and `fm-gu
 The hook command was fixed to reference `${GROK_WORKSPACE_ROOT:-}` directly everywhere instead of assigning it to `$root` first, and re-validated against grok 0.2.93 to fire and complete cleanly.
 See `docs/arm-pretool-check.md`'s "Harness wiring" section for the same Grok expansion requirement; that document's Grok hook shares the same fix.
 
-omp 16.3.12 was validated with scratch extensions and a committed extension probe.
+omp 16.4.8 was re-validated on 2026-07-13 with scratch extensions and a committed extension probe.
 Hook file used: a scratch `ext.ts` matching `.omp/extensions/fm-primary-turnend-guard.ts`, plus a committed `.omp/extensions/*.ts` probe for auto-discovery.
-Command run: `omp -p -e "$scratch/ext.ts" --auto-approve 'Say hi in exactly one word.'`.
-Observed output: a static `session_stop` handler returning `{ continue: true }` (BANANA probe) forced a continuation, and an async `session_stop` handler that awaited a spawned exit-2 subprocess (MANGO probe, mirroring `runGuard`) also forced the continuation.
+Command run: `omp -p --no-session --auto-approve -e "$scratch/session-stop-probe.ts" 'Reply exactly FIRST.'`.
+Observed output: the async `session_stop` handler awaited a spawned exit-2 subprocess, returned `{ continue: true, additionalContext }`, ran twice, and changed the print-mode final response to the forced `SECOND` continuation.
 Auto-discovery was confirmed separately: a committed `.omp/extensions/*.ts` file fired its `session_start` handler on launch with no `-e` wiring and no trust block, writing its load marker.
 omp caps forced continuations at 8 and skips subagents, so the extension's one-shot flag is belt-and-suspenders with omp's own cap.
 

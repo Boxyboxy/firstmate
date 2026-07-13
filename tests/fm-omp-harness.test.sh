@@ -277,9 +277,8 @@ test_omp_threads_thinking_effort() {
   pass "omp threads --thinking for low/high effort and never falls back to --effort"
 }
 
-# Effort/max 9 (REQUIRED): max omits --thinking but preserves --model (mirror
-# test_pi_omits_invalid_max_effort - omp has no max).
-test_omp_omits_invalid_max_effort() {
+# Effort/max 9 (REQUIRED): omp 16.4.8 accepts max on the --thinking axis.
+test_omp_threads_max_effort() {
   local rec id out status launch
   id=omp-max-o9
   rec=$(make_spawn_case omp-max omp "$id")
@@ -287,13 +286,12 @@ test_omp_omits_invalid_max_effort() {
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model omp-fast --effort max)
   status=$?
-  expect_code 0 "$status" "omp spawn with max effort should not pass an invalid flag"
+  expect_code 0 "$status" "omp spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" omp omp-fast max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "omp --auto-approve --model 'omp-fast' -e" \
-    "omp launch did not preserve --model when max effort was omitted"
-  assert_not_contains "$launch" "--thinking" "omp launch must omit --thinking max (omp has no max)"
-  pass "omp omits unsupported max effort but preserves --model"
+  assert_contains "$launch" "omp --auto-approve --model 'omp-fast' --thinking 'max' -e" \
+    "omp launch did not thread --thinking max after the 16.4.8 capability change"
+  pass "omp threads the supported max thinking effort"
 }
 
 # Meta 10 (REQUIRED): state/<id>.meta records harness=omp.
@@ -361,7 +359,7 @@ test_omp_crewmate_writes_turnend_ext
 test_omp_secondmate_launch_omits_ext
 test_omp_threads_model_flag
 test_omp_threads_thinking_effort
-test_omp_omits_invalid_max_effort
+test_omp_threads_max_effort
 test_omp_meta_records_harness
 test_omp_busy_signature_and_default_parity
 
