@@ -18,17 +18,29 @@ mkdir -p "$STATE"
 # could match as substrings (pi, omp) are anchored (^pi$, ^omp$).
 HARNESS_RE='claude|codex|opencode|grok|^pi$|^omp$'
 
+harness_comm_matches() {
+  printf '%s' "$(basename "$1")" | grep -qE "$HARNESS_RE"
+}
+
+interpreter_args_match() {
+  local args=$1 script
+  read -r _ script _ <<EOF
+$args
+EOF
+  [ -n "$script" ] && harness_comm_matches "$script"
+}
+
 harness_pid() {
   local pid=$$ comm args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
+    if harness_comm_matches "$comm"; then
       echo "$pid"; return 0
     fi
     # Bare interpreter (e.g. node): match the harness name in its script path.
     case "$comm" in
-      *node*|*python*) printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; } ;;
+      *node*|*python*) interpreter_args_match "$args" && { echo "$pid"; return 0; } ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
@@ -37,10 +49,19 @@ harness_pid() {
 }
 
 holder_alive() {  # true if $1 is a live process that looks like a harness
-  local pid=$1 comm
+  local pid=$1 comm args
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  printf '%s' "$(basename "$comm") $(ps -o args= -p "$pid" 2>/dev/null)" | grep -qE "$HARNESS_RE"
+  if harness_comm_matches "$comm"; then
+    return 0
+  fi
+  case "$comm" in
+    *node*|*python*)
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      interpreter_args_match "$args"
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 if [ "${1:-}" = "status" ]; then

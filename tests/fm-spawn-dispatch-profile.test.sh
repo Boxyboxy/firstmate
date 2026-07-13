@@ -80,6 +80,18 @@ make_seeded_secondmate_home() {
   printf 'charter for %s\n' "$id" > "$home/data/charter.md"
 }
 
+commit_project_omp_extension() {
+  local proj=$1 source=${2:-}
+  mkdir -p "$proj/.omp/extensions"
+  if [ -n "$source" ]; then
+    cp "$source" "$proj/.omp/extensions/fm-primary-turnend-guard.ts"
+  else
+    printf '%s\n' 'throw new Error("project extension executed");' > "$proj/.omp/extensions/project.ts"
+  fi
+  git -C "$proj" add .omp/extensions
+  git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'add omp extension'
+}
+
 run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
@@ -364,6 +376,59 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_omp_refuses_unapproved_project_extensions() {
+  local rec id out status
+  id=omp-project-ext-z17
+  rec=$(make_spawn_case omp-project-ext omp "$id")
+  read_case_record "$rec"
+  commit_project_omp_extension "$PROJ_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "omp spawn should refuse tracked project extensions without approval"
+  assert_contains "$out" "refusing omp launch because the project tracks auto-executed .omp/extensions code" \
+    "omp spawn did not explain the project-extension refusal"
+  assert_contains "$out" ".omp/extensions/project.ts" "omp refusal did not name the auto-executed file"
+  assert_contains "$out" "--allow-project-omp-extensions only after explicit captain approval" \
+    "omp refusal did not explain the explicit override"
+  assert_absent "$HOME_DIR/state/$id.meta" "omp extension refusal should happen before meta is written"
+  [ ! -s "$LAUNCH_LOG" ] || fail "omp extension refusal must happen before a launch command is sent"
+  pass "omp refuses unapproved tracked project extensions before spawning"
+}
+
+test_omp_allows_explicitly_approved_project_extensions() {
+  local rec id out status launch
+  id=omp-project-ext-approved-z18
+  rec=$(make_spawn_case omp-project-ext-approved omp "$id")
+  read_case_record "$rec"
+  commit_project_omp_extension "$PROJ_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --allow-project-omp-extensions)
+  status=$?
+  expect_code 0 "$status" "explicit approval should allow the omp project extension"
+  assert_contains "$out" "warning: launching omp with explicitly approved tracked project extensions" \
+    "approved omp launch did not surface the extension warning"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "omp --auto-approve" "approved omp extension launch did not reach omp"
+  pass "omp accepts tracked project extensions only through the explicit approval flag"
+}
+
+test_omp_allows_exact_firstmate_primary_guard() {
+  local rec id out status
+  id=omp-firstmate-guard-z19
+  rec=$(make_spawn_case omp-firstmate-guard omp "$id")
+  read_case_record "$rec"
+  commit_project_omp_extension "$PROJ_DIR" "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "the exact sole firstmate primary guard should be allowlisted"
+  assert_not_contains "$out" "refusing omp launch" "the exact firstmate primary guard was not allowlisted"
+  assert_contains "$out" "spawned $id harness=omp" "allowlisted firstmate guard did not reach the omp spawn"
+  pass "omp allowlists only the exact sole firstmate primary guard for self-work"
+}
+
 test_no_profile_keeps_claude_launch_unchanged
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
@@ -379,5 +444,8 @@ test_opencode_threads_model_and_ignores_effort_axis
 test_pi_omits_invalid_max_effort
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_omp_refuses_unapproved_project_extensions
+test_omp_allows_explicitly_approved_project_extensions
+test_omp_allows_exact_firstmate_primary_guard
 
 echo "# all fm-spawn-dispatch-profile tests passed"

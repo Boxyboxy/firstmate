@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--allow-project-omp-extensions] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
@@ -27,6 +27,11 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   --allow-project-omp-extensions bypasses omp's fail-closed check for tracked
+#   project `.omp/extensions` code. Use it only after explicit captain approval:
+#   omp auto-executes those files before the model reasons about the task, and
+#   firstmate launches omp with --auto-approve. An exact copy of firstmate's own
+#   sole tracked primary guard is allowlisted for firstmate-on-itself tasks.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -86,7 +91,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,83p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -123,6 +128,7 @@ HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+ALLOW_PROJECT_OMP_EXTENSIONS=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -151,6 +157,7 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --allow-project-omp-extensions) ALLOW_PROJECT_OMP_EXTENSIONS=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -262,6 +269,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 0 ] || shared_args+=(--allow-project-omp-extensions)
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -664,6 +672,31 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+
+omp_project_extension_preflight() {
+  local project=$1 tracked trusted
+  [ "$HARNESS" = omp ] || return 0
+  [ "$KIND" != secondmate ] || return 0
+  tracked=$(git -C "$project" ls-tree -r --name-only HEAD -- .omp/extensions 2>/dev/null || true)
+  [ -n "$tracked" ] || return 0
+  if [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 1 ]; then
+    echo "warning: launching omp with explicitly approved tracked project extensions:" >&2
+    printf '%s\n' "$tracked" | sed 's/^/  /' >&2
+    return 0
+  fi
+  trusted="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+  if [ "$tracked" = ".omp/extensions/fm-primary-turnend-guard.ts" ] \
+    && [ -f "$trusted" ] \
+    && git -C "$project" show HEAD:.omp/extensions/fm-primary-turnend-guard.ts 2>/dev/null | cmp -s - "$trusted"; then
+    return 0
+  fi
+  echo "error: refusing omp launch because the project tracks auto-executed .omp/extensions code:" >&2
+  printf '%s\n' "$tracked" | sed 's/^/  /' >&2
+  echo "omp runs tracked extensions before the model reasons about the task and firstmate passes --auto-approve. Select another verified harness, or pass --allow-project-omp-extensions only after explicit captain approval." >&2
+  return 1
+}
+
+omp_project_extension_preflight "$PROJ_ABS" || exit 1
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
