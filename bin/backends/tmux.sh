@@ -145,7 +145,7 @@ fm_backend_tmux_current_command() {  # <target>
 #   alive   - the foreground command is one of the verified harness binaries
 #             (claude, codex, opencode, grok matched as substrings, or an
 #             exact "omp" - each confirmed to run as its own process name,
-#             never wrapped by a generic interpreter; omp verified 16.3.12).
+#             never wrapped by a generic interpreter; omp re-verified 16.4.8).
 #   dead    - the foreground command is a bare shell: nothing is running in
 #             the pane, so a prior agent process has exited.
 #   unknown - anything else, INCLUDING a bare "node"/"python" interpreter

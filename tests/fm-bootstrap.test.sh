@@ -691,7 +691,7 @@ array profile without harness is flagged^{"rules":[{"when":"big feature","use":[
 unknown select is flagged^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"mystery"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unknown select: mystery
 array profile unsupported effort is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","effort":"max"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 omp verified harness with valid effort is accepted^{"rules":[{"when":"omp work","use":{"harness":"omp","model":"omp-4","effort":"high"}}]}^grep^CREW_DISPATCH: active config/crew-dispatch.json
-unsupported omp max effort is flagged^{"rules":[{"when":"deep omp work","use":{"harness":"omp","model":"omp-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: omp:max
+omp max effort is accepted^{"rules":[{"when":"deep omp work","use":{"harness":"omp","model":"omp-4","effort":"max"}}]}^grep^CREW_DISPATCH: active config/crew-dispatch.json
 ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }

@@ -50,7 +50,7 @@
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
 # (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
 # omp: "⟦esc⟧" (interrupt hint; omp's "Working…" uses a U+2026 ellipsis so
-# "Working\.\.\." does not match omp - verified omp 16.3.12).
+# "Working\.\.\." does not match omp - re-verified omp 16.4.8).
 FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|⟦esc⟧'
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
