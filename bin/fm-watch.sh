@@ -109,7 +109,7 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # locale fragility of matching grok's braille spinner glyph directly).
 # omp: "⟦esc⟧" (interrupt hint; omp's "Working…" uses a U+2026 unicode ellipsis,
 # so the ASCII "Working\.\.\." token above does NOT match omp - only the
-# bracketed esc hint is reliable, verified omp 16.3.12).
+# bracketed esc hint is reliable, re-verified omp 16.4.8).
 BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|⟦esc⟧'}
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
