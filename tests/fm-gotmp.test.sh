@@ -75,7 +75,7 @@ SH
 exit 0
 SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
-  # fm-tasks-axi-lib.sh: stub (teardown sources it). Report no backend so
+  # fm-tasks-axi-lib.sh: stub (teardown sources it). Report unavailable so
   # backlog_refresh_reminder takes the plain-message path; no tasks-axi here.
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
 fm_tasks_axi_backend_available() { return 1; }
@@ -140,8 +140,11 @@ test_teardown_removes_tasktmp_dir() {
   # Sanity: dir + contents exist before teardown.
   [ -d "$task_tmp/gotmp" ] || fail "precondition: gotmp missing before teardown"
   # Run the REAL teardown against the fake root.
-  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
-    || fail "teardown exited non-zero with a valid tasktmp"
+  if ! FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >"$fake/teardown.stdout" 2>"$fake/teardown.stderr"; then
+    sed 's/^/teardown stdout: /' "$fake/teardown.stdout" >&2
+    sed 's/^/teardown stderr: /' "$fake/teardown.stderr" >&2
+    fail "teardown exited non-zero with a valid tasktmp"
+  fi
   [ ! -e "$task_tmp" ] \
     || fail "teardown did not remove the tasktmp dir ($task_tmp still exists)"
   pass "fm-teardown removes the dir pointed to by tasktmp= in meta"
