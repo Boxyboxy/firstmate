@@ -73,6 +73,8 @@ Pick whichever one matches your subscription and workflow.
 
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
 
+omp (Oh My Pi) is verified and supported as a primary harness as well; it is Pi-derived and uses a background-notify wake cycle, but it is newly verified, so co-primary status is premature.
+
 ### Install and launch
 
 ```sh
