@@ -98,7 +98,9 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on?.("session_start", markLoaded);
+  pi.on?.("session_start", () => {
+    markLoaded();
+  });
 
   pi.on("tool_call", async (event) => {
     if (event.type !== "tool_call" || event.toolName !== "bash") return {};
