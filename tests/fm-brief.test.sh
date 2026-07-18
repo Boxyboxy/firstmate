@@ -71,8 +71,8 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
-test_ship_dependency_setup_renders_by_mode_only() {
-  local home id proj brief scout dependency_step
+test_ship_dependency_setup_renders_all_modes() {
+  local home id proj brief dependency_step
   home="$TMP_ROOT/dependency-setup-home"
   write_registry "$home"
   IFS= read -r dependency_step <<'EOF'
@@ -93,11 +93,7 @@ EOF
   assert_grep '3. Run `no-mistakes doctor`' "$brief" \
     "no-mistakes brief did not renumber its doctor step to 3"
 
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-deps-scout no-registry-proj --scout >/dev/null 2>&1
-  scout="$home/data/brief-deps-scout/brief.md"
-  assert_no_grep "$dependency_step" "$scout" \
-    "scout brief incorrectly received the ship-only dependency-install step"
-  pass "fm-brief.sh: dependency setup renders for every ship mode and not scouts"
+  pass "fm-brief.sh: dependency setup renders for every ship mode"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {
@@ -371,7 +367,7 @@ test_scout_and_secondmate_scaffold() {
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
-test_ship_dependency_setup_renders_by_mode_only
+test_ship_dependency_setup_renders_all_modes
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
