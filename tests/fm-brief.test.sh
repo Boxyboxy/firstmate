@@ -71,6 +71,35 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+test_ship_dependency_setup_renders_by_mode_only() {
+  local home id proj brief scout dependency_step
+  home="$TMP_ROOT/dependency-setup-home"
+  write_registry "$home"
+  IFS= read -r dependency_step <<'EOF'
+2. Install this worktree's dependencies before any tooling or tests: it was freshly cut and has no .venv/node_modules, so language servers and test runs are degraded until you do. Detect the stack and run the project's setup - Python (pyproject.toml/requirements*.txt): create a .venv and install (prefer `uv sync`, else `pip install -r requirements*.txt` plus any requirements-dev.txt); Node/TypeScript (package.json): `npm ci` (or the project's package manager). Prefer any setup command the README/AGENTS.md documents. Skip only if there's no dependency manifest.
+EOF
+
+  for id_proj in "brief-deps-nomistakes:no-registry-proj" "brief-deps-direct:direct-proj" "brief-deps-local:local-proj"; do
+    id=${id_proj%%:*}
+    proj=${id_proj##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "$dependency_step" "$brief" \
+      "$id: ship brief missing the shared dependency-install step"
+  done
+
+  brief="$home/data/brief-deps-nomistakes/brief.md"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_grep '3. Run `no-mistakes doctor`' "$brief" \
+    "no-mistakes brief did not renumber its doctor step to 3"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-deps-scout no-registry-proj --scout >/dev/null 2>&1
+  scout="$home/data/brief-deps-scout/brief.md"
+  assert_no_grep "$dependency_step" "$scout" \
+    "scout brief incorrectly received the ship-only dependency-install step"
+  pass "fm-brief.sh: dependency setup renders for every ship mode and not scouts"
+}
+
 test_faster_paths_use_configured_authority_without_stacked_review() {
   local home id brief
   home="$TMP_ROOT/configured-authority-home"
@@ -334,7 +363,7 @@ test_scout_and_secondmate_scaffold() {
     || fail "fm-brief.sh secondmate scaffold exited non-zero"
   brief="$BRIEF_HOME/data/brief-sm-q6/brief.md"
   assert_present "$brief" "secondmate charter was not scaffolded"
-  assert_grep "persistent domain supervisor" "$brief" \
+  assert_grep "persistent second mate managed by the main firstmate" "$brief" \
     "secondmate charter must declare its role"
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
@@ -342,6 +371,7 @@ test_scout_and_secondmate_scaffold() {
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_ship_dependency_setup_renders_by_mode_only
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
