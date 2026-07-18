@@ -56,6 +56,12 @@ function markLoaded() {
   return true;
 }
 
+function runSessionstartNudge(): string {
+  const result = spawnSync(`${root}/bin/fm-sessionstart-nudge.sh`, [], { encoding: "utf8" });
+  if (result.status !== 0) return "";
+  return result.stdout.trim();
+}
+
 function runGuard(): Promise<{ code: number; stderr: string }> {
   const { promise, resolve: resolveResult } = Promise.withResolvers<{ code: number; stderr: string }>();
   const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
@@ -98,8 +104,15 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on?.("session_start", () => {
+  pi.on?.("session_start", (event) => {
+    const reason = String((event as { reason?: unknown }).reason ?? "");
+    const nudge = ["startup", "new", "resume"].includes(reason) ? runSessionstartNudge() : "";
     markLoaded();
+    if (!nudge) return;
+    try {
+      pi.sendMessage({ customType: "firstmate-sessionstart-nudge", content: nudge, display: false });
+    } catch {
+    }
   });
 
   pi.on("tool_call", async (event) => {
