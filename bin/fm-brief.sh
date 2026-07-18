@@ -33,7 +33,7 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
-# Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Ship briefs begin with a worktree-isolation assertion before the branch step, then require dependency installation before tooling or tests so fresh worktrees have usable language servers and test environments.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
@@ -302,8 +302,7 @@ EOF
 )
     ;;
   *)  # no-mistakes (default)
-    SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+    SETUP2="3. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
@@ -341,7 +340,9 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b fm/$ID\`
+2. Install this worktree's dependencies before any tooling or tests: it was freshly cut and has no .venv/node_modules, so language servers and test runs are degraded until you do. Detect the stack and run the project's setup - Python (pyproject.toml/requirements*.txt): create a .venv and install (prefer \`uv sync\`, else \`pip install -r requirements*.txt\` plus any requirements-dev.txt); Node/TypeScript (package.json): \`npm ci\` (or the project's package manager). Prefer any setup command the README/AGENTS.md documents. Skip only if there's no dependency manifest.
+$SETUP2
 
 # Rules
 $RULE1
