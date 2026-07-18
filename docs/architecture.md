@@ -105,6 +105,7 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 `fm-guard.sh` prints the repair command on the next mutable fleet action, while `bin/fm-session-start.sh` reports the same condition through bootstrap as a `TANGLE:` line at session start.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
+Because a freshly cut worktree has no gitignored environments such as `.venv` or `node_modules`, every ship brief then requires installing the project's dependencies right after branch creation, before any tooling or tests, so language servers and test runs work from the start.
 
 ## No-mistakes gate authority boundary
 
