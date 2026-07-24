@@ -5,9 +5,15 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+unset NO_MISTAKES_GATE
+
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
-NUDGE_LINE="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-operational-input.sh"
+NUDGE_TEXT="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
+fm_operational_input_encode session-start "$NUDGE_TEXT" NUDGE_LINE \
+  || fail "could not construct expected session-start nudge"
 fm_git_identity fmtest fmtest@example.invalid
 
 make_primary() {
@@ -33,12 +39,14 @@ expect_silent_zero() {
 }
 
 test_genuine_primary_nudges() {
-  local root="$TMP_ROOT/primary" out status=0
+  local root="$TMP_ROOT/primary" out prefix_hex status=0
   make_primary "$root"
   out=$(run_nudge "$root") || status=$?
   expect_code 0 "$status" "genuine primary nudge"
   [ "$out" = "$NUDGE_LINE" ] || fail "genuine primary printed unexpected output: $out"
-  pass "fm-sessionstart-nudge: a genuine primary gets exactly one instruction line"
+  prefix_hex=$(printf '%s' "$out" | head -c 3 | od -An -tx1 | tr -d ' \n')
+  [ "$prefix_hex" = e281a3 ] || fail "genuine primary nudge lost its U+2063 operational marker: $prefix_hex"
+  pass "fm-sessionstart-nudge: a genuine primary gets one explicitly marked instruction line"
 }
 
 test_gate_env_is_silent() {
@@ -105,7 +113,7 @@ test_opencode_plugin_delivers_exact_nudge_once() {
   local root="$TMP_ROOT/opencode-primary" out status=0
   make_primary "$root"
   cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
-    "$ROOT/bin/fm-gate-refuse-lib.sh" "$root/bin/"
+    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
   chmod +x "$root/bin/fm-sessionstart-nudge.sh"
   out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
     WORKTREE="$root" EXPECTED="$NUDGE_LINE" node --input-type=module 2>&1 <<'EOF'
@@ -167,6 +175,7 @@ test_tracked_harness_registration() {
   assert_contains "$pi_plugin" '["startup", "new", "resume"]' "Pi SessionStart handler has the wrong reason allowlist"
   assert_contains "$pi_plugin" 'fm-sessionstart-nudge.sh' "Pi SessionStart handler does not invoke the wrapper"
   assert_contains "$pi_plugin" 'firstmate-sessionstart-nudge' "Pi SessionStart handler does not inject a custom context message"
+  assert_contains "$pi_plugin" 'details: { kind: "session-start" }' "Pi SessionStart context does not retain its exact structured kind"
   assert_contains "$pi_plugin" 'pi.sendMessage' "Pi SessionStart handler does not use the context-safe message API"
 
   omp_plugin=$(cat "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts")

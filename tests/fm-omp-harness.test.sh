@@ -165,7 +165,7 @@ SH
 # --- crewmate / secondmate launch construction ------------------------------
 
 # Spawn/crewmate 4 (REQUIRED): the captured launch is
-# `omp --auto-approve ... -e '<state>/<id>.omp-ext.ts' "$(cat '<brief>')"`.
+# `omp --auto-approve ... -e '<state>/<id>.omp-ext.ts' "$(<opinput> encode launch-brief < '<brief>')"`.
 test_omp_crewmate_launch_shape() {
   local rec id out status launch
   id=omp-crew-o4
@@ -180,9 +180,9 @@ test_omp_crewmate_launch_shape() {
   assert_contains "$launch" "omp --auto-approve" "omp crewmate launch missing base command + autonomy flag"
   assert_contains "$launch" "-e '$HOME_DIR/state/$id.omp-ext.ts'" \
     "omp crewmate launch missing the absolute -e turn-end signal extension"
-  assert_contains "$launch" "\"\$(cat '$HOME_DIR/data/$id/brief.md')\"" \
-    "omp crewmate launch missing the quoted brief"
-  pass "omp crewmate launch is omp --auto-approve + -e <state>/<id>.omp-ext.ts + brief"
+  assert_contains "$launch" "\"\$('$ROOT/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\"" \
+    "omp crewmate launch missing the operational-input-encoded brief"
+  pass "omp crewmate launch is omp --auto-approve + -e <state>/<id>.omp-ext.ts + encoded brief"
 }
 
 # Spawn/crewmate 5 (REQUIRED): the -e extension is written to the state override
@@ -220,7 +220,8 @@ test_omp_secondmate_launch_omits_ext() {
     "omp secondmate launch did not resolve the omp harness"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "omp --auto-approve" "omp secondmate launch missing base command"
-  assert_contains "$launch" "\"\$(cat " "omp secondmate launch missing the brief"
+  assert_contains "$launch" "\"\$('$ROOT/bin/fm-operational-input.sh' encode launch-brief < " \
+    "omp secondmate launch missing the operational-input-encoded brief"
   assert_not_contains "$launch" ".omp-ext.ts" \
     "omp secondmate launch must omit the -e turn-end signal extension (guard auto-discovers)"
   assert_absent "$HOME_DIR/state/$id.omp-ext.ts" \
