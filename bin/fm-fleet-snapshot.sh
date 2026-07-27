@@ -20,11 +20,19 @@
 #     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids, and
 #     captain_actionable fields. Repeated blocker tokens remain ordered; a blocker
 #     resolves only when its structured record is Done, and missing ids stay open.
+#     Every record also carries progress (see below) on the two-stage
+#     under-way/landed backlog ladder.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
+#     hints.done_events is the bounded list of `done:` lines the append-only
+#     status log ever recorded (FM_SNAPSHOT_DONE_EVENTS, default 20, most recent
+#     kept). It is durable terminal-milestone evidence for progress: unlike
+#     current_state, which is a live read that decays once a run stops being
+#     attributable, an appended line is never retracted. Only bin/fm-progress.jq
+#     interprets the wording.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
@@ -32,6 +40,24 @@
 #     endpoint.exists is the cheap backend endpoint-presence read.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
+#     progress is the delivery-ladder position (see below).
+#   progress (tasks[] and backlog.records[]): derived by bin/fm-progress.jq, the
+#     single owner of both the ladder and its bar rendering. Shape:
+#     {ladder,stages[],stage,reached,total,fraction,flag,evidence}. ladder is
+#     chosen by kind and mode - ship-no-mistakes (also the empty/unknown-mode
+#     default), ship-direct-pr, ship-local-only, scout, backlog, or none for a
+#     persistent secondmate, which has no finish line and so renders no bar.
+#     Derivation is monotone high-water over durable milestone evidence, never
+#     current state: reached is the highest stage index whose evidence is
+#     present, so a transient state cannot pull the bar backwards. An exceptional
+#     state surfaces separately as flag (failed, blocked, decision,
+#     awaiting-merge, or paused, in that precedence) and never lowers reached.
+#     The merged stage is never reachable from a live task because a merged ship
+#     task is torn down and its metadata is gone, so a live ship task tops out one
+#     stage short; reaching that top stage raises the awaiting-merge flag, which
+#     is what distinguishes finished work sitting on the captain from work still
+#     under way.
+#     Renderers call fm_progress_bar on this object; they never re-derive it.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -83,6 +109,7 @@ FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
 FM_SNAPSHOT_SECONDMATE_CHILDREN=${FM_SNAPSHOT_SECONDMATE_CHILDREN:-20}
 FM_SNAPSHOT_SECONDMATE_QUEUED=${FM_SNAPSHOT_SECONDMATE_QUEUED:-20}
 FM_SNAPSHOT_SECONDMATE_DECISIONS=${FM_SNAPSHOT_SECONDMATE_DECISIONS:-20}
+FM_SNAPSHOT_DONE_EVENTS=${FM_SNAPSHOT_DONE_EVENTS:-20}
 FM_SNAPSHOT_TERMINAL_LINES=${FM_SNAPSHOT_TERMINAL_LINES:-8}
 FM_SNAPSHOT_TERMINAL_BYTES=${FM_SNAPSHOT_TERMINAL_BYTES:-4096}
 FM_SNAPSHOT_TERMINAL_TIMEOUT=${FM_SNAPSHOT_TERMINAL_TIMEOUT:-2}
@@ -113,6 +140,7 @@ validate_positive_bound FM_SNAPSHOT_SECONDMATE_MAX_BYTES "$FM_SNAPSHOT_SECONDMAT
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_CHILDREN "$FM_SNAPSHOT_SECONDMATE_CHILDREN"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_QUEUED "$FM_SNAPSHOT_SECONDMATE_QUEUED"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_DECISIONS "$FM_SNAPSHOT_SECONDMATE_DECISIONS"
+validate_positive_bound FM_SNAPSHOT_DONE_EVENTS "$FM_SNAPSHOT_DONE_EVENTS"
 validate_positive_bound FM_SNAPSHOT_TERMINAL_LINES "$FM_SNAPSHOT_TERMINAL_LINES"
 validate_positive_bound FM_SNAPSHOT_TERMINAL_BYTES "$FM_SNAPSHOT_TERMINAL_BYTES"
 validate_positive_bound FM_SNAPSHOT_TERMINAL_TIMEOUT "$FM_SNAPSHOT_TERMINAL_TIMEOUT"
@@ -255,7 +283,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   fi
 
   # shellcheck disable=SC2094
-  jq -Rn --arg path "$backlog" '
+  jq -L "$SCRIPT_DIR" -Rn --arg path "$backlog" '
+    include "fm-progress";
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def section_state:
       if . == "In flight" then "in_flight"
@@ -393,6 +422,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
               (.state == "queued" and .kind == "captain" and .hold_kind == "captain"
                and .hold_reason != null and (.unresolved_blocker_ids | length) == 0)
         else . end)
+    | .records |= map(. + {progress: fm_progress_of_backlog(.)})
     | del(.section,.order)
   ' < "$backlog"
 }
@@ -401,7 +431,7 @@ task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json done_events_json
 
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -480,6 +510,19 @@ task_json_lines() {
       agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
     fi
 
+    # Durable terminal-milestone evidence. current_state is a LIVE read that
+    # decays (fm-crew-state.sh falls back run-step -> pane -> status-log once a
+    # run stops being attributable), so a milestone keyed off it would drop the
+    # bar backwards between snapshots. The status log is append-only, so every
+    # `done:` line it ever recorded is permanent evidence. The wording is
+    # interpreted only by bin/fm-progress.jq, which stays the single ladder owner.
+    done_events_json='[]'
+    if [ -f "$status_log" ]; then
+      done_events_json=$(grep -E '^[[:space:]]*done:' "$status_log" 2>/dev/null \
+        | tail -"$FM_SNAPSHOT_DONE_EVENTS" \
+        | jq -R -s '[splits("\n") | select(length > 0)]')
+    fi
+
     [ -f "$report_path" ] && report_present=1 || report_present=0
     meta_json=$(path_present_json "$meta")
     status_json=$event_json
@@ -512,6 +555,7 @@ task_json_lines() {
       --argjson home_path "$home_json" \
       --argjson endpoint_exists "$endpoint_exists" \
       --argjson open_decisions "$open_decisions_json" \
+      --argjson done_events "$done_events_json" \
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
@@ -543,6 +587,7 @@ task_json_lines() {
           blocked_event:$blocked_event,
           open_decisions:$open_decisions,
           scout_report_present:$report_present,
+          done_events:$done_events,
           last_event_text:$last_event_raw
         },
         actions:(
@@ -556,7 +601,8 @@ task_json_lines() {
              return_channel_note:null}
           end)
       }'
-  done | jq -s 'sort_by(.id)'
+  done | jq -L "$SCRIPT_DIR" -s 'include "fm-progress";
+    sort_by(.id) | map(. + {progress: fm_progress_of_task(.)})'
 }
 
 # Main-home current-inventory validity: same orphan / unstructured-current checks

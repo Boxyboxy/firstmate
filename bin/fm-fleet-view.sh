@@ -28,7 +28,8 @@ command -v jq >/dev/null 2>&1 || { echo "fm-fleet-view: jq not found" >&2; exit 
 
 SNAPSHOT=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json) || exit $?
 
-printf '%s\n' "$SNAPSHOT" | jq -r '
+printf '%s\n' "$SNAPSHOT" | jq -L "$SCRIPT_DIR" -r '
+  include "fm-progress";
   def dash($v): if $v == null or $v == "" then "-" else $v end;
   def endpoint_exists($t):
     if $t.endpoint.exists == null then "unknown"
@@ -51,13 +52,13 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     if $t.kind == "secondmate" then "\($t.actions.send) - \($t.actions.watch)"
     else $t.actions.watch end;
   def task_row($t):
-    "| \($t.id) | \($t.current_state.state) / \($t.current_state.source) | \($t.kind) | \(dash($t.backlog.repo // $t.project)) | \($t.backend) | \(endpoint_of($t)) | \(artifact($t)) | \(path_of($t)) | \(action_of($t)) |";
+    "| \($t.id) | \($t.current_state.state) / \($t.current_state.source) | \(fm_progress_bar($t.progress; 10)) | \($t.kind) | \(dash($t.backlog.repo // $t.project)) | \($t.backend) | \(endpoint_of($t)) | \(artifact($t)) | \(path_of($t)) | \(action_of($t)) |";
   def blocker($r):
     if ($r.blocked_by // "") == "" then "-"
     elif ($r.blocked_reason // "") == "" then $r.blocked_by
     else "\($r.blocked_by) - \($r.blocked_reason)" end;
   def backlog_row($r):
-    "| \($r.id // "-") | \(dash($r.title // $r.raw)) | \(dash($r.repo)) | \(dash($r.kind)) | \(blocker($r)) | \(dash($r.pr_url // $r.report_path // $r.local_note)) |";
+    "| \($r.id // "-") | \(dash($r.title // $r.raw)) | \(fm_progress_bar($r.progress; 10)) | \(dash($r.repo)) | \(dash($r.kind)) | \(blocker($r)) | \(dash($r.pr_url // $r.report_path // $r.local_note)) |";
 
   "# Fleet View",
   "",
@@ -68,8 +69,8 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   (if (.tasks | length) == 0 then
     "No live task metadata found."
    else
-    "| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    "| ID | Current | Progress | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     (.tasks[] | task_row(.))
    end),
   "",
@@ -77,8 +78,8 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   (if ([.backlog.records[]? | select(.state == "queued")] | length) == 0 then
     "No queued backlog records found."
    else
-    "| ID | Title | Repo | Kind | Blocked By | Artifact |",
-    "| --- | --- | --- | --- | --- | --- |",
+    "| ID | Title | Progress | Repo | Kind | Blocked By | Artifact |",
+    "| --- | --- | --- | --- | --- | --- | --- |",
     (.backlog.records[] | select(.state == "queued") | backlog_row(.))
    end),
   "",
@@ -86,8 +87,8 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   (if ([.backlog.records[]? | select(.state == "done")] | length) == 0 then
     "No done backlog records found."
    else
-    "| ID | Title | Repo | Kind | Blocked By | Artifact |",
-    "| --- | --- | --- | --- | --- | --- |",
+    "| ID | Title | Progress | Repo | Kind | Blocked By | Artifact |",
+    "| --- | --- | --- | --- | --- | --- | --- |",
     (.backlog.records[] | select(.state == "done") | backlog_row(.))
    end),
   "",

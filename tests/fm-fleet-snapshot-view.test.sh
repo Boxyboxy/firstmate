@@ -529,13 +529,13 @@ EOF
       and .paths.report.present == true
   ' >/dev/null || fail "bold task did not join to override-backed backlog and report"
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" "$VIEW")
-  assert_contains "$view" "| bold-task | done / status-log | scout | alpha | tmux | present | $data/bold-task/report.md" \
+  assert_contains "$view" "| bold-task | done / status-log | [##########] 100% | scout | alpha | tmux | present | $data/bold-task/report.md" \
     "view should render bold in-flight row from snapshot"
-  assert_contains "$view" "| blocked-reason | Blocked Reason | beta | ship | queued-comma - waits on queued-comma | - |" \
+  assert_contains "$view" "| blocked-reason | Blocked Reason | [..........] 0% | beta | ship | queued-comma - waits on queued-comma | - |" \
     "view should render blocked reason without title metadata"
-  assert_contains "$view" "| done-bracket-pr | Done Bracket PR | gamma | ship | - | https://github.com/kunchenguid/firstmate/pull/43 |" \
+  assert_contains "$view" "| done-bracket-pr | Done Bracket PR | [##########] 100% | gamma | ship | - | https://github.com/kunchenguid/firstmate/pull/43 |" \
     "view should render bracketed PR artifact outside the title"
-  assert_contains "$view" "| done-note | Done Note | delta | ship | - | local main |" \
+  assert_contains "$view" "| done-note | Done Note | [##########] 100% | delta | ship | - | local main |" \
     "view should render local-only done artifact outside the title"
   pass "snapshot parses tasks-axi rows and respects operational overrides"
 }
@@ -546,15 +546,15 @@ test_view_renders_snapshot() {
   write_fixture "$home"
   fakebin=$(make_fakebin "$home")
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
-  assert_contains "$view" "| ship-task | working / pane | ship | alpha | tmux | present | https://github.com/kunchenguid/firstmate/pull/9" \
+  assert_contains "$view" "| ship-task | working / pane | [#######...] 67% | ship | alpha | tmux | present | https://github.com/kunchenguid/firstmate/pull/9" \
     "view should render ship row from snapshot"
-  assert_contains "$view" "| queued-task | Queued Task | alpha | ship | ship-task | -" \
+  assert_contains "$view" "| queued-task | Queued Task | [..........] 0% | alpha | ship | ship-task | -" \
     "view should render queued backlog row"
-  assert_contains "$view" "| done-task | Done Task | alpha | ship | - | https://github.com/kunchenguid/firstmate/pull/7 |" \
+  assert_contains "$view" "| done-task | Done Task | [##########] 100% | alpha | ship | - | https://github.com/kunchenguid/firstmate/pull/7 |" \
     "view should render done backlog row"
   assert_contains "$view" "bin/fm-send.sh fm-secondmate-task" \
     "view should show secondmate send guidance"
-  assert_contains "$view" "| secondmate-task | working / status-log | secondmate | $home/secondmate-home | tmux | present / alive |" \
+  assert_contains "$view" "| secondmate-task | working / status-log | - | secondmate | $home/secondmate-home | tmux | present / alive |" \
     "view should show secondmate endpoint agent liveness"
   assert_not_contains "$view" "fm-peek.sh fm-secondmate-task" \
     "view must not tell firstmate to routinely peek secondmates"
@@ -575,9 +575,9 @@ test_view_renders_dead_secondmate_agent_status() {
   printf 'working: watching delegated scope\n' > "$home/state/dead-secondmate.status"
   fakebin=$(make_fakebin "$home")
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
-  assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead |" \
+  assert_contains "$view" "| dead-secondmate | unknown / none | - | secondmate | $home/secondmate-home | tmux | present / dead |" \
     "view should distinguish a present secondmate endpoint from a dead agent"
-  assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead | - | $home/secondmate-home (absent) |" \
+  assert_contains "$view" "| dead-secondmate | unknown / none | - | secondmate | $home/secondmate-home | tmux | present / dead | - | $home/secondmate-home (absent) |" \
     "view should show a recorded missing secondmate home path"
   pass "fleet view renders secondmate agent liveness"
 }
@@ -755,8 +755,411 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# --- progress ladder + bar (bin/fm-progress.jq) ------------------------------
+# The module is the single owner of both derivation and rendering, so these
+# exercise it directly and the snapshot/view tests below only prove the wiring.
+
+PROGRESS_MODULE="$ROOT/bin/fm-progress.jq"
+PROGRESS_LIB=$(dirname "$PROGRESS_MODULE")
+
+# progress_of <kind> <mode> <task-overlay-json> -> progress object
+progress_of() {
+  jq -L "$PROGRESS_LIB" -n --argjson overlay "$3" --arg kind "$1" --arg mode "$2" '
+    include "fm-progress";
+    ({kind:$kind, mode:$mode,
+      paths:{status_log:{present:false}, report:{present:false}},
+      current_state:{state:"unknown", source:"none"},
+      pr:{url:null},
+      hints:{blocked_event:false, pending_decision:false}} * $overlay)
+    | fm_progress_of_task(.)'
+}
+
+# progress_field <kind> <mode> <overlay> <jq-path>
+progress_field() {
+  progress_of "$1" "$2" "$3" | jq -r "$4"
+}
+
+test_progress_ladder_selection() {
+  local row kind mode want got
+  [ -f "$PROGRESS_MODULE" ] \
+    || fail "the single progress owner bin/fm-progress.jq is missing"
+  # kind + mode -> ladder|total. Empty mode must fall back to no-mistakes,
+  # which is fm-brief.sh's default delivery mode.
+  for row in \
+    'ship|no-mistakes|ship-no-mistakes|6' \
+    'ship||ship-no-mistakes|6' \
+    'ship|not-a-real-mode|ship-no-mistakes|6' \
+    'ship|direct-PR|ship-direct-pr|4' \
+    'ship|local-only|ship-local-only|4' \
+    'scout|scout|scout|3' \
+    'scout|no-mistakes|scout|3' \
+    'secondmate|secondmate|none|0'
+  do
+    IFS='|' read -r kind mode want got <<EOF
+$row
+EOF
+    local actual
+    actual=$(progress_field "$kind" "$mode" '{}' '"\(.ladder)|\(.total)"')
+    [ "$actual" = "$want|$got" ] \
+      || fail "kind=$kind mode=$mode should pick $want|$got, got $actual"
+  done
+  pass "progress ladder is selected from kind and mode, empty mode defaulting to no-mistakes"
+}
+
+test_progress_stage_derivation_per_ladder() {
+  local row mode overlay want actual
+  # mode|task-overlay|expected "stage/reached"
+  for row in \
+    'no-mistakes|{}|dispatched/1' \
+    'no-mistakes|{"paths":{"status_log":{"present":true}}}|working/2' \
+    'no-mistakes|{"current_state":{"state":"working","source":"run-step"}}|validating/3' \
+    'no-mistakes|{"pr":{"url":"https://x/pull/1"}}|pr-open/4' \
+    'no-mistakes|{"pr":{"url":"https://x/pull/1"},"hints":{"done_events":["done: PR https://x/pull/1 checks green"]}}|checks-green/5' \
+    'direct-PR|{}|dispatched/1' \
+    'direct-PR|{"current_state":{"state":"working","source":"pane"}}|working/2' \
+    'direct-PR|{"pr":{"url":"https://x/pull/1"}}|pr-open/3' \
+    'local-only|{}|dispatched/1' \
+    'local-only|{"paths":{"status_log":{"present":true}}}|working/2' \
+    'local-only|{"hints":{"done_events":["done: ready in branch fm/x"]}}|ready/3'
+  do
+    IFS='|' read -r mode overlay want <<EOF
+$row
+EOF
+    actual=$(progress_field ship "$mode" "$overlay" '"\(.stage)/\(.reached)"')
+    [ "$actual" = "$want" ] \
+      || fail "ship mode=$mode overlay=$overlay should reach $want, got $actual"
+  done
+  # Scout tops out at its report, which is its deliverable.
+  actual=$(progress_field scout scout '{}' '"\(.stage)/\(.reached)"')
+  [ "$actual" = "dispatched/1" ] || fail "fresh scout should be dispatched/1, got $actual"
+  actual=$(progress_field scout scout '{"paths":{"report":{"present":true},"status_log":{"present":true}}}' \
+    '"\(.stage)/\(.reached)/\(.fraction)"')
+  [ "$actual" = "report/3/1" ] || fail "scout with a report should be report/3/1, got $actual"
+  pass "progress stage derivation follows each ladder's milestone evidence"
+}
+
+# `merged` is deliberately unreachable: a merged ship task is torn down and its
+# metadata is gone, so a live ship task must top out one stage short.
+test_progress_merged_stage_is_never_reached_live() {
+  local mode actual
+  for mode in no-mistakes direct-PR local-only; do
+    actual=$(progress_field ship "$mode" \
+      '{"paths":{"status_log":{"present":true},"report":{"present":true}},"pr":{"url":"https://x/pull/1"},"hints":{"done_events":["done: PR https://x/pull/1 checks green","done: ready in branch fm/x"]}}' \
+      '"\(.stage)/\(.reached)/\(.total)"')
+    case "$actual" in
+      merged/*) fail "ship mode=$mode must never reach merged from a live task, got $actual" ;;
+    esac
+    printf '%s' "$actual" | grep -Eq '^(checks-green|pr-open|ready)/[0-9]+/[0-9]+$' \
+      || fail "ship mode=$mode should top out one stage short, got $actual"
+  done
+  pass "the merged stage is never reachable from a live task"
+}
+
+# The monotone high-water rule: a transient state must never pull the bar
+# backwards. A task that recorded a PR and then hit a decision hold stays at the
+# PR stage and raises a flag instead of dropping back to working.
+test_progress_is_monotone_high_water() {
+  local actual
+  actual=$(progress_field ship no-mistakes \
+    '{"pr":{"url":"https://x/pull/1"},"current_state":{"state":"parked","source":"status-log"},"hints":{"pending_decision":true,"blocked_event":false}}' \
+    '"\(.stage)/\(.reached)/\(.flag)"')
+  [ "$actual" = "pr-open/4/decision" ] \
+    || fail "a PR plus a decision hold must stay at pr-open and flag decision, got $actual"
+  # The same is true for a failure after a PR: the bar holds, the flag changes.
+  actual=$(progress_field ship no-mistakes \
+    '{"pr":{"url":"https://x/pull/1"},"current_state":{"state":"failed","source":"pane"}}' \
+    '"\(.stage)/\(.reached)/\(.flag)"')
+  [ "$actual" = "pr-open/4/failed" ] \
+    || fail "a PR plus a failure must stay at pr-open and flag failed, got $actual"
+  pass "progress is monotone high-water; exceptional states raise a flag, never a lower fill"
+}
+
+# Terminal milestones must key off the append-only status log, never off
+# current_state. current_state is a LIVE read that decays: fm-crew-state.sh falls
+# back run-step -> pane -> status-log once a run stops being attributable. A
+# milestone keyed off it would drop checks-green from 5/6 to 4/6 between two
+# snapshots of unchanged work, which is exactly the bar going backwards.
+test_progress_terminal_milestones_survive_current_state_decay() {
+  local src actual
+  for src in run-step pane status-log none; do
+    actual=$(progress_field ship no-mistakes \
+      "{\"pr\":{\"url\":\"https://x/pull/1\"},\"current_state\":{\"state\":\"done\",\"source\":\"$src\"},\"hints\":{\"done_events\":[\"done: PR https://x/pull/1 checks green\"]}}" \
+      '"\(.stage)/\(.reached)"')
+    [ "$actual" = "checks-green/5" ] \
+      || fail "checks-green must hold as current_state decays to $src, got $actual"
+    actual=$(progress_field ship local-only \
+      "{\"current_state\":{\"state\":\"unknown\",\"source\":\"$src\"},\"hints\":{\"done_events\":[\"done: ready in branch fm/x\"]}}" \
+      '"\(.stage)/\(.reached)"')
+    [ "$actual" = "ready/3" ] \
+      || fail "ready must hold as current_state decays to $src, got $actual"
+  done
+  # A later unrelated appended line must not retract a recorded milestone either.
+  actual=$(progress_field ship no-mistakes \
+    '{"pr":{"url":"https://x/pull/1"},"current_state":{"state":"working","source":"pane"},"hints":{"done_events":["done: PR https://x/pull/1 checks green"],"last_event_text":"working: answering a follow-up"}}' \
+    '"\(.stage)/\(.reached)"')
+  [ "$actual" = "checks-green/5" ] \
+    || fail "a later status line must not retract checks-green, got $actual"
+  # direct-PR reports only `done: PR <url>`, which is never proof of green checks.
+  actual=$(progress_field ship no-mistakes \
+    '{"pr":{"url":"https://x/pull/1"},"hints":{"done_events":["done: PR https://x/pull/1"]}}' \
+    '"\(.stage)/\(.reached)"')
+  [ "$actual" = "pr-open/4" ] \
+    || fail "a bare done: PR line must not prove checks green, got $actual"
+  pass "terminal milestones key off the append-only log and survive current_state decay"
+}
+
+test_progress_flag_precedence() {
+  local row overlay want actual
+  # overlay|expected flag. Precedence: failed, blocked, decision,
+  # awaiting-merge, paused, then null.
+  for row in \
+    '{"current_state":{"state":"failed","source":"pane"},"hints":{"blocked_event":true,"pending_decision":true}}|failed' \
+    '{"hints":{"blocked_event":true,"pending_decision":true}}|blocked' \
+    '{"hints":{"blocked_event":false,"pending_decision":true}}|decision' \
+    '{"current_state":{"state":"parked","source":"run-step"}}|decision' \
+    '{"current_state":{"state":"paused","source":"pane"}}|paused' \
+    '{"current_state":{"state":"working","source":"pane"}}|null'
+  do
+    IFS='|' read -r overlay want <<EOF
+$row
+EOF
+    actual=$(progress_field ship no-mistakes "$overlay" '.flag')
+    [ "$actual" = "$want" ] \
+      || fail "overlay=$overlay should flag $want, got $actual"
+  done
+  pass "progress flag precedence is failed, blocked, decision, awaiting-merge, paused, null"
+}
+
+# Both decision arms are load-bearing and neither subsumes the other. A
+# no-mistakes run parked at an awaiting_approval or fix_review gate never
+# appends a needs-decision: status line, so the event-fold arm alone misses it.
+test_progress_decision_flag_has_two_independent_arms() {
+  local actual
+  actual=$(progress_field ship no-mistakes \
+    '{"current_state":{"state":"parked","source":"run-step"},"hints":{"pending_decision":false,"blocked_event":false}}' \
+    '.flag')
+  [ "$actual" = decision ] \
+    || fail "a run parked at a gate with no needs-decision event must flag decision, got $actual"
+  actual=$(progress_field ship no-mistakes \
+    '{"current_state":{"state":"working","source":"pane"},"hints":{"pending_decision":true,"blocked_event":false}}' \
+    '.flag')
+  [ "$actual" = decision ] \
+    || fail "a folded needs-decision event must flag decision without a parked state, got $actual"
+  # The parked arm must not outrank a real failure or blocker above it.
+  actual=$(progress_field ship no-mistakes \
+    '{"current_state":{"state":"parked","source":"run-step"},"hints":{"blocked_event":true,"pending_decision":false}}' \
+    '.flag')
+  [ "$actual" = blocked ] || fail "blocked must still outrank a parked decision, got $actual"
+  # A parked run still holds its high-water stage rather than dropping back.
+  actual=$(progress_field ship no-mistakes \
+    '{"pr":{"url":"https://x/pull/1"},"current_state":{"state":"parked","source":"run-step"}}' \
+    '"\(.stage)/\(.flag)"')
+  [ "$actual" = "pr-open/decision" ] \
+    || fail "a parked run must hold its stage and flag decision, got $actual"
+  pass "the decision flag fires from a folded event or a parked gate, independently"
+}
+
+# awaiting-merge is the most important marker on the board: it means the work is
+# finished and sitting on the captain. Without it, "done, waiting on you" renders
+# as a bare bar indistinguishable from "still grinding".
+test_progress_awaiting_merge_per_ship_ladder() {
+  local row mode overlay want actual
+  for row in \
+    'no-mistakes|{"pr":{"url":"https://x/pull/1"},"hints":{"done_events":["done: PR https://x/pull/1 checks green"]}}|checks-green' \
+    'direct-PR|{"pr":{"url":"https://x/pull/1"},"hints":{"done_events":["done: PR https://x/pull/1"]}}|pr-open' \
+    'local-only|{"hints":{"done_events":["done: ready in branch fm/x"]}}|ready'
+  do
+    IFS='|' read -r mode overlay want <<EOF
+$row
+EOF
+    actual=$(progress_field ship "$mode" "$overlay" '"\(.stage)/\(.flag)"')
+    [ "$actual" = "$want/awaiting-merge" ] \
+      || fail "ship mode=$mode at its top stage should flag $want/awaiting-merge, got $actual"
+  done
+  # It outranks paused but yields to a still-open decision.
+  actual=$(progress_field ship local-only \
+    '{"hints":{"done_events":["done: ready in branch fm/x"],"pending_decision":true,"blocked_event":false}}' '.flag')
+  [ "$actual" = decision ] || fail "an open decision must outrank awaiting-merge, got $actual"
+  # A scout's report is its deliverable, not something awaiting a merge.
+  actual=$(progress_field scout scout \
+    '{"paths":{"report":{"present":true},"status_log":{"present":true}},"hints":{"done_events":["done: report ready"]}}' '.flag')
+  [ "$actual" = null ] || fail "a completed scout must not be flagged awaiting-merge, got $actual"
+  pass "awaiting-merge fires at the top reachable stage of every ship ladder only"
+}
+
+test_progress_secondmate_has_no_ladder() {
+  local out
+  out=$(jq -L "$PROGRESS_LIB" -rn '
+    include "fm-progress";
+    ({kind:"secondmate", mode:"secondmate",
+      paths:{status_log:{present:true}, report:{present:false}},
+      current_state:{state:"working", source:"pane"},
+      pr:{url:null},
+      hints:{blocked_event:false, pending_decision:false}}
+     | fm_progress_of_task(.)) as $p
+    | "\($p.ladder)/\($p.total)/\($p.stage)/\($p.fraction)/\(fm_progress_bar($p; 10))"')
+  [ "$out" = "none/0/null/null/-" ] \
+    || fail "a persistent secondmate has no finish line and must render no bar, got $out"
+  pass "a persistent secondmate gets ladder none and renders no bar"
+}
+
+test_progress_of_backlog_records() {
+  local row state want actual
+  for row in \
+    'queued|backlog/2/null/0/queued' \
+    'in_flight|backlog/2/under-way/1/under way' \
+    'done|backlog/2/landed/2/landed' \
+    'nonsense|backlog/2/null/0/unknown backlog state'
+  do
+    IFS='|' read -r state want <<EOF
+$row
+EOF
+    actual=$(jq -L "$PROGRESS_LIB" -rn --arg state "$state" '
+      include "fm-progress";
+      fm_progress_of_backlog({state:$state}) as $p
+      | "\($p.ladder)/\($p.total)/\($p.stage)/\($p.reached)/\($p.evidence)"')
+    [ "$actual" = "$want" ] \
+      || fail "backlog state=$state should derive $want, got $actual"
+  done
+  # Backlog records carry no worker telemetry, so they never carry a flag.
+  actual=$(jq -L "$PROGRESS_LIB" -rn '
+    include "fm-progress"; [fm_progress_of_backlog({state:"in_flight"}).flag] | tostring')
+  [ "$actual" = "[null]" ] || fail "backlog records must never carry a flag, got $actual"
+  pass "backlog records derive the two-stage under-way/landed ladder"
+}
+
+test_progress_bar_formatting() {
+  local row p want actual
+  # progress-object|expected bar at width 10
+  for row in \
+    '{"ladder":"backlog","total":2,"reached":0,"fraction":0,"flag":null}|[..........] 0%' \
+    '{"ladder":"scout","total":3,"reached":1,"fraction":0.33,"flag":null}|[###.......] 33%' \
+    '{"ladder":"ship-no-mistakes","total":6,"reached":3,"fraction":0.5,"flag":null}|[#####.....] 50%' \
+    '{"ladder":"ship-no-mistakes","total":6,"reached":3,"fraction":0.5,"flag":"decision"}|[#####.....] 50% !decision' \
+    '{"ladder":"ship-no-mistakes","total":6,"reached":5,"fraction":0.83,"flag":"awaiting-merge"}|[########..] 83% !awaiting-merge' \
+    '{"ladder":"backlog","total":2,"reached":2,"fraction":1,"flag":null}|[##########] 100%' \
+    '{"ladder":"none","total":0,"reached":0,"fraction":null,"flag":null}|-' \
+    'null|-'
+  do
+    IFS='|' read -r p want <<EOF
+$row
+EOF
+    actual=$(jq -L "$PROGRESS_LIB" -rn --argjson p "$p" '
+      include "fm-progress"; fm_progress_bar($p; 10)')
+    [ "$actual" = "$want" ] || fail "bar for $p should be '$want', got '$actual'"
+  done
+  # ASCII only: locale- and font-sensitive glyphs must never reach agent-parsed output.
+  actual=$(jq -L "$PROGRESS_LIB" -rn '
+    include "fm-progress";
+    fm_progress_bar({ladder:"scout",total:3,reached:2,fraction:0.67,flag:"blocked"}; 10)')
+  printf '%s' "$actual" | LC_ALL=C grep -q '^[][#.[:alnum:][:space:]!%-]*$' \
+    || fail "the bar must stay ASCII, got '$actual'"
+  pass "the progress bar renders ASCII fills, integer percent, and an optional flag suffix"
+}
+
+# End-to-end proof that the snapshot surfaces the append-only done: lines the
+# module reads, using real status logs rather than injected hints.
+test_snapshot_surfaces_durable_done_events() {
+  local home fakebin out
+  home=$(make_home done-events)
+  mkdir -p "$home/projects/green" "$home/projects/ready" "$home/projects/opened"
+  fm_write_meta "$home/state/green-ship.meta" \
+    "window=firstmate:fm-green-ship" "worktree=$home/projects/green" "project=alpha" \
+    "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=https://github.com/kunchenguid/firstmate/pull/21"
+  # A later working line after the milestone must not retract it.
+  printf 'working: implementing\ndone: PR https://github.com/kunchenguid/firstmate/pull/21 checks green\nworking: answering a follow-up\n' \
+    > "$home/state/green-ship.status"
+  fm_write_meta "$home/state/ready-ship.meta" \
+    "window=firstmate:fm-ready-ship" "worktree=$home/projects/ready" "project=alpha" \
+    "harness=codex" "kind=ship" "mode=local-only"
+  printf 'done: ready in branch fm/ready-ship\n' > "$home/state/ready-ship.status"
+  fm_write_meta "$home/state/opened-ship.meta" \
+    "window=firstmate:fm-opened-ship" "worktree=$home/projects/opened" "project=alpha" \
+    "harness=codex" "kind=ship" "mode=direct-PR" \
+    "pr=https://github.com/kunchenguid/firstmate/pull/22"
+  printf 'done: PR https://github.com/kunchenguid/firstmate/pull/22\n' \
+    > "$home/state/opened-ship.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    (.tasks[] | select(.id == "green-ship")
+      | (.hints.done_events | length) == 1
+        and .progress.stage == "checks-green"
+        and .progress.reached == 5
+        and .progress.flag == "awaiting-merge")
+    and (.tasks[] | select(.id == "ready-ship")
+      | .progress.stage == "ready" and .progress.reached == 3
+        and .progress.flag == "awaiting-merge")
+    and (.tasks[] | select(.id == "opened-ship")
+      | .progress.stage == "pr-open" and .progress.reached == 3
+        and .progress.flag == "awaiting-merge")
+  ' >/dev/null || fail "durable done: evidence did not reach progress derivation: $out"
+  pass "the snapshot surfaces durable done: lines and they drive terminal milestones"
+}
+
+test_snapshot_and_view_carry_progress() {
+  local home fakebin out view
+  home=$(make_home progress-wiring)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  # The field is purely additive; the schema string must not move.
+  printf '%s' "$out" | jq -e '.schema == "fm-fleet-snapshot.v1"' >/dev/null \
+    || fail "adding progress must not change the snapshot schema string"
+  printf '%s' "$out" | jq -e '
+    (.tasks | length) > 0
+      and all(.tasks[]; .progress != null and (.progress | has("ladder") and has("stages")
+        and has("stage") and has("reached") and has("total") and has("fraction")
+        and has("flag") and has("evidence")))
+  ' >/dev/null || fail "every task must carry a full progress object: $out"
+  printf '%s' "$out" | jq -e '
+    (.backlog.records | length) > 0
+      and all(.backlog.records[]; .progress.ladder == "backlog" and .progress.total == 2)
+  ' >/dev/null || fail "every backlog record must carry the backlog progress ladder: $out"
+  # ship-task has a recorded PR and a live working pane, so it sits at pr-open
+  # with no flag: its status-log decision was already cleared by the lifecycle
+  # reconciliation this snapshot owns.
+  printf '%s' "$out" | jq -e '
+    (.tasks[] | select(.id == "ship-task") | .progress.stage) == "pr-open"
+      and (.tasks[] | select(.id == "ship-task") | .progress.reached) == 4
+      and (.tasks[] | select(.id == "ship-task") | .progress.flag) == null
+      and (.tasks[] | select(.id == "scout-task") | .progress.ladder) == "scout"
+      and (.tasks[] | select(.id == "scout-task") | .progress.stage) == "report"
+      and (.tasks[] | select(.id == "secondmate-task") | .progress.ladder) == "none"
+      and (.backlog.records[] | select(.id == "done-task") | .progress.stage) == "landed"
+  ' >/dev/null || fail "snapshot progress derivation wrong on the fixture: $out"
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  assert_contains "$view" "| ID | Current | Progress | Kind |" \
+    "under way table should carry a Progress column"
+  assert_contains "$view" "| ID | Title | Progress | Repo |" \
+    "queued and done tables should carry a Progress column"
+  assert_contains "$view" "| ship-task | working / pane | [#######...] 67% |" \
+    "view should render the ship task bar at its recorded-PR stage"
+  assert_contains "$view" "| secondmate-task | working / status-log | - |" \
+    "view should render no bar for a persistent secondmate"
+  assert_contains "$view" "| done-task | Done Task | [##########] 100% |" \
+    "view should render a landed backlog row at 100%"
+  assert_contains "$view" "| queued-task | Queued Task | [..........] 0% |" \
+    "view should render a queued backlog row at 0%"
+  pass "snapshot emits progress on tasks and backlog records, and the view renders it"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_progress_ladder_selection
+test_progress_stage_derivation_per_ladder
+test_progress_merged_stage_is_never_reached_live
+test_progress_terminal_milestones_survive_current_state_decay
+test_progress_is_monotone_high_water
+test_progress_flag_precedence
+test_progress_decision_flag_has_two_independent_arms
+test_progress_awaiting_merge_per_ship_ladder
+test_progress_secondmate_has_no_ladder
+test_progress_of_backlog_records
+test_progress_bar_formatting
+test_snapshot_surfaces_durable_done_events
+test_snapshot_and_view_carry_progress
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state

@@ -274,7 +274,7 @@ EOF
 fi
 
 # --- projection: canonical snapshot -> fm-bearings.v1 model (JSON) ----------
-MODEL=$(printf '%s' "$SNAP" | jq \
+MODEL=$(printf '%s' "$SNAP" | jq -L "$SCRIPT_DIR" \
   --arg home "$HOME_LABEL" \
   --arg now "$NOW" \
   --arg prs "$PR_STATUS" \
@@ -302,6 +302,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
   --argjson candidate_prs "$CANDIDATE_PRS" '
+  include "fm-progress";
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
   def round_robin_landed($n):
@@ -376,12 +377,14 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | {id, kind,
         state: .current_state.state,
         doing: ((.current_state.detail // "") as $d
-                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
+                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90)),
+        progress: fm_progress_bar(.progress; 10)
       } ]
      + [ $secondmate_views[]
          | select(.bearings_state == "active_child_work")
          | {id,kind:"secondmate",state:.bearings_state,
-            doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
+            doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90)),
+            progress:"-"} ]) as $in_flight_all
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",

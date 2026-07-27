@@ -1534,6 +1534,61 @@ EOF
   pass "counterfactual meta clears main inventory warning and projects the live task"
 }
 
+# in_flight mixes task-derived and secondmate-derived rows. The TOON tabular
+# encoder emits one header taken from the FIRST row, so a missing key on either
+# branch would silently drop progress for the whole table. This proves both
+# branches carry it, and that a real ship task carries a rendered bar rather than
+# the raw progress object.
+test_in_flight_rows_carry_progress_on_both_branches() {
+  local home fakebin mate json toon
+  home=$(make_home in-flight-progress)
+  : > "$home/data/secondmates.md"
+  mate="$TMP_ROOT/in-flight-progress-mate"
+  make_valid_secondmate_home delegate "$mate"
+  append_secondmate_registry "$home" delegate "$mate"
+  mkdir -p "$mate/projects/worker" "$home/projects/local"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] delegate-worker - Delegated work (repo: delegated) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/delegate-worker.meta" \
+    "window=firstmate:fm-delegate-worker" "worktree=$mate/projects/worker" \
+    "project=delegated" "harness=codex" "kind=ship" "mode=no-mistakes"
+  printf 'working: delegated work under way\n' > "$mate/state/delegate-worker.status"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] local-ship - Local ship task (repo: alpha) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/local-ship.meta" \
+    "window=firstmate:fm-local-ship" "worktree=$home/projects/local" "project=alpha" \
+    "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=https://github.com/kunchenguid/firstmate/pull/11"
+  printf 'working: implementing\n' > "$home/state/local-ship.status"
+
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight | length) == 2
+      and all(.in_flight[]; has("progress"))
+      and ([.in_flight[] | select(.kind == "secondmate") | .progress] == ["-"])
+      and (.in_flight[] | select(.id == "local-ship") | .progress | test("^\\[#+\\.*\\] [0-9]+%"))
+  ' >/dev/null || fail "in_flight must carry progress on both branches: $json"
+  # Uniform keys mean the TOON header names progress exactly once.
+  toon=$(run "$home" "$fakebin")
+  printf '%s\n' "$toon" | grep -q '^in_flight\[2\]{id,kind,state,doing,progress}:' \
+    || fail "TOON in_flight header must carry a single uniform progress column: $toon"
+  pass "in_flight rows carry progress on both the task and secondmate branches"
+}
+
 test_mixed_secondmate_roles_partial_state_and_captain_readiness() {
   local home fakebin hibit wheel sshhip ha canonical json
   home=$(make_home mixed-domain-regressions)
@@ -1663,6 +1718,14 @@ EOF
       and (.secondmates | any(.id == "sshhip" and .state == "unknown"
         and (.reason | contains("unreadable-child"))))
   ' >/dev/null || fail "end-to-end mixed-domain projection was wrong: $json"
+  # in_flight is built from two branches (task-derived and secondmate-derived).
+  # The TOON tabular encoder takes its header from the FIRST row, so every row
+  # must carry the same keys or a later row's progress would be dropped.
+  printf '%s' "$json" | jq -e '
+    (.in_flight | length) == 3
+      and all(.in_flight[]; has("progress"))
+      and all(.in_flight[]; .progress == "-")
+  ' >/dev/null || fail "secondmate-derived in_flight rows must carry progress as \"-\": $json"
 
   sed '/unreadable-child/a\
 - [ ] ordinary-orphan - Unowned release task (repo: sshhip) (kind: ship)' \
@@ -1918,6 +1981,7 @@ test_captains_call_anti_leak
 test_main_orphan_in_flight_is_disclosed_not_invented
 test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
+test_in_flight_rows_carry_progress_on_both_branches
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
 test_chat_contract_four_sections
