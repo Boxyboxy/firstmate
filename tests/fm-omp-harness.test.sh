@@ -346,6 +346,10 @@ test_omp_busy_signature_and_default_parity() {
   # omp busy: the bracketed interrupt hint rides both the thinking + tool phases.
   printf '%s\n' '⠧ Working… ⟦esc⟧' | grep -qiE "$omp_re" \
     || fail "omp busy signature must match omp's ⟦esc⟧ interrupt hint"
+  # The shared default also carries omp's unambiguous ⟦esc⟧ so the harness-agnostic
+  # composer/submit fallback (fm-send submit-ack, away-mode read) classifies omp busy.
+  printf '%s\n' '⠧ Working… ⟦esc⟧' | grep -qiE "$tmux_re" \
+    || fail "shared busy default must match omp's ⟦esc⟧ so the harness-agnostic fallback sees omp busy"
   # omp idle composer: rounded box, no busy footer.
   if printf '%s\n' '❯ ' | grep -qiE "$omp_re"; then
     fail "omp busy signature must not match a clean omp idle line"
@@ -384,6 +388,10 @@ test_omp_busy_signature_behavioral() {
   if fm_pane_is_busy fake codex; then
     fail "omp's ⟦esc⟧ signature leaked into codex's harness-scoped matcher"
   fi
+  # No-box fallback path (allow_busy=1): an omp busy footer must classify empty
+  # (Enter queued) so fm-send does not false-report a swallowed steer for omp.
+  [ "$(fm_tmux_composer_row_state '⠧ Working… ⟦esc⟧' 0 1)" = empty ] \
+    || fail "omp busy footer on the no-box fallback must classify empty (queued), not pending"
   unset -f tmux
   pass "fm_pane_is_busy classifies omp's ⟦esc⟧ footer busy, ignores idle, and does not leak across harnesses"
 }

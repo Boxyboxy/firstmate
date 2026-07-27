@@ -364,7 +364,7 @@ It does not pass `--permission-mode`, so the passive hook cannot escalate the pr
 Project-local Grok hooks require folder trust, verified with launch-time `--trust`; if the primary firstmate checkout is not trusted for Grok hooks, this primary guard fails open and `fm-guard.sh` remains the next-command alarm.
 Grok's primary watcher protocol is Claude-shaped background-notify around `bin/fm-watch-arm.sh`; the passive Stop hook is only a backstop for blind turn ends.
 
-## omp (VERIFIED 2026-07-13, omp 16.4.8)
+## omp (VERIFIED 2026-07-13, omp 16.4.8; core re-verified 2026-07-27 on omp 17.1.5 - busy token `⟦esc⟧` present-busy/absent-idle, pane process name `omp`, launch flags `--auto-approve`/`--model`/`--thinking`/`-e`/`--no-session`, `OMPCODE=1` in tool subprocesses, and the `session_stop` forced-continuation contract; interrupt/exit/`--resume`/trust-dialog not re-checked on 17.1.5)
 
 omp (Oh My Pi) is Pi-derived - it shares Pi's `-e/--extension` wiring, `pi.on(...)` API, `--thinking` effort axis, `--smol`/`PI_SMOL_MODEL`, and `~/.omp/agent/` sessions - so `pi` is the closest launch template.
 But omp sets BOTH `OMPCODE=1` and `CLAUDECODE=1` (detection checks `OMPCODE` first), has a real approval system (`--auto-approve`), a named `omp` pane process (so secondmate liveness is confident), a native `.omp/extensions/*.ts` auto-discovery root, and a `session_stop` hook that blocks a turn by RETURNING `{ continue: true, additionalContext }` - a third turn-end class (direct-blocking-via-return-value), distinct from claude/codex exit-2 blocking and pi/grok/opencode passive follow-up.
