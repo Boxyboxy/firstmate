@@ -14,6 +14,11 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
+# Isolated empty config dir: without it FM_CONFIG_OVERRIDE='' resolves to the
+# repo's own config/, so a captain's live config/crew-dispatch.json would trip
+# the dispatch backstop and make this hermetic test green-or-red on local files.
+EMPTY_CONFIG="$TMP_ROOT/empty-config"
+mkdir -p "$EMPTY_CONFIG"
 export FM_BACKEND=tmux
 
 # Clear ambient firstmate overrides so the behavior test owns its environment.
@@ -23,7 +28,7 @@ run_spawn() {
     FM_STATE_OVERRIDE='' \
     FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' \
-    FM_CONFIG_OVERRIDE='' \
+    FM_CONFIG_OVERRIDE="$EMPTY_CONFIG" \
     FM_SPAWN_NO_GUARD=1 \
     "$SPAWN" "$@" 2>&1
 }

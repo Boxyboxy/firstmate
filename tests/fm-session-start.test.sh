@@ -731,7 +731,9 @@ SH
   i=1
   while [ "$i" -le 40 ]; do
     (
-      harness_pid=$BASHPID
+      # $BASHPID is unset on bash 3.2 (macOS system bash); derive the subshell's
+      # own pid portably so each of the 40 acquirers gets a distinct harness pid.
+      harness_pid=$(exec sh -c 'echo $PPID')
       : > "$home/state/harness-$harness_pid"
       : > "$ready/$i"
       while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
