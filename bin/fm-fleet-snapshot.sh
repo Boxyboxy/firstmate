@@ -431,7 +431,7 @@ task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json done_events_json
+  local open_decisions_tsv open_decisions_json done_events_json status_line
 
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -516,11 +516,19 @@ task_json_lines() {
     # bar backwards between snapshots. The status log is append-only, so every
     # `done:` line it ever recorded is permanent evidence. The wording is
     # interpreted only by bin/fm-progress.jq, which stays the single ladder owner.
+    # The leading verb is read with fm-classify-lib.sh's status_line_verb, the one
+    # owner of that grammar, so an optional `[key=<slug>]` token before the colon
+    # is stripped exactly as every other status consumer strips it.
     done_events_json='[]'
     if [ -f "$status_log" ]; then
-      done_events_json=$(grep -E '^[[:space:]]*done:' "$status_log" 2>/dev/null \
-        | tail -"$FM_SNAPSHOT_DONE_EVENTS" \
-        | jq -R -s '[splits("\n") | select(length > 0)]')
+      done_events_json=$(
+        while IFS= read -r status_line || [ -n "$status_line" ]; do
+          [ "$(status_line_verb "$status_line")" = "done" ] || continue
+          printf '%s\n' "$status_line"
+        done < "$status_log" \
+          | tail -"$FM_SNAPSHOT_DONE_EVENTS" \
+          | jq -R -s '[splits("\n") | select(length > 0)]'
+      )
     fi
 
     [ -f "$report_path" ] && report_present=1 || report_present=0

@@ -812,7 +812,7 @@ test_progress_stage_derivation_per_ladder() {
   for row in \
     'no-mistakes|{}|dispatched/1' \
     'no-mistakes|{"paths":{"status_log":{"present":true}}}|working/2' \
-    'no-mistakes|{"current_state":{"state":"working","source":"run-step"}}|validating/3' \
+    'no-mistakes|{"current_state":{"state":"working","source":"run-step"}}|working/2' \
     'no-mistakes|{"pr":{"url":"https://x/pull/1"}}|pr-open/4' \
     'no-mistakes|{"pr":{"url":"https://x/pull/1"},"hints":{"done_events":["done: PR https://x/pull/1 checks green"]}}|checks-green/5' \
     'direct-PR|{}|dispatched/1' \
@@ -893,6 +893,34 @@ test_progress_terminal_milestones_survive_current_state_decay() {
     [ "$actual" = "ready/3" ] \
       || fail "ready must hold as current_state decays to $src, got $actual"
   done
+  # No rung may be held up by current_state at all. `validating` once keyed off
+  # source == "run-step" and dropped 3/6 back to 2/6 the moment attribution was
+  # lost, so it now shares pr-open's durable evidence: the fill must depend only
+  # on the recorded PR, identically across every source value.
+  for src in run-step pane status-log none; do
+    actual=$(progress_field ship no-mistakes \
+      "{\"paths\":{\"status_log\":{\"present\":true}},\"current_state\":{\"state\":\"working\",\"source\":\"$src\"}}" \
+      '"\(.stage)/\(.reached)"')
+    [ "$actual" = "working/2" ] \
+      || fail "a PR-less task must stay at working as current_state reads $src, got $actual"
+    actual=$(progress_field ship no-mistakes \
+      "{\"paths\":{\"status_log\":{\"present\":true}},\"current_state\":{\"state\":\"working\",\"source\":\"$src\"},\"pr\":{\"url\":\"https://x/pull/1\"}}" \
+      '"\(.stage)/\(.reached)"')
+    [ "$actual" = "pr-open/4" ] \
+      || fail "a task with a PR must hold pr-open as current_state reads $src, got $actual"
+  done
+  # A raw last event of any verb must never satisfy a terminal milestone: only
+  # the snapshot's verb-filtered done_events list can.
+  actual=$(progress_field ship no-mistakes \
+    '{"pr":{"url":"https://x/pull/1"},"hints":{"last_event_text":"working: rebased onto merged #76, checks green upstream"}}' \
+    '"\(.stage)/\(.reached)"')
+  [ "$actual" = "pr-open/4" ] \
+    || fail "a non-done last event must not prove checks green, got $actual"
+  actual=$(progress_field ship local-only \
+    '{"hints":{"last_event_text":"working: ready in branch soon"}}' \
+    '"\(.stage)/\(.reached)"')
+  [ "$actual" = "dispatched/1" ] \
+    || fail "a non-done last event must not prove ready, got $actual"
   # A later unrelated appended line must not retract a recorded milestone either.
   actual=$(progress_field ship no-mistakes \
     '{"pr":{"url":"https://x/pull/1"},"current_state":{"state":"working","source":"pane"},"hints":{"done_events":["done: PR https://x/pull/1 checks green"],"last_event_text":"working: answering a follow-up"}}' \
@@ -1067,8 +1095,11 @@ test_snapshot_surfaces_durable_done_events() {
     "window=firstmate:fm-green-ship" "worktree=$home/projects/green" "project=alpha" \
     "harness=codex" "kind=ship" "mode=no-mistakes" \
     "pr=https://github.com/kunchenguid/firstmate/pull/21"
-  # A later working line after the milestone must not retract it.
-  printf 'working: implementing\ndone: PR https://github.com/kunchenguid/firstmate/pull/21 checks green\nworking: answering a follow-up\n' \
+  # A later working line after the milestone must not retract it. The keyed
+  # `done [key=<slug>]:` form must be collected too: the verb is read with
+  # fm-classify-lib.sh's status_line_verb, which strips the key token, so a
+  # second parser that matched a bare `done:` prefix would silently drop it.
+  printf 'working: implementing\ndone: PR https://github.com/kunchenguid/firstmate/pull/21 checks green\nworking: answering a follow-up\ndone [key=followup]: PR https://github.com/kunchenguid/firstmate/pull/21 still checks green\n' \
     > "$home/state/green-ship.status"
   fm_write_meta "$home/state/ready-ship.meta" \
     "window=firstmate:fm-ready-ship" "worktree=$home/projects/ready" "project=alpha" \
@@ -1084,7 +1115,9 @@ test_snapshot_surfaces_durable_done_events() {
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     (.tasks[] | select(.id == "green-ship")
-      | (.hints.done_events | length) == 1
+      | (.hints.done_events | length) == 2
+        and (.hints.done_events | any(startswith("done [key=followup]:")))
+        and (.hints.done_events | all(startswith("working:") | not))
         and .progress.stage == "checks-green"
         and .progress.reached == 5
         and .progress.flag == "awaiting-merge")

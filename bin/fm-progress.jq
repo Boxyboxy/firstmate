@@ -47,13 +47,17 @@ def fm_progress_stages($ladder):
   else []
   end;
 
-# Every `done:` line the append-only status log ever recorded, plus the last
-# event as a fallback for callers that carry no done_events. These are permanent:
-# unlike current_state, which is a live read that decays once a run stops being
-# attributable, an appended line is never retracted. Terminal milestones key off
-# this so the bar cannot drop backwards between snapshots.
+# Every `done:` line the append-only status log ever recorded. These are
+# permanent: unlike current_state, which is a live read that decays once a run
+# stops being attributable, an appended line is never retracted. Terminal
+# milestones key off this so the bar cannot drop backwards between snapshots.
+#
+# Only lines the snapshot already verified to carry the `done` status verb are
+# admitted. hints.last_event_text is deliberately NOT folded in: it is the raw
+# last line whatever its verb, so a `working: rebased onto merged #76` style line
+# would satisfy a terminal milestone by prose alone.
 def fm_progress_done_events($t):
-  (($t.hints.done_events // []) + [$t.hints.last_event_text // ""])
+  ($t.hints.done_events // [])
   | map(select(type == "string" and . != ""));
 
 # Durable evidence for one stage of a live task.
@@ -65,7 +69,15 @@ def fm_progress_task_reached($t; $stage):
     ($t.paths.status_log.present == true)
     or (($t.current_state.state // "unknown") != "unknown")
   elif $stage == "validating" then
-    ($t.current_state.source == "run-step") or ($t.pr.url != null)
+    # current_state.source == "run-step" would be the natural live signal here,
+    # and it is exactly the signal the monotone rule forbids: fm-crew-state.sh
+    # falls back run-step -> pane -> status-log the moment a run stops being
+    # attributable, so an unchanged task would drop 3/6 back to 2/6 in the whole
+    # window before a PR exists. A recorded PR is the only durable proof that
+    # validation happened, so this rung shares pr-open's evidence rather than
+    # holding a stage up on a read that decays. An honest ladder that skips a
+    # rung beats a bar that moves backwards.
+    $t.pr.url != null
   elif $stage == "pr-open" then
     $t.pr.url != null
   elif $stage == "checks-green" then
@@ -93,7 +105,7 @@ def fm_progress_task_reached($t; $stage):
 def fm_progress_evidence($stage):
   if $stage == "dispatched" then "metadata recorded"
   elif $stage == "working" then "worker observed"
-  elif $stage == "validating" then "validation run attributed"
+  elif $stage == "validating" then "PR recorded"
   elif $stage == "pr-open" then "PR recorded"
   elif $stage == "checks-green" then "validation reported checks green"
   elif $stage == "ready" then "branch reported ready"
