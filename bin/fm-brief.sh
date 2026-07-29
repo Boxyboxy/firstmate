@@ -35,6 +35,9 @@
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
+# Ship and scout scaffolds state the ABSOLUTE firstmate path for any report or
+# evidence output, because a relative data/ path resolves inside the disposable
+# worktree and is destroyed with it at cleanup.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -285,7 +288,8 @@ The report is the only thing that survives, so anything worth keeping must be in
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 # Definition of done
-Write your findings to \`$DATA/$ID/report.md\`.
+Write your findings to the absolute path \`$DATA/$ID/report.md\`.
+Use that absolute path, never a relative \`data/...\` one: a relative path lands inside this worktree, and the worktree is destroyed at cleanup.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
@@ -375,7 +379,8 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+2. Stay inside this worktree; the only files you may write outside it are the status file below and any report or evidence this task asks for.
+   A report or evidence file goes at the absolute path \`$DATA/$ID/report.md\` (or a named file beside it under \`$DATA/$ID/\`), never at a relative \`data/...\` one: a relative path lands inside this worktree, and the worktree is destroyed at cleanup.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`

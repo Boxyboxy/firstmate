@@ -73,9 +73,18 @@ case " $* " in
     ;;
 esac
 SH
+  # `pr checks` answers a green rollup so the merge wrapper's red-PR refusal
+  # (bin/fm-pr-merge.sh) sees an established, non-failing check state; these
+  # cases exercise URL derivation and poll safety, not the check gate.
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "pr checks")
+    printf 'summary: "%s"\nchecks[1]{name,conclusion}:\n  Lint shell scripts,pass\n' \
+      "${FM_TEST_GH_AXI_CHECKS_SUMMARY:-1 passed, 0 failed, 1 total}"
+    exit 0 ;;
+esac
 exit "${FM_TEST_GH_AXI_RC:-0}"
 SH
   # Plain glab, reproducing the real CLI's contract: its field output on stdout

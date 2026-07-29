@@ -598,6 +598,39 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# A bare relative `data/<id>/...` path in a generated definition of done is a
+# defect: three crewmates wrote evidence to one, the file landed inside the
+# disposable worktree, and it was lost when the worktree was returned. Both
+# scaffolds must name the absolute firstmate path and say why.
+test_evidence_paths_are_absolute() {
+  local home id brief
+  home="$TMP_ROOT/evidence-path-home"
+  mkdir -p "$home/data"
+
+  id="brief-evidence-ship"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "ship brief was not scaffolded"
+  assert_grep "$home/data/$id/report.md" "$brief" \
+    "ship brief did not name the absolute firstmate path for report or evidence output"
+  assert_grep "the worktree is destroyed at cleanup" "$brief" \
+    "ship brief did not say a worktree path does not survive cleanup"
+  assert_no_grep '`data/'"$id"'/report.md`' "$brief" \
+    "ship brief still offers a bare relative evidence path"
+
+  id="brief-evidence-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_grep "Write your findings to the absolute path \`$home/data/$id/report.md\`" "$brief" \
+    "scout brief did not require the absolute report path"
+  assert_grep "the worktree is destroyed at cleanup" "$brief" \
+    "scout brief did not say a worktree path does not survive cleanup"
+  assert_no_grep '`data/'"$id"'/report.md`' "$brief" \
+    "scout brief still offers a bare relative report path"
+  pass "fm-brief.sh: ship and scout scaffolds bake in the absolute evidence path"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -634,4 +667,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_evidence_paths_are_absolute
 test_scout_and_secondmate_scaffold
