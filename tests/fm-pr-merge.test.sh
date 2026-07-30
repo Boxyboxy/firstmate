@@ -24,6 +24,12 @@
 #       commit-status states FAILURE and ERROR that external CI posts
 #   (o) a rollup that counts more checks than it returns rows for is unreadable,
 #       and a failing count with no row names still refuses, naming the count
+#   (p) a declared-but-unreported required status (EXPECTED) is pending, so the
+#       merge says so instead of proceeding with no evidence at all
+#   (q) an unreadable refusal carries the CLI's own diagnostic, because the fix
+#       differs per cause
+#   (r) recording an authorized override preserves every unrelated meta field
+#       and leaves no private temp file behind
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -68,7 +74,10 @@ ROLLUP_EMPTY='__no_checks__'
 GH_ROLLUP_MOCK_BODY='
     case " $* " in
       *statusCheckRollup*)
-        [ "${FM_TEST_ROLLUP_RC:-0}" = 0 ] || exit "${FM_TEST_ROLLUP_RC}"
+        if [ "${FM_TEST_ROLLUP_RC:-0}" != 0 ]; then
+          [ -z "${FM_TEST_ROLLUP_ERR:-}" ] || printf "%s\n" "$FM_TEST_ROLLUP_ERR" >&2
+          exit "${FM_TEST_ROLLUP_RC}"
+        fi
         rows=$FM_TEST_ROLLUP
         [ "$rows" = "__no_checks__" ] && rows=
         count=${FM_TEST_ROLLUP_COUNT:-}
@@ -138,6 +147,7 @@ run_pr_merge() {
   FM_TEST_ROLLUP="${FM_TEST_ROLLUP:-$ROLLUP_GREEN}" \
   FM_TEST_ROLLUP_COUNT="${FM_TEST_ROLLUP_COUNT:-}" \
   FM_TEST_ROLLUP_RC="${FM_TEST_ROLLUP_RC:-0}" \
+  FM_TEST_ROLLUP_ERR="${FM_TEST_ROLLUP_ERR:-}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -605,6 +615,90 @@ test_unnamed_failing_check_still_refuses() {
   pass "fm-pr-merge refuses on the failing count when no row name can be extracted"
 }
 
+# A declared-but-unreported required status context is pending, not skipped.
+# Classifying it as skipped leaves a rollup that is neither all-skipped nor
+# pending, so the merge would print nothing at all - the one outcome this
+# script's design rules out.
+test_expected_status_is_pending() {
+  local case_dir
+  case_dir=$(make_case expected-status)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 3030303030303030303030303030303030303030
+  : > "$case_dir/gh-axi.log"
+
+  FM_TEST_ROLLUP='SUCCESS||Lint shell scripts
+|EXPECTED|required-context' \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/52 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "expected-status: a declared-but-unreported required status is not red"
+
+  grep -qxF 'pr merge 52 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "expected-status: an EXPECTED required status blocked the merge"
+  assert_grep '1 check(s)' "$case_dir/stderr" \
+    "expected-status: merging over a declared-but-unreported status was silent"
+  assert_grep 'still pending' "$case_dir/stderr" \
+    "expected-status: a declared-but-unreported status was not reported as pending"
+  pass "fm-pr-merge treats a declared-but-unreported required status as pending, not skipped"
+}
+
+# The unreadable refusal is the only evidence an operator gets, and an expired
+# token, a missing scope, a rate limit, and a filter error each need a different
+# fix, so the CLI's own diagnostic has to survive into the message.
+test_unreadable_refusal_names_the_cause() {
+  local case_dir rc
+  case_dir=$(make_case unreadable-cause)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 4040404040404040404040404040404040404040
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_ROLLUP_RC=1 \
+  FM_TEST_ROLLUP_ERR='gh: authentication token expired, run gh auth login' \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/53 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unreadable-cause: an unreadable check state should refuse"
+  assert_grep 'could not read the check state' "$case_dir/stderr" \
+    "unreadable-cause: refusal did not explain the unreadable check state"
+  assert_grep 'authentication token expired' "$case_dir/stderr" \
+    "unreadable-cause: refusal discarded the CLI diagnostic that names the fix"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "unreadable-cause: an unreadable rollup reached gh-axi pr merge"
+  pass "fm-pr-merge carries the CLI's own diagnostic into its unreadable-state refusal"
+}
+
+# The override record rewrites the task's meta, which teardown's landed-work
+# check and the watcher both read: every unrelated field has to survive it, and
+# no temp file may be left behind in state/.
+test_override_record_preserves_every_meta_field() {
+  local case_dir meta field
+  case_dir=$(make_case override-preserves-meta)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 5050505050505050505050505050505050505050
+  : > "$case_dir/gh-axi.log"
+
+  FM_TEST_ROLLUP="$ROLLUP_RED" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/54 --allow-red-checks \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "override-preserves-meta: an authorized exception should still merge"
+
+  meta="$case_dir/state/task-x1.meta"
+  for field in "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes"; do
+    grep -qxF "$field" "$meta" \
+      || fail "override-preserves-meta: recording the override dropped $field from task meta"
+  done
+  assert_grep 'merge_checks_override=' "$meta" \
+    "override-preserves-meta: the authorized override was not recorded"
+  assert_grep 'pr=https://github.com/example/repo/pull/54' "$meta" \
+    "override-preserves-meta: the canonical pr= line did not survive the rewrite"
+  [ -z "$(find "$case_dir/state" -name '.fm-pr-merge-meta.*' -print -quit)" ] \
+    || fail "override-preserves-meta: a private meta temp file was left behind in state/"
+  pass "fm-pr-merge preserves every unrelated meta field when recording an override"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -623,4 +717,7 @@ test_unreadable_check_state_refuses
 test_every_red_class_refuses
 test_row_count_mismatch_is_unreadable
 test_unnamed_failing_check_still_refuses
+test_expected_status_is_pending
+test_unreadable_refusal_names_the_cause
 test_allow_red_checks_merges_and_records_override
+test_override_record_preserves_every_meta_field

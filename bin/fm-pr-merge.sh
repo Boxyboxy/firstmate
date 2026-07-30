@@ -22,7 +22,8 @@
 #   - no checks configured at all is NOT red; several fleet repos have no
 #     required checks, and blocking them would break ordinary merges.
 #   - pending checks are NOT red; nothing has failed yet, so the merge proceeds
-#     with a note on stderr rather than a refusal.
+#     with a note on stderr rather than a refusal. A required status context that
+#     has been declared and has not reported yet (EXPECTED) is pending too.
 #   - a rollup whose every check is skipped or cancelled is NOT red either;
 #     skipped is a legitimate outcome of path filters and conditional jobs, so
 #     refusing would block ordinary merges. It has nothing failing and nothing
@@ -31,8 +32,10 @@
 #   - a check state that cannot be read (the CLI failed, the rollup field is
 #     absent or not an array, or fewer rows came back than the rollup's own
 #     count) IS a refusal: "not red" must be a positive finding, never the
-#     absence of evidence. A failing count with no extractable row names
-#     refuses too, naming the count.
+#     absence of evidence. The refusal carries whatever the CLI reported,
+#     because an expired token, a missing scope, a rate limit, and a filter
+#     error each need a different fix. A failing count with no extractable row
+#     names refuses too, naming the count.
 # --allow-red-checks is the captain-authorized exception. It merges anyway and
 # records merge_checks_override=<reason> in the task's meta before the merge, so
 # the decision stays durable. The record is written above the canonical pr= line
@@ -99,6 +102,17 @@ reject_repo_overrides() {
 
 reject_repo_overrides "$@" || exit 1
 
+# An interrupt between mktemp and mv must not leave a private temp file behind,
+# the same reason bin/fm-pr-check.sh traps its own meta temp.
+MERGE_META_TMP=
+GH_ERR_FILE=
+pr_merge_cleanup() {
+  [ -z "$MERGE_META_TMP" ] || rm -f -- "$MERGE_META_TMP"
+  [ -z "$GH_ERR_FILE" ] || rm -f -- "$GH_ERR_FILE"
+}
+trap pr_merge_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
 # The rollup is asked for as data, not prose: a "rollup|<count>" header the forge
 # itself counts, then one "<conclusion>|<state>|<name>" row per entry. The name
 # is last so a name containing the separator still parses, and conclusion and
@@ -107,25 +121,57 @@ reject_repo_overrides "$@" || exit 1
 # instead of looking green and empty.
 CHECK_ROLLUP_FILTER='if (.statusCheckRollup | type) == "array" then (.statusCheckRollup | "rollup|\(length)", (.[] | [(.conclusion // ""), (.state // ""), ((.name // .context // "") | gsub("[\n\r]"; " "))] | join("|"))) else error("statusCheckRollup is missing from the PR view") end'
 
+# Collapse whatever the CLI wrote to stderr into one bounded line. An expired
+# token, a missing scope, a rate limit, and a filter error each need a different
+# operator action, and this is the only evidence that distinguishes them, so it
+# is carried into the refusal rather than discarded.
+gh_error_detail() {
+  local detail
+  [ -n "$GH_ERR_FILE" ] && [ -f "$GH_ERR_FILE" ] || return 0
+  detail=$(tr '\n\r\t' '   ' < "$GH_ERR_FILE" | sed 's/  */ /g; s/^ //; s/ *$//') || return 0
+  [ -n "$detail" ] || return 0
+  [ "${#detail}" -le 400 ] || detail="${detail:0:400}..."
+  printf '%s' "$detail"
+}
+
 # Read the PR's check rollup once. Sets CHECK_TOTAL to the count the forge
 # reports and CHECK_ROWS to its rows, and returns 1 when the state could not be
-# established at all (CLI failure, or output that does not carry the header).
+# established at all (CLI failure, or output that does not carry the header),
+# leaving CHECK_READ_DETAIL naming the cause.
 read_check_state() {
   local out header
   CHECK_ROWS=
   CHECK_TOTAL=0
+  CHECK_READ_DETAIL=
+  GH_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-gh.XXXXXX") || {
+    CHECK_READ_DETAIL="the CLI's diagnostics could not be captured"
+    return 1
+  }
   out=$(gh pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
-    --json statusCheckRollup -q "$CHECK_ROLLUP_FILTER" 2>/dev/null) || return 1
+    --json statusCheckRollup -q "$CHECK_ROLLUP_FILTER" 2>"$GH_ERR_FILE") || {
+    CHECK_READ_DETAIL=$(gh_error_detail)
+    [ -n "$CHECK_READ_DETAIL" ] || CHECK_READ_DETAIL="the CLI failed without reporting a reason"
+    return 1
+  }
   header=${out%%$'\n'*}
   case "$header" in
     "rollup|"*) CHECK_TOTAL=${header#rollup|} ;;
-    *) return 1 ;;
+    *)
+      CHECK_READ_DETAIL="the rollup query returned no usable header"
+      return 1
+      ;;
   esac
   case "$CHECK_TOTAL" in
-    ''|*[!0-9]*) return 1 ;;
+    ''|*[!0-9]*)
+      CHECK_READ_DETAIL="the rollup reported a non-numeric check count"
+      return 1
+      ;;
   esac
   if [ "$CHECK_TOTAL" -gt 0 ]; then
-    [ "$out" != "$header" ] || return 1
+    [ "$out" != "$header" ] || {
+      CHECK_READ_DETAIL="the rollup counts $CHECK_TOTAL check(s) but returned no rows"
+      return 1
+    }
     CHECK_ROWS=${out#*$'\n'}
   fi
   return 0
@@ -140,10 +186,15 @@ classify_check() {  # <conclusion> <state>
     SUCCESS) printf 'pass\n'; return 0 ;;
     SKIPPED|CANCELLED|NEUTRAL) printf 'skip\n'; return 0 ;;
   esac
+  # NEUTRAL is a check-run conclusion and never a status state, so it has no arm
+  # here. EXPECTED is a required status context that has been declared and has
+  # not reported yet, which is pending rather than skipped: classifying it as
+  # skipped would leave a rollup that is neither all-skipped nor pending, and so
+  # merge with no note at all.
   case "$2" in
     FAILURE|ERROR) printf 'fail\n'; return 0 ;;
     SUCCESS) printf 'pass\n'; return 0 ;;
-    SKIPPED|CANCELLED|NEUTRAL|EXPECTED) printf 'skip\n'; return 0 ;;
+    SKIPPED|CANCELLED) printf 'skip\n'; return 0 ;;
   esac
   printf 'pending\n'
 }
@@ -189,23 +240,46 @@ EOF
 # Record a captain-authorized merge over a non-green check state in the task's
 # meta. The override line is written above the canonical pr= block so the
 # metadata identity parse in bin/fm-pr-lib.sh still accepts the file.
+#
+# This is bin/fm-pr-check.sh's meta write, on the identical file, so it is that
+# writer's reconstruction and its whole guard set rather than a lookalike: a
+# single read of the file that fails loudly instead of a filter whose partial
+# output would still parse clean while dropping window=, worktree=, project=,
+# harness=, and mode= (which teardown's landed-work check and the watcher read);
+# device parity, so the replace is a rename and not a copy; and validation of
+# the destination after the replace, not only of the temp file before it.
 record_checks_override() {  # <reason>
-  local reason=$1 tmp device
-  device=$(fm_pr_file_device "$STATE") || return 1
-  tmp=$(mktemp "$STATE/.fm-pr-merge-meta.XXXXXX") || return 1
-  {
-    grep -vE '^(merge_checks_override|pr|pr_head)=' "$META" || true
-    printf 'merge_checks_override=%s\n' "$reason"
-    grep -E '^(pr|pr_head)=' "$META" || true
-  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
-  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  fm_pr_private_file_valid "$tmp" 600 "$device" || { rm -f -- "$tmp"; return 1; }
-  fm_pr_metadata_identity_parse "$tmp" || { rm -f -- "$tmp"; return 1; }
+  local reason=$1 line pr_block='' meta_device state_device
+  # A newline in the reason would inject arbitrary keys above the pr= line,
+  # where the identity parse does not reject them.
+  case "$reason" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  meta_device=$(fm_pr_file_device "$META") || return 1
+  state_device=$(fm_pr_file_device "$STATE") || return 1
+  [ "$meta_device" = "$state_device" ] || return 1
+  MERGE_META_TMP=$(mktemp "$STATE/.fm-pr-merge-meta.XXXXXX") || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      merge_checks_override=*) ;;
+      pr=*|pr_head=*) pr_block="$pr_block$line"$'\n' ;;
+      *) printf '%s\n' "$line" >> "$MERGE_META_TMP" || return 1 ;;
+    esac
+  done < "$META" || return 1
+  printf 'merge_checks_override=%s\n' "$reason" >> "$MERGE_META_TMP" || return 1
+  printf '%s' "$pr_block" >> "$MERGE_META_TMP" || return 1
+  chmod 0600 "$MERGE_META_TMP" || return 1
+  fm_pr_private_file_valid "$MERGE_META_TMP" 600 "$state_device" || return 1
+  fm_pr_metadata_identity_parse "$MERGE_META_TMP" || return 1
+  [ "$FM_PR_META_URL" = "$URL" ] || return 1
   # Re-establish the destination's shape immediately before the atomic replace,
   # exactly as bin/fm-pr-check.sh does for its own meta write.
-  fm_pr_regular_destination_on_device_or_absent "$META" "$device" \
-    || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$META" || { rm -f -- "$tmp"; return 1; }
+  fm_pr_regular_destination_on_device_or_absent "$META" "$state_device" || return 1
+  mv -f -- "$MERGE_META_TMP" "$META" || return 1
+  MERGE_META_TMP=
+  fm_pr_private_file_valid "$META" 600 "$state_device" || return 1
+  fm_pr_metadata_identity_parse "$META" || return 1
+  [ "$FM_PR_META_URL" = "$URL" ]
 }
 
 # Task-derived paths are constructed only after the canonical ID validation.
@@ -225,6 +299,7 @@ CHECK_PENDING=0
 CHECK_SKIP=0
 FAILING=
 UNREADABLE=
+CHECK_READ_DETAIL=
 if read_check_state; then
   tally_check_rows
   if [ "$CHECK_SEEN" -ne "$CHECK_TOTAL" ]; then
@@ -232,6 +307,7 @@ if read_check_state; then
   fi
 else
   UNREADABLE="gh could not return the PR's check rollup"
+  [ -z "$CHECK_READ_DETAIL" ] || UNREADABLE="$UNREADABLE: $CHECK_READ_DETAIL"
 fi
 
 if [ -n "$UNREADABLE" ]; then

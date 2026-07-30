@@ -650,18 +650,26 @@ test_evidence_paths_are_absolute() {
 # which resolves inside the crewmate's worktree - the exact loss this wording
 # exists to prevent, with reassuring prose on top.
 test_relative_home_is_resolved_or_refused() {
-  local home id brief out rc
+  local home abs id brief out rc
   home="$TMP_ROOT/relative-home"
-  mkdir -p "$home/data"
+  mkdir -p "$home/data" "$home/state"
+  abs=$(cd "$home" && pwd)
 
   id="brief-relative-resolved"
   ( cd "$home" && FM_HOME=. "$ROOT/bin/fm-brief.sh" "$id" some-proj ) >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "a relative but resolvable home should still scaffold"
-  assert_grep "$(cd "$home" && pwd)/data/$id/report.md" "$brief" \
+  assert_grep "$abs/data/$id/report.md" "$brief" \
     "a relative home was baked into the brief instead of being resolved to an absolute path"
+  # The status file is the other firstmate path the scaffold bakes in, and a
+  # relative one lands inside the disposable worktree exactly like a relative
+  # report path does - costing every wake firstmate supervises the task by.
+  assert_grep "$abs/state/$id.status" "$brief" \
+    "the status file was baked into the brief as a relative path"
   assert_no_grep '`\./data/' "$brief" \
     "the brief called a relative path absolute"
+  assert_no_grep "'\./state/" "$brief" \
+    "the brief named a relative status file under the claim that it is written outside the worktree"
 
   set +e
   out=$( cd "$home" && FM_DATA_OVERRIDE=no-such-data "$ROOT/bin/fm-brief.sh" brief-relative-refused some-proj 2>&1 )
@@ -672,7 +680,17 @@ test_relative_home_is_resolved_or_refused() {
     "the refusal did not explain why the data dir cannot be named in a brief"
   assert_absent "$home/no-such-data/brief-relative-refused/brief.md" \
     "a brief was scaffolded under an unresolvable relative data dir"
-  pass "fm-brief.sh: a relative data dir is resolved to an absolute path or refused"
+
+  set +e
+  out=$( cd "$home" && FM_STATE_OVERRIDE=no-such-state "$ROOT/bin/fm-brief.sh" brief-relative-state-refused some-proj 2>&1 )
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "an unresolvable relative state dir should be refused, not asserted absolute"
+  assert_contains "$out" "is relative and does not exist" \
+    "the refusal did not explain why the state dir cannot be named in a brief"
+  assert_absent "$home/data/brief-relative-state-refused/brief.md" \
+    "a brief was scaffolded naming a status file the crewmate cannot reach"
+  pass "fm-brief.sh: every firstmate path a brief bakes in is resolved absolute or refused"
 }
 
 # Scout and secondmate paths still scaffold well-formed briefs.

@@ -40,9 +40,10 @@
 # worktree and is destroyed with it at cleanup. The ship scaffold keeps worktree
 # isolation as its default and permits that one write only when the # Task
 # section explicitly asks for a report or evidence file, and only under
-# data/<id>/; the scout scaffold's deliverable is always that report. That path
-# is resolved to a real absolute path before it is baked in, and a relative data
-# dir that cannot be resolved is refused rather than asserted absolute.
+# data/<id>/; the scout scaffold's deliverable is always that report. Every
+# firstmate path a scaffold bakes in - the report or evidence dir and the status
+# file alike - is resolved to a real absolute path first, and a relative data or
+# state dir that cannot be resolved is refused rather than asserted absolute.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -75,44 +76,37 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
-resolve_directory_input() {
-  local name=$1 path=$2 resolved
+# Every firstmate path a scaffold bakes in - the report or evidence dir and the
+# status file alike - is handed to a crewmate as a place its writes survive
+# cleanup, so each has to be genuinely absolute rather than merely called
+# absolute: a relative path resolves inside the crewmate's disposable worktree
+# and is destroyed with it. Resolve them here, and refuse rather than bake in a
+# path the crewmate cannot reach.
+resolve_home_dir() {  # <name> <label> <path> <settable-vars>
+  local name=$1 label=$2 path=$3 settable=$4 resolved
+  if [ -d "$path" ]; then
+    # An inherited CDPATH would otherwise resolve a relative dir against a
+    # directory the caller never named, so ignore it here.
+    resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd) || {
+      echo "error: $name directory cannot be resolved: $path - the firstmate $label dir could not be resolved to an absolute path" >&2
+      return 1
+    }
+    path=$resolved
+  fi
   case "$path" in
-    /*) printf '%s\n' "$path"; return 0 ;;
+    /*) ;;
+    *)
+      echo "error: $name directory cannot be resolved: $path - the firstmate $label dir is relative and does not exist, so a brief cannot name a path that survives worktree cleanup; set $settable to an absolute path" >&2
+      return 1
+      ;;
   esac
-  resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || {
-    echo "error: $name directory cannot be resolved: $path" >&2
-    return 1
-  }
-  printf '%s\n' "$resolved"
+  printf '%s\n' "$path"
 }
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME=$(resolve_directory_input FM_HOME "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}") || exit 1
-DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-# The scaffolds hand a crewmate this path as the one place a report or evidence
-# file survives cleanup, so it has to be genuinely absolute rather than merely
-# called absolute: a relative path resolves inside the crewmate's disposable
-# worktree and is destroyed with it. Resolve it here, and refuse rather than bake
-# in a path the crewmate cannot reach.
-if [ -d "$DATA" ]; then
-  DATA=$(cd -- "$DATA" && pwd) || {
-    echo "error: firstmate data dir '$DATA' could not be resolved to an absolute path" >&2
-    exit 1
-  }
-fi
-case "$DATA" in
-  /*) ;;
-  *)
-    echo "error: firstmate data dir '$DATA' is relative and does not exist, so a brief cannot name a path that survives worktree cleanup; set FM_HOME or FM_DATA_OVERRIDE to an absolute path" >&2
-    exit 1
-    ;;
-esac
-if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
-  STATE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || exit 1
-else
-  STATE="$FM_HOME/state"
-fi
+FM_HOME=$(resolve_home_dir FM_HOME home "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}" FM_HOME) || exit 1
+DATA=$(resolve_home_dir FM_DATA_OVERRIDE data "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "FM_HOME or FM_DATA_OVERRIDE") || exit 1
+STATE=$(resolve_home_dir FM_STATE_OVERRIDE state "${FM_STATE_OVERRIDE:-$FM_HOME/state}" "FM_HOME or FM_STATE_OVERRIDE") || exit 1
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
