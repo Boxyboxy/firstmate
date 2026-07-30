@@ -30,6 +30,10 @@
 #       differs per cause
 #   (r) recording an authorized override preserves every unrelated meta field
 #       and leaves no private temp file behind
+#   (s) the script's own rollup filter, not a mock's copy of what it emits, reads
+#       recorded forge payloads: a failing check run, a failing commit status, a
+#       declared-but-unreported required status, an all-skipped rollup, and a
+#       payload whose rollup cannot be read at all
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -70,10 +74,24 @@ ROLLUP_GREEN='SUCCESS||Lint shell scripts
 SUCCESS||Test coverage guard'
 ROLLUP_EMPTY='__no_checks__'
 
+# FM_TEST_ROLLUP_FIXTURE switches the mock from emitting those rows to replaying
+# a recorded payload through the script's own -q filter, which is the only way
+# the filter itself is under test rather than a hand-copy of what it produces.
+# jq stands in for the CLI's embedded evaluator, so its exit status and stderr
+# reach the gate exactly as the CLI's would.
 # shellcheck disable=SC2016  # Mock source: these expansions must stay literal.
 GH_ROLLUP_MOCK_BODY='
     case " $* " in
       *statusCheckRollup*)
+        if [ -n "${FM_TEST_ROLLUP_FIXTURE:-}" ]; then
+          filter=
+          prev=
+          for arg in "$@"; do
+            [ "$prev" = "-q" ] && filter=$arg
+            prev=$arg
+          done
+          exec jq -r "$filter" "$FM_TEST_ROLLUP_FIXTURE"
+        fi
         if [ "${FM_TEST_ROLLUP_RC:-0}" != 0 ]; then
           [ -z "${FM_TEST_ROLLUP_ERR:-}" ] || printf "%s\n" "$FM_TEST_ROLLUP_ERR" >&2
           exit "${FM_TEST_ROLLUP_RC}"
@@ -148,6 +166,7 @@ run_pr_merge() {
   FM_TEST_ROLLUP_COUNT="${FM_TEST_ROLLUP_COUNT:-}" \
   FM_TEST_ROLLUP_RC="${FM_TEST_ROLLUP_RC:-0}" \
   FM_TEST_ROLLUP_ERR="${FM_TEST_ROLLUP_ERR:-}" \
+  FM_TEST_ROLLUP_FIXTURE="${FM_TEST_ROLLUP_FIXTURE:-}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -699,6 +718,117 @@ test_override_record_preserves_every_meta_field() {
   pass "fm-pr-merge preserves every unrelated meta field when recording an override"
 }
 
+# The rollup filter is the only forge-facing logic in this gate, and every case
+# above mocks below it: the mock emits the "<conclusion>|<state>|<name>" rows the
+# filter would have produced, so the filter itself is never evaluated and a drift
+# between it and the forge's data - the exact defect this gate was rewritten to
+# fix - would go unnoticed. These cases replay recorded
+# `gh pr view --json statusCheckRollup` payloads through the script's own -q
+# filter, so the `.state // ""` arm that sees a failing external commit status,
+# the `.name // .context` fallback that names one, and the error(...) branch that
+# makes a missing rollup unreadable all run.
+# Caveat: the CLI evaluates -q with its embedded jq, so replaying through system
+# jq gates the filter's semantics rather than byte-identical evaluation. jq is
+# not a firstmate dependency, so these cases skip where it is absent, the same
+# way this suite gates its other optional tooling.
+FIXTURES="$ROOT/tests/fixtures/gh-status-check-rollup"
+
+# Run one recorded payload through the real filter. Args: name fixture pr-number
+run_fixture_case() {
+  local name=$1 fixture=$2 number=$3 case_dir
+  case_dir=$(make_case "$name")
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 6060606060606060606060606060606060606060
+  : > "$case_dir/gh-axi.log"
+  set +e
+  FM_TEST_ROLLUP_FIXTURE="$FIXTURES/$fixture" \
+    run_pr_merge "$case_dir" task-x1 "https://github.com/example/repo/pull/$number" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FIXTURE_RC=$?
+  set -e
+  FIXTURE_DIR=$case_dir
+}
+
+test_real_filter_reads_a_failing_check_run() {
+  run_fixture_case fixture-check-run-failure check-run-failure.json 60
+  expect_code 1 "$FIXTURE_RC" \
+    "fixture-check-run-failure: a recorded failing check run should refuse the merge"
+  assert_grep 'has failing checks, refusing to merge' "$FIXTURE_DIR/stderr" \
+    "fixture-check-run-failure: refusal did not explain the red check state"
+  assert_grep 'Behavior tests' "$FIXTURE_DIR/stderr" \
+    "fixture-check-run-failure: the filter did not carry the failing check's name through"
+  assert_no_grep 'pr merge' "$FIXTURE_DIR/gh-axi.log" \
+    "fixture-check-run-failure: a recorded red rollup reached gh-axi pr merge"
+  pass "fm-pr-merge's own rollup filter reads a recorded failing check run as red"
+}
+
+# A StatusContext carries a state and a context, never a conclusion or a name.
+# Both of the filter's fallbacks have to fire for this one row, or the check that
+# GitHub renders red is classified as pending and merged over.
+test_real_filter_reads_a_failing_commit_status() {
+  run_fixture_case fixture-commit-status-failure commit-status-failure.json 61
+  expect_code 1 "$FIXTURE_RC" \
+    "fixture-commit-status-failure: a recorded failing commit status should refuse the merge"
+  assert_grep 'has failing checks, refusing to merge' "$FIXTURE_DIR/stderr" \
+    "fixture-commit-status-failure: refusal did not explain the red check state"
+  assert_grep 'vercel/preview' "$FIXTURE_DIR/stderr" \
+    "fixture-commit-status-failure: the filter did not fall back to .context for the status name"
+  assert_no_grep 'still pending' "$FIXTURE_DIR/stderr" \
+    "fixture-commit-status-failure: a failing external status was read as pending"
+  assert_no_grep 'pr merge' "$FIXTURE_DIR/gh-axi.log" \
+    "fixture-commit-status-failure: a recorded red commit status reached gh-axi pr merge"
+  pass "fm-pr-merge's own rollup filter reads a recorded failing commit status as red"
+}
+
+test_real_filter_reads_an_expected_required_status() {
+  run_fixture_case fixture-expected-status expected-required-status.json 62
+  [ "$FIXTURE_RC" -eq 0 ] \
+    || fail "fixture-expected-status: a declared-but-unreported required status is not red"
+  grep -qxF 'pr merge 62 --repo example/repo --squash' "$FIXTURE_DIR/gh-axi.log" \
+    || fail "fixture-expected-status: a recorded EXPECTED status blocked the merge"
+  assert_grep 'still pending' "$FIXTURE_DIR/stderr" \
+    "fixture-expected-status: merging over a declared-but-unreported status left no evidence"
+  pass "fm-pr-merge's own rollup filter reads a recorded EXPECTED status as pending"
+}
+
+test_real_filter_reads_an_all_skipped_rollup() {
+  run_fixture_case fixture-all-skipped all-skipped.json 63
+  [ "$FIXTURE_RC" -eq 0 ] \
+    || fail "fixture-all-skipped: a rollup that is only skipped or cancelled is not red"
+  grep -qxF 'pr merge 63 --repo example/repo --squash' "$FIXTURE_DIR/gh-axi.log" \
+    || fail "fixture-all-skipped: a recorded all-skipped rollup blocked the merge"
+  assert_grep 'all 4 check(s)' "$FIXTURE_DIR/stderr" \
+    "fixture-all-skipped: merging a recorded all-skipped rollup was silent"
+  pass "fm-pr-merge's own rollup filter reads a recorded all-skipped rollup and says so"
+}
+
+# A rollup field that is not an array errors out of the filter, so the read fails
+# instead of looking green and empty.
+test_real_filter_refuses_an_unreadable_payload() {
+  run_fixture_case fixture-unreadable unreadable.json 64
+  expect_code 1 "$FIXTURE_RC" \
+    "fixture-unreadable: a payload with no usable rollup should refuse the merge"
+  assert_grep 'could not read the check state' "$FIXTURE_DIR/stderr" \
+    "fixture-unreadable: a missing rollup was not treated as unreadable"
+  assert_grep 'statusCheckRollup is missing from the PR view' "$FIXTURE_DIR/stderr" \
+    "fixture-unreadable: the filter's own diagnostic did not survive into the refusal"
+  assert_no_grep 'pr merge' "$FIXTURE_DIR/gh-axi.log" \
+    "fixture-unreadable: an unreadable payload reached gh-axi pr merge"
+  pass "fm-pr-merge's own rollup filter refuses a payload whose rollup cannot be read"
+}
+
+test_recorded_rollup_payloads() {
+  command -v jq >/dev/null 2>&1 || {
+    echo "skip: jq not found (required to replay the recorded rollup payloads)"
+    return 0
+  }
+  test_real_filter_reads_a_failing_check_run
+  test_real_filter_reads_a_failing_commit_status
+  test_real_filter_reads_an_expected_required_status
+  test_real_filter_reads_an_all_skipped_rollup
+  test_real_filter_refuses_an_unreadable_payload
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -721,3 +851,4 @@ test_expected_status_is_pending
 test_unreadable_refusal_names_the_cause
 test_allow_red_checks_merges_and_records_override
 test_override_record_preserves_every_meta_field
+test_recorded_rollup_payloads

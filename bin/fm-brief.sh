@@ -41,9 +41,11 @@
 # isolation as its default and permits that one write only when the # Task
 # section explicitly asks for a report or evidence file, and only under
 # data/<id>/; the scout scaffold's deliverable is always that report. Every
-# firstmate path a scaffold bakes in - the report or evidence dir and the status
-# file alike - is resolved to a real absolute path first, and a relative data or
-# state dir that cannot be resolved is refused rather than asserted absolute.
+# firstmate path a scaffold bakes in - the firstmate root whose skills and
+# helpers the crewmate is told to read and run, the report or evidence dir, and
+# the status file alike - is resolved to a real absolute path first, and a
+# relative root, data, or state dir that cannot be resolved is refused rather
+# than asserted absolute.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -76,12 +78,13 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
-# Every firstmate path a scaffold bakes in - the report or evidence dir and the
-# status file alike - is handed to a crewmate as a place its writes survive
-# cleanup, so each has to be genuinely absolute rather than merely called
-# absolute: a relative path resolves inside the crewmate's disposable worktree
-# and is destroyed with it. Resolve them here, and refuse rather than bake in a
-# path the crewmate cannot reach.
+# Every firstmate path a scaffold bakes in - the firstmate root whose skills and
+# helpers the crewmate is told to read and run, the report or evidence dir, and
+# the status file alike - is resolved by the crewmate from inside its own
+# disposable worktree, so each has to be genuinely absolute rather than merely
+# called absolute: a relative path resolves inside that worktree, where a helper
+# is simply not there and a write is destroyed at cleanup. Resolve them here,
+# and refuse rather than bake in a path the crewmate cannot reach.
 resolve_home_dir() {  # <name> <label> <path> <settable-vars>
   local name=$1 label=$2 path=$3 settable=$4 resolved
   if [ -d "$path" ]; then
@@ -96,15 +99,15 @@ resolve_home_dir() {  # <name> <label> <path> <settable-vars>
   case "$path" in
     /*) ;;
     *)
-      echo "error: $name directory cannot be resolved: $path - the firstmate $label dir is relative and does not exist, so a brief cannot name a path that survives worktree cleanup; set $settable to an absolute path" >&2
+      echo "error: $name directory cannot be resolved: $path - the firstmate $label dir is relative and does not exist, so a brief cannot name a path the crewmate can reach from its own worktree; set $settable to an absolute path" >&2
       return 1
       ;;
   esac
   printf '%s\n' "$path"
 }
 
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME=$(resolve_home_dir FM_HOME home "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}" FM_HOME) || exit 1
+FM_ROOT=$(resolve_home_dir FM_ROOT_OVERRIDE root "${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}" FM_ROOT_OVERRIDE) || exit 1
+FM_HOME=$(resolve_home_dir FM_HOME home "${FM_HOME:-$FM_ROOT}" FM_HOME) || exit 1
 DATA=$(resolve_home_dir FM_DATA_OVERRIDE data "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "FM_HOME or FM_DATA_OVERRIDE") || exit 1
 STATE=$(resolve_home_dir FM_STATE_OVERRIDE state "${FM_STATE_OVERRIDE:-$FM_HOME/state}" "FM_HOME or FM_STATE_OVERRIDE") || exit 1
 KIND=ship

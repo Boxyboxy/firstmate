@@ -666,10 +666,37 @@ test_relative_home_is_resolved_or_refused() {
   # report path does - costing every wake firstmate supervises the task by.
   assert_grep "$abs/state/$id.status" "$brief" \
     "the status file was baked into the brief as a relative path"
-  assert_no_grep '`\./data/' "$brief" \
+  # These are the literal strings a brief scaffolded from an unresolved relative
+  # home carries, so they must be written as the fixed strings assert_no_grep
+  # actually matches: a regex-shaped pattern here would pass whether or not the
+  # defect is present.
+  assert_no_grep '`./data/' "$brief" \
     "the brief called a relative path absolute"
-  assert_no_grep "'\./state/" "$brief" \
+  assert_no_grep "'./state/" "$brief" \
     "the brief named a relative status file under the claim that it is written outside the worktree"
+
+  # The firstmate root is the third path a scaffold bakes in, and the crewmate
+  # resolves it from inside its worktree just like the other two: a relative one
+  # names a skill or helper that is simply not there.
+  id="brief-relative-root-resolved"
+  ( cd "$ROOT" && FM_ROOT_OVERRIDE=. FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj ) >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "a relative but resolvable firstmate root should still scaffold"
+  assert_grep "$ROOT/bin/fm-ensure-agents-md.sh" "$brief" \
+    "the firstmate root was baked into the brief instead of being resolved to an absolute path"
+  assert_no_grep '`./bin/fm-ensure-agents-md.sh' "$brief" \
+    "the brief pointed the crewmate at a relative helper path that resolves inside its worktree"
+
+  set +e
+  out=$( cd "$home" && FM_ROOT_OVERRIDE=no-such-root FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" brief-relative-root-refused some-proj 2>&1 )
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "an unresolvable relative firstmate root should be refused, not asserted absolute"
+  assert_contains "$out" "is relative and does not exist" \
+    "the refusal did not explain why the firstmate root cannot be named in a brief"
+  assert_absent "$home/data/brief-relative-root-refused/brief.md" \
+    "a brief was scaffolded naming skills and helpers the crewmate cannot reach"
 
   set +e
   out=$( cd "$home" && FM_DATA_OVERRIDE=no-such-data "$ROOT/bin/fm-brief.sh" brief-relative-refused some-proj 2>&1 )
