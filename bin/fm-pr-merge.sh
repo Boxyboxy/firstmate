@@ -2,15 +2,22 @@
 # Merge a task's PR after recording pr= and any available pr_head= through
 # bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
 # The full canonical GitHub PR URL is parsed by bin/fm-pr-lib.sh and the derived
-# owner/repository and PR number are passed to gh-axi as separate arguments.
+# owner/repository and PR number are passed to the forge CLIs as separate
+# arguments, never as an interpolated URL.
 #
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
 # must not include --repo or -R because the repository comes only from the URL.
 #
 # Red-PR refusal: AGENTS.md states "Never merge a red PR" as an absolute rule,
-# so this path reads the PR's check state through `gh-axi pr checks` before
-# merging and refuses when any check is failing, naming the failing checks.
+# so this path reads the PR's check rollup as structured data through
+# `gh pr view --json statusCheckRollup` - the same JSON-and-filter idiom
+# bin/fm-pr-check.sh uses for its head reference - and classifies every entry
+# here instead of consuming another tool's rendered pass/fail/pending summary.
+# That rendering mapped a failing commit status, the shape external CI posts
+# (a state rather than a conclusion), to pending, which is the one outcome this
+# rule exists to prevent. Red is a conclusion of FAILURE, TIMED_OUT,
+# ACTION_REQUIRED, STARTUP_FAILURE, or STALE, or a state of FAILURE or ERROR.
 # The four non-failing states are deliberately distinct from red:
 #   - no checks configured at all is NOT red; several fleet repos have no
 #     required checks, and blocking them would break ordinary merges.
@@ -21,9 +28,11 @@
 #     refusing would block ordinary merges. It has nothing failing and nothing
 #     pending, though, so it merges with its own note on stderr rather than
 #     silently, the same treatment pending gets.
-#   - a check state that cannot be read (the CLI failed, or its output carries
-#     neither a summary nor the no-checks marker) IS a refusal: "not red" must
-#     be a positive finding, never the absence of evidence.
+#   - a check state that cannot be read (the CLI failed, the rollup field is
+#     absent or not an array, or fewer rows came back than the rollup's own
+#     count) IS a refusal: "not red" must be a positive finding, never the
+#     absence of evidence. A failing count with no extractable row names
+#     refuses too, naming the count.
 # --allow-red-checks is the captain-authorized exception. It merges anyway and
 # records merge_checks_override=<reason> in the task's meta before the merge, so
 # the decision stays durable. The record is written above the canonical pr= line
@@ -90,55 +99,91 @@ reject_repo_overrides() {
 
 reject_repo_overrides "$@" || exit 1
 
-# Read the PR's check state once. Sets CHECKS_OUT and returns 1 when the state
-# could not be established at all (CLI failure, or output carrying neither a
-# summary nor the no-checks marker).
+# The rollup is asked for as data, not prose: a "rollup|<count>" header the forge
+# itself counts, then one "<conclusion>|<state>|<name>" row per entry. The name
+# is last so a name containing the separator still parses, and conclusion and
+# state are forge enums that cannot contain one. A missing or non-array rollup
+# field errors out of the filter, so a read that cannot see the rollup fails
+# instead of looking green and empty.
+CHECK_ROLLUP_FILTER='if (.statusCheckRollup | type) == "array" then (.statusCheckRollup | "rollup|\(length)", (.[] | [(.conclusion // ""), (.state // ""), ((.name // .context // "") | gsub("[\n\r]"; " "))] | join("|"))) else error("statusCheckRollup is missing from the PR view") end'
+
+# Read the PR's check rollup once. Sets CHECK_TOTAL to the count the forge
+# reports and CHECK_ROWS to its rows, and returns 1 when the state could not be
+# established at all (CLI failure, or output that does not carry the header).
 read_check_state() {
-  CHECKS_OUT=
-  CHECKS_OUT=$(gh-axi pr checks "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>/dev/null) || return 1
-  case "$CHECKS_OUT" in
-    *'no CI checks configured'*) return 0 ;;
-    *'summary:'*) return 0 ;;
+  local out header
+  CHECK_ROWS=
+  CHECK_TOTAL=0
+  out=$(gh pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    --json statusCheckRollup -q "$CHECK_ROLLUP_FILTER" 2>/dev/null) || return 1
+  header=${out%%$'\n'*}
+  case "$header" in
+    "rollup|"*) CHECK_TOTAL=${header#rollup|} ;;
+    *) return 1 ;;
   esac
-  return 1
+  case "$CHECK_TOTAL" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if [ "$CHECK_TOTAL" -gt 0 ]; then
+    [ "$out" != "$header" ] || return 1
+    CHECK_ROWS=${out#*$'\n'}
+  fi
+  return 0
 }
 
-# Echo one line per failing check name in CHECKS_OUT; no output means nothing
-# is failing.
-failing_checks() {
-  printf '%s\n' "$CHECKS_OUT" | awk '
-    /^checks\[[0-9]+\]\{name,conclusion\}:/ { in_list = 1; next }
-    !in_list { next }
-    /^  / {
-      row = substr($0, 3)
-      if (row !~ /,fail$/) next
-      sub(/,fail$/, "", row)
-      gsub(/^"|"$/, "", row)
-      print row
-      next
-    }
-    { in_list = 0 }
-  '
+# Classify one rollup entry from the raw values the forge reports. Check runs
+# carry a conclusion and commit statuses carry a state, so both are consulted:
+# reading only one of them is what let a failing external check pass as pending.
+classify_check() {  # <conclusion> <state>
+  case "$1" in
+    FAILURE|TIMED_OUT|ACTION_REQUIRED|STARTUP_FAILURE|STALE) printf 'fail\n'; return 0 ;;
+    SUCCESS) printf 'pass\n'; return 0 ;;
+    SKIPPED|CANCELLED|NEUTRAL) printf 'skip\n'; return 0 ;;
+  esac
+  case "$2" in
+    FAILURE|ERROR) printf 'fail\n'; return 0 ;;
+    SUCCESS) printf 'pass\n'; return 0 ;;
+    SKIPPED|CANCELLED|NEUTRAL|EXPECTED) printf 'skip\n'; return 0 ;;
+  esac
+  printf 'pending\n'
 }
 
-# Echo the count the rollup summary names for one label (passed, failed,
-# skipped, pending, total), so a merge over a non-green-but-not-red rollup is
-# reported rather than silent. Echoes 0 when the summary omits that label:
-# gh-axi drops the skipped and pending parts entirely at zero, and a
-# no-checks-configured rollup carries no summary line at all.
-summary_count() {  # <label>
-  printf '%s\n' "$CHECKS_OUT" | awk -v label="$1" '
-    /^summary:/ {
-      if (match($0, "[0-9]+ " label)) {
-        n = substr($0, RSTART, RLENGTH)
-        sub(" " label, "", n)
-        print n + 0
-        found = 1
-      }
-      exit
-    }
-    END { if (!found) print 0 }
-  '
+# Tally CHECK_ROWS into the per-class counts the gate decides on, collecting the
+# failing rows' names. Only a well-formed row is counted, and CHECK_SEEN is
+# compared against the forge's own CHECK_TOTAL, so a rollup whose rows could not
+# be extracted is unreadable rather than silently green.
+tally_check_rows() {
+  local line name conclusion state rest class
+  CHECK_SEEN=0
+  CHECK_FAIL=0
+  CHECK_PENDING=0
+  CHECK_SKIP=0
+  FAILING=
+  [ -n "$CHECK_ROWS" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      *'|'*'|'*) ;;
+      *) continue ;;
+    esac
+    conclusion=${line%%'|'*}
+    rest=${line#*'|'}
+    state=${rest%%'|'*}
+    name=${rest#*'|'}
+    CHECK_SEEN=$((CHECK_SEEN + 1))
+    class=$(classify_check "$conclusion" "$state")
+    case "$class" in
+      fail)
+        CHECK_FAIL=$((CHECK_FAIL + 1))
+        if [ -n "$name" ]; then
+          FAILING="$FAILING$name"$'\n'
+        fi
+        ;;
+      pending) CHECK_PENDING=$((CHECK_PENDING + 1)) ;;
+      skip) CHECK_SKIP=$((CHECK_SKIP + 1)) ;;
+    esac
+  done <<EOF
+$CHECK_ROWS
+EOF
 }
 
 # Record a captain-authorized merge over a non-green check state in the task's
@@ -173,22 +218,44 @@ fi
 # Never merge a red PR (AGENTS.md). Read the check state before any state is
 # recorded or any poll is armed, so a refusal leaves nothing behind.
 OVERRIDE_REASON=
+CHECK_TOTAL=0
+CHECK_SEEN=0
+CHECK_FAIL=0
+CHECK_PENDING=0
+CHECK_SKIP=0
+FAILING=
+UNREADABLE=
 if read_check_state; then
-  FAILING=$(failing_checks)
-  if [ -n "$FAILING" ]; then
-    if [ "$ALLOW_RED_CHECKS" = 0 ]; then
-      echo "error: PR $URL has failing checks, refusing to merge:" >&2
-      printf '%s\n' "$FAILING" | sed 's/^/  /' >&2
-      echo "Fix the checks, or pass --allow-red-checks for a captain-authorized exception." >&2
-      exit 1
-    fi
-    OVERRIDE_REASON="failing checks: $(printf '%s' "$FAILING" | tr '\n' ';' | sed 's/;$//;s/;/; /g')"
+  tally_check_rows
+  if [ "$CHECK_SEEN" -ne "$CHECK_TOTAL" ]; then
+    UNREADABLE="the rollup counts $CHECK_TOTAL check(s) but only $CHECK_SEEN row(s) could be read"
   fi
-elif [ "$ALLOW_RED_CHECKS" = 0 ]; then
-  echo "error: could not read the check state of PR $URL, refusing to merge; \"not red\" must be established, not assumed. Retry once gh-axi can reach the PR, or pass --allow-red-checks for a captain-authorized exception." >&2
-  exit 1
 else
-  OVERRIDE_REASON="check state unreadable"
+  UNREADABLE="gh could not return the PR's check rollup"
+fi
+
+if [ -n "$UNREADABLE" ]; then
+  if [ "$ALLOW_RED_CHECKS" = 0 ]; then
+    echo "error: could not read the check state of PR $URL ($UNREADABLE), refusing to merge; \"not red\" must be established, not assumed. Retry once gh can reach the PR, or pass --allow-red-checks for a captain-authorized exception." >&2
+    exit 1
+  fi
+  OVERRIDE_REASON="check state unreadable: $UNREADABLE"
+elif [ "$CHECK_FAIL" -gt 0 ]; then
+  if [ "$ALLOW_RED_CHECKS" = 0 ]; then
+    echo "error: PR $URL has failing checks, refusing to merge:" >&2
+    if [ -n "$FAILING" ]; then
+      printf '%s' "$FAILING" | sed 's/^/  /' >&2
+    else
+      echo "  $CHECK_FAIL failing check(s), none of which the rollup named" >&2
+    fi
+    echo "Fix the checks, or pass --allow-red-checks for a captain-authorized exception." >&2
+    exit 1
+  fi
+  if [ -n "$FAILING" ]; then
+    OVERRIDE_REASON="failing checks: $(printf '%s' "$FAILING" | tr '\n' ';' | sed 's/;$//;s/;/; /g')"
+  else
+    OVERRIDE_REASON="failing checks: $CHECK_FAIL unnamed"
+  fi
 fi
 
 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
@@ -206,19 +273,16 @@ if [ -n "$OVERRIDE_REASON" ]; then
   }
 fi
 
-PENDING=$(summary_count pending)
-if [ "$PENDING" -gt 0 ]; then
-  echo "note: $PENDING check(s) on $URL are still pending; pending is not failing, so the merge proceeds" >&2
+if [ "$CHECK_PENDING" -gt 0 ]; then
+  echo "note: $CHECK_PENDING check(s) on $URL are still pending; pending is not failing, so the merge proceeds" >&2
 fi
 
 # A rollup whose every check is skipped or cancelled has nothing failing and
 # nothing pending, so it would otherwise merge with no evidence at all. Skipped
 # is a legitimate outcome of path filters and conditional jobs, so it is not
 # red, but the merge says so out loud.
-SKIPPED=$(summary_count skipped)
-TOTAL=$(summary_count total)
-if [ "$TOTAL" -gt 0 ] && [ "$SKIPPED" = "$TOTAL" ]; then
-  echo "note: all $TOTAL check(s) on $URL are skipped or cancelled, so no check actually passed; skipped is not failing, so the merge proceeds" >&2
+if [ "$CHECK_TOTAL" -gt 0 ] && [ "$CHECK_SKIP" -eq "$CHECK_TOTAL" ]; then
+  echo "note: all $CHECK_TOTAL check(s) on $URL are skipped or cancelled, so no check actually passed; skipped is not failing, so the merge proceeds" >&2
 fi
 
 merge_args=()

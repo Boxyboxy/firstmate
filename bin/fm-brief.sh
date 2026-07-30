@@ -40,7 +40,9 @@
 # worktree and is destroyed with it at cleanup. The ship scaffold keeps worktree
 # isolation as its default and permits that one write only when the # Task
 # section explicitly asks for a report or evidence file, and only under
-# data/<id>/; the scout scaffold's deliverable is always that report.
+# data/<id>/; the scout scaffold's deliverable is always that report. That path
+# is resolved to a real absolute path before it is baked in, and a relative data
+# dir that cannot be resolved is refused rather than asserted absolute.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -87,11 +89,25 @@ resolve_directory_input() {
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME=$(resolve_directory_input FM_HOME "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}") || exit 1
-if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
-  DATA=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
-else
-  DATA="$FM_HOME/data"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+# The scaffolds hand a crewmate this path as the one place a report or evidence
+# file survives cleanup, so it has to be genuinely absolute rather than merely
+# called absolute: a relative path resolves inside the crewmate's disposable
+# worktree and is destroyed with it. Resolve it here, and refuse rather than bake
+# in a path the crewmate cannot reach.
+if [ -d "$DATA" ]; then
+  DATA=$(cd -- "$DATA" && pwd) || {
+    echo "error: firstmate data dir '$DATA' could not be resolved to an absolute path" >&2
+    exit 1
+  }
 fi
+case "$DATA" in
+  /*) ;;
+  *)
+    echo "error: firstmate data dir '$DATA' is relative and does not exist, so a brief cannot name a path that survives worktree cleanup; set FM_HOME or FM_DATA_OVERRIDE to an absolute path" >&2
+    exit 1
+    ;;
+esac
 if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
   STATE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || exit 1
 else

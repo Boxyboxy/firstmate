@@ -606,6 +606,9 @@ test_evidence_paths_are_absolute() {
   local home id brief
   home="$TMP_ROOT/evidence-path-home"
   mkdir -p "$home/data"
+  # Compare against the resolved home, because the scaffold resolves the data
+  # dir to a real absolute path before baking it in rather than asserting one.
+  home=$(cd "$home" && pwd)
 
   id="brief-evidence-ship"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
@@ -640,6 +643,36 @@ test_evidence_paths_are_absolute() {
   assert_no_grep '`data/'"$id"'/report.md`' "$brief" \
     "scout brief still offers a bare relative report path"
   pass "fm-brief.sh: ship and scout scaffolds bake in the absolute evidence path"
+}
+
+# The scaffold calls that path absolute, so it must be one in fact. A relative
+# home would otherwise emit `./data/<id>/report.md` under the word "absolute",
+# which resolves inside the crewmate's worktree - the exact loss this wording
+# exists to prevent, with reassuring prose on top.
+test_relative_home_is_resolved_or_refused() {
+  local home id brief out rc
+  home="$TMP_ROOT/relative-home"
+  mkdir -p "$home/data"
+
+  id="brief-relative-resolved"
+  ( cd "$home" && FM_HOME=. "$ROOT/bin/fm-brief.sh" "$id" some-proj ) >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "a relative but resolvable home should still scaffold"
+  assert_grep "$(cd "$home" && pwd)/data/$id/report.md" "$brief" \
+    "a relative home was baked into the brief instead of being resolved to an absolute path"
+  assert_no_grep '`\./data/' "$brief" \
+    "the brief called a relative path absolute"
+
+  set +e
+  out=$( cd "$home" && FM_DATA_OVERRIDE=no-such-data "$ROOT/bin/fm-brief.sh" brief-relative-refused some-proj 2>&1 )
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "an unresolvable relative data dir should be refused, not asserted absolute"
+  assert_contains "$out" "is relative and does not exist" \
+    "the refusal did not explain why the data dir cannot be named in a brief"
+  assert_absent "$home/no-such-data/brief-relative-refused/brief.md" \
+    "a brief was scaffolded under an unresolvable relative data dir"
+  pass "fm-brief.sh: a relative data dir is resolved to an absolute path or refused"
 }
 
 # Scout and secondmate paths still scaffold well-formed briefs.
@@ -679,4 +712,5 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_evidence_paths_are_absolute
+test_relative_home_is_resolved_or_refused
 test_scout_and_secondmate_scaffold

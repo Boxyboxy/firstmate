@@ -19,6 +19,11 @@
 #   (k) an all-skipped rollup merges but says so, rather than merging silently
 #   (l) an unreadable check state refuses, because "not red" must be established
 #   (m) --allow-red-checks merges and records the override durably in task meta
+#   (n) every red class the forge can report refuses: the CheckRun conclusions
+#       FAILURE, TIMED_OUT, ACTION_REQUIRED, STARTUP_FAILURE, and STALE, and the
+#       commit-status states FAILURE and ERROR that external CI posts
+#   (o) a rollup that counts more checks than it returns rows for is unreadable,
+#       and a failing count with no row names still refuses, naming the count
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -47,31 +52,50 @@ make_case() {
   printf '%s\n' "$case_dir"
 }
 
+# The check gate reads the rollup as structured data through
+# `gh pr view --json statusCheckRollup -q <filter>`, so the mock answers what
+# that filter emits: a "rollup|<count>" header followed by one
+# "<conclusion>|<state>|<name>" row per entry, where a check run carries a
+# conclusion and a commit status carries a state. Rows come from FM_TEST_ROLLUP
+# (the ROLLUP_EMPTY sentinel means a rollup with no entries at all),
+# FM_TEST_ROLLUP_COUNT can disagree with the rows on purpose, and
+# FM_TEST_ROLLUP_RC makes the query itself fail the way a filter error does.
+ROLLUP_GREEN='SUCCESS||Lint shell scripts
+SUCCESS||Test coverage guard'
+ROLLUP_EMPTY='__no_checks__'
+
+# shellcheck disable=SC2016  # Mock source: these expansions must stay literal.
+GH_ROLLUP_MOCK_BODY='
+    case " $* " in
+      *statusCheckRollup*)
+        [ "${FM_TEST_ROLLUP_RC:-0}" = 0 ] || exit "${FM_TEST_ROLLUP_RC}"
+        rows=$FM_TEST_ROLLUP
+        [ "$rows" = "__no_checks__" ] && rows=
+        count=${FM_TEST_ROLLUP_COUNT:-}
+        if [ -z "$count" ]; then
+          if [ -z "$rows" ]; then count=0; else count=$(printf %s\\n "$rows" | wc -l | tr -d " "); fi
+        fi
+        printf "rollup|%s\n" "$count"
+        [ -z "$rows" ] || printf "%s\n" "$rows"
+        exit 0 ;;
+    esac
+'
+
 # gh-axi mock recording every invocation to a log file, and gh mock answering
-# headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
-# `pr checks` answers a green rollup unless FM_TEST_GH_AXI_CHECKS overrides the
-# body or FM_TEST_GH_AXI_CHECKS_RC makes the query itself fail.
+# both headRefOid for fm-pr-check.sh's pr_head lookup and the check rollup for
+# the red-PR gate. Args: case_dir head_sha
 add_gh_mocks() {
   local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
-case "${1:-} ${2:-}" in
-  "pr checks")
-    [ "${FM_TEST_GH_AXI_CHECKS_RC:-0}" = 0 ] || exit "${FM_TEST_GH_AXI_CHECKS_RC}"
-    if [ -n "${FM_TEST_GH_AXI_CHECKS:-}" ]; then
-      printf '%s\n' "$FM_TEST_GH_AXI_CHECKS"
-    else
-      printf 'summary: "10 passed, 0 failed, 10 total"\nchecks[1]{name,conclusion}:\n  Lint shell scripts,pass\n'
-    fi
-    exit 0 ;;
-esac
 exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 case "\${1:-} \${2:-}" in
   "pr view")
+$GH_ROLLUP_MOCK_BODY
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
     esac
@@ -90,15 +114,17 @@ add_gh_mocks_merge_fails() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
-  "pr checks")
-    printf 'summary: "10 passed, 0 failed, 10 total"\nchecks[1]{name,conclusion}:\n  Lint shell scripts,pass\n'
-    exit 0 ;;
   "pr merge") echo "error: pr merge failed" >&2 ; exit 1 ;;
 esac
 exit 0
 SH
-  cat > "$case_dir/fakebin/gh" <<'SH'
+  cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+$GH_ROLLUP_MOCK_BODY
+    ;;
+esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
@@ -109,8 +135,9 @@ run_pr_merge() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
-  FM_TEST_GH_AXI_CHECKS="${FM_TEST_GH_AXI_CHECKS:-}" \
-  FM_TEST_GH_AXI_CHECKS_RC="${FM_TEST_GH_AXI_CHECKS_RC:-0}" \
+  FM_TEST_ROLLUP="${FM_TEST_ROLLUP:-$ROLLUP_GREEN}" \
+  FM_TEST_ROLLUP_COUNT="${FM_TEST_ROLLUP_COUNT:-}" \
+  FM_TEST_ROLLUP_RC="${FM_TEST_ROLLUP_RC:-0}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -323,12 +350,11 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
-# Two failing checks, quoted name included, so the refusal must name both.
-CHECKS_RED='summary: "8 passed, 2 failed, 10 total"
-checks[3]{name,conclusion}:
-  Lint shell scripts,pass
-  PR must be raised via no-mistakes,fail
-  "Behavior, portable serial",fail'
+# Two failing checks, one name carrying the row separator, so the refusal must
+# name both and must not truncate a name at the separator.
+ROLLUP_RED='SUCCESS||Lint shell scripts
+FAILURE||PR must be raised via no-mistakes
+TIMED_OUT||Behavior | portable serial'
 
 test_failing_checks_refuse_before_merge() {
   local case_dir rc
@@ -338,7 +364,7 @@ test_failing_checks_refuse_before_merge() {
   : > "$case_dir/gh-axi.log"
 
   set +e
-  FM_TEST_GH_AXI_CHECKS="$CHECKS_RED" \
+  FM_TEST_ROLLUP="$ROLLUP_RED" \
     run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
@@ -349,8 +375,8 @@ test_failing_checks_refuse_before_merge() {
     "failing-checks: refusal did not explain the red check state"
   assert_grep 'PR must be raised via no-mistakes' "$case_dir/stderr" \
     "failing-checks: refusal did not name the failing check"
-  assert_grep 'Behavior, portable serial' "$case_dir/stderr" \
-    "failing-checks: refusal did not name a failing check whose name contains a comma"
+  assert_grep 'Behavior | portable serial' "$case_dir/stderr" \
+    "failing-checks: refusal did not name a failing check whose name contains the row separator"
   assert_grep '--allow-red-checks' "$case_dir/stderr" \
     "failing-checks: refusal did not name the captain-authorized override"
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
@@ -369,7 +395,7 @@ test_no_configured_checks_are_not_red() {
   add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   : > "$case_dir/gh-axi.log"
 
-  FM_TEST_GH_AXI_CHECKS='checks: "0 passed, 0 failed — this PR has no CI checks configured"' \
+  FM_TEST_ROLLUP="$ROLLUP_EMPTY" \
     run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/32 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "no-checks-configured: fm-pr-merge should merge a PR with no checks configured"
@@ -388,10 +414,11 @@ test_pending_checks_do_not_block() {
   add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
   : > "$case_dir/gh-axi.log"
 
-  FM_TEST_GH_AXI_CHECKS='summary: "8 passed, 0 failed, 2 pending, 10 total"
-checks[2]{name,conclusion}:
-  Lint shell scripts,pass
-  Behavior tests,pending' \
+  # A queued check run carries no conclusion yet, and a commit status that has
+  # not reported carries PENDING: both are pending, neither is red.
+  FM_TEST_ROLLUP='SUCCESS||Lint shell scripts
+||Behavior tests
+|PENDING|vercel' \
     run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/33 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "pending-checks: fm-pr-merge should not refuse a PR whose checks are only pending"
@@ -405,9 +432,9 @@ checks[2]{name,conclusion}:
   pass "fm-pr-merge merges over pending checks and reports that it did"
 }
 
-# gh-axi classifies both SKIPPED and CANCELLED as "skip", so a rollup that was
-# entirely cancelled or path-filtered away has nothing failing and nothing
-# pending. That is not red, but it must not merge without leaving evidence.
+# SKIPPED and CANCELLED are both skipped outcomes, so a rollup that was entirely
+# cancelled or path-filtered away has nothing failing and nothing pending. That
+# is not red, but it must not merge without leaving evidence.
 test_all_skipped_checks_merge_with_a_note() {
   local case_dir
   case_dir=$(make_case all-skipped-checks)
@@ -415,13 +442,11 @@ test_all_skipped_checks_merge_with_a_note() {
   add_gh_mocks "$case_dir" dddddddddddddddddddddddddddddddddddddddd
   : > "$case_dir/gh-axi.log"
 
-  FM_TEST_GH_AXI_CHECKS='summary: "0 passed, 0 failed, 5 skipped, 5 total"
-checks[5]{name,conclusion}:
-  Lint shell scripts,skip
-  Behavior tests,skip
-  Docs check,skip
-  Typecheck,skip
-  Build,skip' \
+  FM_TEST_ROLLUP='SKIPPED||Lint shell scripts
+SKIPPED||Behavior tests
+CANCELLED||Docs check
+CANCELLED||Typecheck
+NEUTRAL||Build' \
     run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/34 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "all-skipped-checks: fm-pr-merge should not refuse a rollup that is only skipped"
@@ -443,7 +468,7 @@ test_unreadable_check_state_refuses() {
   : > "$case_dir/gh-axi.log"
 
   set +e
-  FM_TEST_GH_AXI_CHECKS_RC=1 \
+  FM_TEST_ROLLUP_RC=1 \
     run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/34 \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
@@ -464,7 +489,7 @@ test_allow_red_checks_merges_and_records_override() {
   add_gh_mocks "$case_dir" eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
   : > "$case_dir/gh-axi.log"
 
-  FM_TEST_GH_AXI_CHECKS="$CHECKS_RED" \
+  FM_TEST_ROLLUP="$ROLLUP_RED" \
     run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/35 --allow-red-checks \
     > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "allow-red-checks: an authorized exception should still merge"
@@ -485,6 +510,101 @@ test_allow_red_checks_merges_and_records_override() {
   pass "fm-pr-merge records a captain-authorized red-check merge in task metadata"
 }
 
+# Every shape of red the forge can report must refuse, whichever field carries
+# it. A check run reports a conclusion; a commit status, which is how external CI
+# integrations post, reports a state instead - and reading only the conclusion is
+# what let a genuinely red external check merge as "pending".
+test_every_red_class_refuses() {
+  local case_dir rc class field row n=40
+  for class in "conclusion FAILURE" "conclusion TIMED_OUT" \
+    "conclusion ACTION_REQUIRED" "conclusion STARTUP_FAILURE" \
+    "conclusion STALE" "state FAILURE" "state ERROR"; do
+    field=${class%% *}
+    row=${class##* }
+    case_dir=$(make_case "red-$field-$row")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" ffffffffffffffffffffffffffffffffffffffff
+    : > "$case_dir/gh-axi.log"
+    if [ "$field" = conclusion ]; then
+      row="$row||external ci"
+    else
+      row="|$row|external ci"
+    fi
+
+    set +e
+    FM_TEST_ROLLUP="SUCCESS||Lint shell scripts
+$row" \
+      run_pr_merge "$case_dir" task-x1 "https://github.com/example/repo/pull/$n" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "red-$field: a $field of ${class##* } should refuse the merge"
+    assert_grep 'has failing checks, refusing to merge' "$case_dir/stderr" \
+      "red-$field: refusal did not explain the red check state for ${class##* }"
+    assert_grep 'external ci' "$case_dir/stderr" \
+      "red-$field: refusal did not name the check reporting ${class##* }"
+    assert_no_grep 'still pending' "$case_dir/stderr" \
+      "red-$field: a ${class##* } result was reported as pending instead of red"
+    assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+      "red-$field: a ${class##* } result reached gh-axi pr merge"
+    n=$((n + 1))
+  done
+  pass "fm-pr-merge classifies every red conclusion and commit-status state as red"
+}
+
+# The rollup's own count is the cross-check on the rows: if fewer rows come back
+# than the forge counted, the state is unreadable rather than green, and a
+# failing count with no usable row names still refuses, naming the count.
+test_row_count_mismatch_is_unreadable() {
+  local case_dir rc
+  case_dir=$(make_case rollup-count-mismatch)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1010101010101010101010101010101010101010
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_ROLLUP='SUCCESS||Lint shell scripts' FM_TEST_ROLLUP_COUNT=4 \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/50 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "rollup-count-mismatch: an incomplete rollup should refuse"
+  assert_grep 'could not read the check state' "$case_dir/stderr" \
+    "rollup-count-mismatch: refusal did not treat a short rollup as unreadable"
+  assert_grep 'counts 4 check(s) but only 1 row(s)' "$case_dir/stderr" \
+    "rollup-count-mismatch: refusal did not name the counts it compared"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "rollup-count-mismatch: an unreadable rollup reached gh-axi pr merge"
+  pass "fm-pr-merge treats a rollup shorter than its own count as unreadable"
+}
+
+test_unnamed_failing_check_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case unnamed-failing-check)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 2020202020202020202020202020202020202020
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_ROLLUP='FAILURE||
+|ERROR|' \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/51 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unnamed-failing-check: a nameless failing check should still refuse"
+  assert_grep 'has failing checks, refusing to merge' "$case_dir/stderr" \
+    "unnamed-failing-check: refusal did not explain the red check state"
+  assert_grep '2 failing check(s), none of which the rollup named' "$case_dir/stderr" \
+    "unnamed-failing-check: refusal did not fall back to naming the failing count"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "unnamed-failing-check: a nameless red rollup reached gh-axi pr merge"
+  pass "fm-pr-merge refuses on the failing count when no row name can be extracted"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -500,4 +620,7 @@ test_no_configured_checks_are_not_red
 test_pending_checks_do_not_block
 test_all_skipped_checks_merge_with_a_note
 test_unreadable_check_state_refuses
+test_every_red_class_refuses
+test_row_count_mismatch_is_unreadable
+test_unnamed_failing_check_still_refuses
 test_allow_red_checks_merges_and_records_override

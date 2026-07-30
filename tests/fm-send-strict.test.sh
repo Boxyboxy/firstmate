@@ -195,6 +195,27 @@ test_over_long_text_is_refused_before_sending() {
   pass "fm-send strict: over-long text is refused before any send"
 }
 
+# The refusal's whole job is to name the one place long content should go, so in
+# a home whose data dir is overridden it must name that dir rather than a
+# $FM_HOME/data path that does not exist there.
+test_length_refusal_honours_data_override() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/too-long-data-override"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home toolongoverride); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  mkdir -p "$dir/elsewhere-data"
+  fm_write_meta "$home/state/lane-ovr.meta" "window=sess:fm-lane-ovr" "kind=ship"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+  FM_DATA_OVERRIDE="$dir/elsewhere-data" \
+    "$SEND" lane-ovr "$(long_text)" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an over-long steer should be refused"
+  assert_contains "$(cat "$err")" "$dir/elsewhere-data/lane-ovr/brief.md" \
+    "length refusal should point at the overridden data dir's brief"
+  assert_not_contains "$(cat "$err")" "$home/data/lane-ovr/brief.md" \
+    "length refusal should not name a data dir this home does not use"
+  pass "fm-send strict: the length refusal points at the home's actual data dir"
+}
+
 test_allow_long_opt_out_sends() {
   local dir fb home err log rc got
   dir="$TMP_ROOT/allow-long"; mkdir -p "$dir"
@@ -238,5 +259,6 @@ test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_healthy_fm_id_send_still_works
 test_over_long_text_is_refused_before_sending
+test_length_refusal_honours_data_override
 test_allow_long_opt_out_sends
 test_short_text_and_key_paths_are_unaffected

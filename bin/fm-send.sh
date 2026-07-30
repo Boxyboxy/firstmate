@@ -69,6 +69,7 @@ if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
 fi
 
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 if [ ! -d "$FM_HOME" ]; then
   echo "error: FM_HOME '$FM_HOME' is not a directory; fm-send cannot resolve this home's state" >&2
   exit 1
@@ -275,9 +276,9 @@ else
     MESSAGE_BYTES=$(printf '%s' "$MESSAGE" | wc -c | tr -d ' ')
     if [ "$MESSAGE_BYTES" -gt "$MAX_TEXT_BYTES" ]; then
       if [ -n "$TARGET_META" ]; then
-        BRIEF_HINT="$FM_HOME/data/$(fm_send_id_from_meta "$TARGET_META")/brief.md"
+        BRIEF_HINT="$DATA/$(fm_send_id_from_meta "$TARGET_META")/brief.md"
       else
-        BRIEF_HINT="$FM_HOME/data/<id>/brief.md"
+        BRIEF_HINT="$DATA/<id>/brief.md"
       fi
       echo "error: message is $MESSAGE_BYTES bytes, over the $MAX_TEXT_BYTES-byte limit; a steer this long is lost by a busy pane instead of landing. Append the content to $BRIEF_HINT, then send a short pointer such as 're-read your brief, section X amended'. Pass --allow-long right after the target for a deliberate long send." >&2
       exit 1
