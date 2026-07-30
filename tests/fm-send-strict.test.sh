@@ -8,8 +8,8 @@
 #
 # They also pin the length refusal: two ~1,400-byte steers to one busy pane
 # both reported an unconfirmed send and never arrived, so text over
-# FM_SEND_MAX_TEXT_BYTES is refused before any send, and --allow-long is the
-# explicit opt-out for a deliberate long send.
+# fm-send.sh's MAX_TEXT_BYTES constant is refused before any send, and
+# --allow-long is the explicit opt-out for a deliberate long send.
 set -u
 
 # shellcheck source=tests/lib.sh

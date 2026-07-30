@@ -37,7 +37,10 @@
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Ship and scout scaffolds state the ABSOLUTE firstmate path for any report or
 # evidence output, because a relative data/ path resolves inside the disposable
-# worktree and is destroyed with it at cleanup.
+# worktree and is destroyed with it at cleanup. The ship scaffold keeps worktree
+# isolation as its default and permits that one write only when the # Task
+# section explicitly asks for a report or evidence file, and only under
+# data/<id>/; the scout scaffold's deliverable is always that report.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -379,8 +382,9 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; the only files you may write outside it are the status file below and any report or evidence this task asks for.
-   A report or evidence file goes at the absolute path \`$DATA/$ID/report.md\` (or a named file beside it under \`$DATA/$ID/\`), never at a relative \`data/...\` one: a relative path lands inside this worktree, and the worktree is destroyed at cleanup.
+2. Stay inside this worktree; the status file below is the only file you write outside it.
+   The single exception: if the \`# Task\` section above explicitly asks you for a report or evidence file, write it under \`$DATA/$ID/\` - at the absolute path \`$DATA/$ID/report.md\`, or a named file beside it in that directory - and nowhere else outside this worktree.
+   Never use a relative \`data/...\` path for it: a relative path lands inside this worktree, and the worktree is destroyed at cleanup.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`

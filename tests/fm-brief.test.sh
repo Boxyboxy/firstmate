@@ -617,6 +617,17 @@ test_evidence_paths_are_absolute() {
     "ship brief did not say a worktree path does not survive cleanup"
   assert_no_grep '`data/'"$id"'/report.md`' "$brief" \
     "ship brief still offers a bare relative evidence path"
+  # Worktree isolation stays the default: the status file is the only
+  # unconditional write outside the worktree, and an evidence write is
+  # permitted only when the # Task section asks for one, only under data/<id>/.
+  assert_grep "the status file below is the only file you write outside it" "$brief" \
+    "ship brief no longer keeps worktree isolation as its default"
+  assert_grep "if the \`# Task\` section above explicitly asks you for a report or evidence file" "$brief" \
+    "ship brief did not condition its outside write on the # Task section asking for one"
+  assert_grep "and nowhere else outside this worktree" "$brief" \
+    "ship brief did not confine the permitted outside write to data/<id>/"
+  assert_no_grep 'any report or evidence this task asks for' "$brief" \
+    "ship brief still grants an open-ended write outside the worktree"
 
   id="brief-evidence-scout"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1

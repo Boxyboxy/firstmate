@@ -11,11 +11,16 @@
 # Red-PR refusal: AGENTS.md states "Never merge a red PR" as an absolute rule,
 # so this path reads the PR's check state through `gh-axi pr checks` before
 # merging and refuses when any check is failing, naming the failing checks.
-# The three non-failing states are deliberately distinct from red:
+# The four non-failing states are deliberately distinct from red:
 #   - no checks configured at all is NOT red; several fleet repos have no
 #     required checks, and blocking them would break ordinary merges.
 #   - pending checks are NOT red; nothing has failed yet, so the merge proceeds
 #     with a note on stderr rather than a refusal.
+#   - a rollup whose every check is skipped or cancelled is NOT red either;
+#     skipped is a legitimate outcome of path filters and conditional jobs, so
+#     refusing would block ordinary merges. It has nothing failing and nothing
+#     pending, though, so it merges with its own note on stderr rather than
+#     silently, the same treatment pending gets.
 #   - a check state that cannot be read (the CLI failed, or its output carries
 #     neither a summary nor the no-checks marker) IS a refusal: "not red" must
 #     be a positive finding, never the absence of evidence.
@@ -116,15 +121,18 @@ failing_checks() {
   '
 }
 
-# Count checks the forge has not concluded yet, so a merge over pending checks
-# is reported rather than silent. Echoes 0 when the summary names no pending.
-pending_check_count() {
-  printf '%s\n' "$CHECKS_OUT" | awk '
+# Echo the count the rollup summary names for one label (passed, failed,
+# skipped, pending, total), so a merge over a non-green-but-not-red rollup is
+# reported rather than silent. Echoes 0 when the summary omits that label:
+# gh-axi drops the skipped and pending parts entirely at zero, and a
+# no-checks-configured rollup carries no summary line at all.
+summary_count() {  # <label>
+  printf '%s\n' "$CHECKS_OUT" | awk -v label="$1" '
     /^summary:/ {
-      if (match($0, /[0-9]+ pending/)) {
-        pending = substr($0, RSTART, RLENGTH)
-        sub(/ pending/, "", pending)
-        print pending + 0
+      if (match($0, "[0-9]+ " label)) {
+        n = substr($0, RSTART, RLENGTH)
+        sub(" " label, "", n)
+        print n + 0
         found = 1
       }
       exit
@@ -148,6 +156,10 @@ record_checks_override() {  # <reason>
   chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   fm_pr_private_file_valid "$tmp" 600 "$device" || { rm -f -- "$tmp"; return 1; }
   fm_pr_metadata_identity_parse "$tmp" || { rm -f -- "$tmp"; return 1; }
+  # Re-establish the destination's shape immediately before the atomic replace,
+  # exactly as bin/fm-pr-check.sh does for its own meta write.
+  fm_pr_regular_destination_on_device_or_absent "$META" "$device" \
+    || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$META" || { rm -f -- "$tmp"; return 1; }
 }
 
@@ -194,9 +206,19 @@ if [ -n "$OVERRIDE_REASON" ]; then
   }
 fi
 
-PENDING=$(pending_check_count)
+PENDING=$(summary_count pending)
 if [ "$PENDING" -gt 0 ]; then
   echo "note: $PENDING check(s) on $URL are still pending; pending is not failing, so the merge proceeds" >&2
+fi
+
+# A rollup whose every check is skipped or cancelled has nothing failing and
+# nothing pending, so it would otherwise merge with no evidence at all. Skipped
+# is a legitimate outcome of path filters and conditional jobs, so it is not
+# red, but the merge says so out loud.
+SKIPPED=$(summary_count skipped)
+TOTAL=$(summary_count total)
+if [ "$TOTAL" -gt 0 ] && [ "$SKIPPED" = "$TOTAL" ]; then
+  echo "note: all $TOTAL check(s) on $URL are skipped or cancelled, so no check actually passed; skipped is not failing, so the merge proceeds" >&2
 fi
 
 merge_args=()

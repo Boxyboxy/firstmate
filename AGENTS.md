@@ -90,7 +90,7 @@ state/               volatile runtime signals; gitignored
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown
-  <id>.meta          written by fm-spawn: window=, endpoint_task_id=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and the forge's pr_head= when available (GitHub pull requests and GitLab merge requests; docs/gitlab-merge-watch.md); fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
+  <id>.meta          written by fm-spawn: window=, endpoint_task_id=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and the forge's pr_head= when available (GitHub pull requests and GitLab merge requests; docs/gitlab-merge-watch.md); fm-pr-merge records merge_checks_override= when a captain-authorized override merged a PR whose check state was not green; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Optional presentation spaces"
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified X shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
@@ -311,7 +311,10 @@ Apart from that single supported abort, do not hand-edit, commit, restart, or st
 Once ownership is settled, validate exactly once against that final head so no obsolete or intermediate head is ever treated as authoritative.
 
 An ask-user finding returns as `needs-decision`; firstmate decides only when the configured authority permits, otherwise escalates to the captain.
-Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command.
+Append the one exact decision to the worker's `data/<id>/brief.md` instead of typing it into the steer, still naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command.
+Then send one short steer carrying only a pointer to it, giving that brief's ABSOLUTE path and telling the worker to READ it, never to find or look for it.
+`data/` is gitignored, so a worker searching from its own worktree structurally cannot find the file; the absolute path is what makes the pointer usable.
+A steer long enough to carry the decision body is refused by `bin/fm-send.sh` and is lost by a busy pane rather than landing.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
 Resume fleet supervision immediately after the decision lands.
 

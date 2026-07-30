@@ -16,8 +16,9 @@
 #   (h) repo override args fail fast because the repo comes from the URL
 #   (i) a failing check state refuses before recording or merging
 #   (j) no configured checks and pending checks are both treated as not red
-#   (k) an unreadable check state refuses, because "not red" must be established
-#   (l) --allow-red-checks merges and records the override durably in task meta
+#   (k) an all-skipped rollup merges but says so, rather than merging silently
+#   (l) an unreadable check state refuses, because "not red" must be established
+#   (m) --allow-red-checks merges and records the override durably in task meta
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -404,6 +405,36 @@ checks[2]{name,conclusion}:
   pass "fm-pr-merge merges over pending checks and reports that it did"
 }
 
+# gh-axi classifies both SKIPPED and CANCELLED as "skip", so a rollup that was
+# entirely cancelled or path-filtered away has nothing failing and nothing
+# pending. That is not red, but it must not merge without leaving evidence.
+test_all_skipped_checks_merge_with_a_note() {
+  local case_dir
+  case_dir=$(make_case all-skipped-checks)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" dddddddddddddddddddddddddddddddddddddddd
+  : > "$case_dir/gh-axi.log"
+
+  FM_TEST_GH_AXI_CHECKS='summary: "0 passed, 0 failed, 5 skipped, 5 total"
+checks[5]{name,conclusion}:
+  Lint shell scripts,skip
+  Behavior tests,skip
+  Docs check,skip
+  Typecheck,skip
+  Build,skip' \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/34 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "all-skipped-checks: fm-pr-merge should not refuse a rollup that is only skipped"
+
+  grep -qxF 'pr merge 34 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "all-skipped-checks: an all-skipped rollup blocked the merge"
+  assert_grep 'all 5 check(s)' "$case_dir/stderr" \
+    "all-skipped-checks: merging an all-skipped rollup was silent"
+  assert_no_grep 'merge_checks_override=' "$case_dir/state/task-x1.meta" \
+    "all-skipped-checks: a skipped rollup was recorded as an override"
+  pass "fm-pr-merge merges an all-skipped rollup and reports that it did"
+}
+
 test_unreadable_check_state_refuses() {
   local case_dir rc
   case_dir=$(make_case unreadable-checks)
@@ -467,5 +498,6 @@ test_parses_pr_url_for_gh_axi
 test_failing_checks_refuse_before_merge
 test_no_configured_checks_are_not_red
 test_pending_checks_do_not_block
+test_all_skipped_checks_merge_with_a_note
 test_unreadable_check_state_refuses
 test_allow_red_checks_merges_and_records_override

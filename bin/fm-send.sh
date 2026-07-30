@@ -8,12 +8,14 @@
 #   worse than a loud failure.
 # Special keys instead of text: fm-send.sh <target> --key Enter
 #
-# Length refusal: text longer than FM_SEND_MAX_TEXT_BYTES is refused before any
-# send or pending-reply record is created, because a steer that long does not
-# survive a busy pane. Put the content in the task's brief and send a short
-# pointer to it instead. --allow-long, given immediately after the target,
-# sends the long text anyway for the rare deliberate case. The refusal is
-# text-only: --key sends, key sequences, and submit verification are untouched.
+# Length refusal: text longer than the MAX_TEXT_BYTES constant below is refused
+# before any send or pending-reply record is created, because a steer that long
+# does not survive a busy pane. Put the content in the task's brief and send a
+# short pointer to it instead; AGENTS.md section 7 states that contract for gate
+# decisions. --allow-long, given immediately after the target, sends the long
+# text anyway for the rare deliberate case, and is the only opt-out: the cap is
+# a local constant on purpose, not an FM_SEND_* environment tunable. The refusal
+# is text-only: --key sends, key sequences, and submit verification are untouched.
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
@@ -251,7 +253,10 @@ fi
 # arrived, while a ~230-byte pointer to the same pane landed first try.
 # AGENTS.md section 7 already says to put long instructions in a file; this is
 # what makes that enforceable instead of a rule the fleet keeps rediscovering.
-FM_SEND_MAX_TEXT_BYTES=400
+# Deliberately a plain local constant, not an FM_SEND_* environment tunable like
+# FM_SEND_RETRIES/SLEEP/SETTLE: raising the cap is not the sanctioned escape
+# from a lost steer, so the opt-out is the explicit per-call --allow-long flag.
+MAX_TEXT_BYTES=400
 
 if [ "${1:-}" = "--key" ]; then
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"; then
@@ -268,13 +273,13 @@ else
   MESSAGE=$*
   if [ "$ALLOW_LONG" = 0 ]; then
     MESSAGE_BYTES=$(printf '%s' "$MESSAGE" | wc -c | tr -d ' ')
-    if [ "$MESSAGE_BYTES" -gt "$FM_SEND_MAX_TEXT_BYTES" ]; then
+    if [ "$MESSAGE_BYTES" -gt "$MAX_TEXT_BYTES" ]; then
       if [ -n "$TARGET_META" ]; then
         BRIEF_HINT="$FM_HOME/data/$(fm_send_id_from_meta "$TARGET_META")/brief.md"
       else
         BRIEF_HINT="$FM_HOME/data/<id>/brief.md"
       fi
-      echo "error: message is $MESSAGE_BYTES bytes, over the $FM_SEND_MAX_TEXT_BYTES-byte limit; a steer this long is lost by a busy pane instead of landing. Append the content to $BRIEF_HINT, then send a short pointer such as 're-read your brief, section X amended'. Pass --allow-long right after the target for a deliberate long send." >&2
+      echo "error: message is $MESSAGE_BYTES bytes, over the $MAX_TEXT_BYTES-byte limit; a steer this long is lost by a busy pane instead of landing. Append the content to $BRIEF_HINT, then send a short pointer such as 're-read your brief, section X amended'. Pass --allow-long right after the target for a deliberate long send." >&2
       exit 1
     fi
   fi
