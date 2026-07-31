@@ -631,6 +631,13 @@ test_evidence_paths_are_absolute() {
     "ship brief did not confine the permitted outside write to data/<id>/"
   assert_no_grep 'any report or evidence this task asks for' "$brief" \
     "ship brief still grants an open-ended write outside the worktree"
+  # brief.md lives in that same directory and is the channel firstmate amends to
+  # hand the crewmate a decision, so a permitted evidence write must name the
+  # files it may create rather than the directory that holds them.
+  assert_grep "never \`$home/data/$id/brief.md\`" "$brief" \
+    "ship brief let a permitted evidence write overwrite the instructions it is reading"
+  assert_no_grep 'or a named file beside it in that directory' "$brief" \
+    "ship brief still permits any file in the directory that holds its own instructions"
 
   id="brief-evidence-scout"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
@@ -695,6 +702,12 @@ test_relative_home_is_resolved_or_refused() {
   expect_code 1 "$rc" "an unresolvable relative firstmate root should be refused, not asserted absolute"
   assert_contains "$out" "is relative and does not exist" \
     "the refusal did not explain why the firstmate root cannot be named in a brief"
+  # FM_HOME is derived FROM the root, so it cannot clear a root refusal: naming
+  # it here would send the operator back to this identical message.
+  assert_contains "$out" "set FM_ROOT_OVERRIDE to an absolute path" \
+    "the root refusal did not name the variable that can actually clear it"
+  assert_not_contains "$out" "set FM_HOME" \
+    "the root refusal told the operator to set a variable that is derived from the root"
   assert_absent "$home/data/brief-relative-root-refused/brief.md" \
     "a brief was scaffolded naming skills and helpers the crewmate cannot reach"
 
@@ -705,6 +718,8 @@ test_relative_home_is_resolved_or_refused() {
   expect_code 1 "$rc" "an unresolvable relative data dir should be refused, not asserted absolute"
   assert_contains "$out" "is relative and does not exist" \
     "the refusal did not explain why the data dir cannot be named in a brief"
+  assert_contains "$out" "set FM_HOME or FM_DATA_OVERRIDE to an absolute path" \
+    "the data refusal did not name both variables that can clear it"
   assert_absent "$home/no-such-data/brief-relative-refused/brief.md" \
     "a brief was scaffolded under an unresolvable relative data dir"
 

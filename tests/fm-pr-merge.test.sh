@@ -24,6 +24,8 @@
 #       commit-status states FAILURE and ERROR that external CI posts
 #   (o) a rollup that counts more checks than it returns rows for is unreadable,
 #       and a failing count with no row names still refuses, naming the count
+#   (o2) a rollup that is both incomplete and already red reports both facts, in
+#       the refusal and in the recorded override alike
 #   (p) a declared-but-unreported required status (EXPECTED) is pending, so the
 #       merge says so instead of proceeding with no evidence at all
 #   (q) an unreadable refusal carries the CLI's own diagnostic, because the fix
@@ -609,6 +611,47 @@ test_row_count_mismatch_is_unreadable() {
   pass "fm-pr-merge treats a rollup shorter than its own count as unreadable"
 }
 
+# A partly-read rollup can also be red. Reporting only "could not read the check
+# state ... retry once gh can reach the PR" sends the operator after the CLI when
+# the rows that did come back name a check that failed, and an override recorded
+# as unreadable alone loses the evidence that motivated it, so both facts have to
+# survive - in the refusal and in the durable record alike.
+test_partly_read_red_rollup_reports_both_facts() {
+  local case_dir rc
+  case_dir=$(make_case partly-read-red)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 6060606060606060606060606060606060606060
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_ROLLUP='FAILURE||Lint shell scripts' FM_TEST_ROLLUP_COUNT=4 \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/55 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "partly-read-red: an incomplete red rollup should refuse"
+  assert_grep 'could not read the check state' "$case_dir/stderr" \
+    "partly-read-red: refusal did not report that the rollup was incomplete"
+  assert_grep 'counts 4 check(s) but only 1 row(s)' "$case_dir/stderr" \
+    "partly-read-red: refusal did not name the counts it compared"
+  assert_grep 'Lint shell scripts' "$case_dir/stderr" \
+    "partly-read-red: refusal discarded the failing check name it had already read"
+  assert_grep 'Fix those checks' "$case_dir/stderr" \
+    "partly-read-red: refusal told the operator to retry the CLI over a check that failed"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "partly-read-red: an incomplete red rollup reached gh-axi pr merge"
+
+  : > "$case_dir/gh-axi.log"
+  FM_TEST_ROLLUP='FAILURE||Lint shell scripts' FM_TEST_ROLLUP_COUNT=4 \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/55 --allow-red-checks \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "partly-read-red: an authorized exception should still merge"
+  assert_grep 'Lint shell scripts' "$case_dir/state/task-x1.meta" \
+    "partly-read-red: the recorded override lost the failing check that motivated it"
+  pass "fm-pr-merge reports an incomplete rollup's failing checks in the refusal and the override record"
+}
+
 test_unnamed_failing_check_still_refuses() {
   local case_dir rc
   case_dir=$(make_case unnamed-failing-check)
@@ -865,6 +908,7 @@ test_all_skipped_checks_merge_with_a_note
 test_unreadable_check_state_refuses
 test_every_red_class_refuses
 test_row_count_mismatch_is_unreadable
+test_partly_read_red_rollup_reports_both_facts
 test_unnamed_failing_check_still_refuses
 test_expected_status_is_pending
 test_unreadable_refusal_names_the_cause

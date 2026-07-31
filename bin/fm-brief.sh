@@ -39,9 +39,12 @@
 # evidence output, because a relative data/ path resolves inside the disposable
 # worktree and is destroyed with it at cleanup. The ship scaffold keeps worktree
 # isolation as its default and permits that one write only when the # Task
-# section explicitly asks for a report or evidence file, and only under
-# data/<id>/; the scout scaffold's deliverable is always that report. Every
-# firstmate path a scaffold bakes in - the firstmate root whose skills and
+# section explicitly asks for a report or evidence file, and only as
+# data/<id>/report.md or an evidence file that section names beside it - never
+# data/<id>/brief.md, which is the crewmate's own instructions and the channel
+# firstmate amends to hand it a decision, so a permitted evidence write must not
+# be able to destroy it. The scout scaffold's deliverable is always that report.
+# Every firstmate path a scaffold bakes in - the firstmate root whose skills and
 # helpers the crewmate is told to read and run, the report or evidence dir, and
 # the status file alike - is resolved to a real absolute path first, and a
 # relative root, data, or state dir that cannot be resolved is refused rather
@@ -85,6 +88,9 @@ PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 # called absolute: a relative path resolves inside that worktree, where a helper
 # is simply not there and a write is destroyed at cleanup. Resolve them here,
 # and refuse rather than bake in a path the crewmate cannot reach.
+# The variables that can actually clear a refusal differ per dir: FM_ROOT is
+# resolved before FM_HOME is derived from it, so naming FM_HOME there would send
+# an operator back to the identical refusal.
 resolve_home_dir() {  # <name> <label> <path> <settable-vars>
   local name=$1 label=$2 path=$3 settable=$4 resolved
   if [ -d "$path" ]; then
@@ -396,7 +402,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; the status file below is the only file you write outside it.
-   The single exception: if the \`# Task\` section above explicitly asks you for a report or evidence file, write it under \`$DATA/$ID/\` - at the absolute path \`$DATA/$ID/report.md\`, or a named file beside it in that directory - and nowhere else outside this worktree.
+   The single exception: if the \`# Task\` section above explicitly asks you for a report or evidence file, write it at the absolute path \`$DATA/$ID/report.md\`, or at the absolute path of an evidence file that section names in that same directory - never \`$DATA/$ID/brief.md\`, which is these instructions and may be amended with a decision you must read - and nowhere else outside this worktree.
    Never use a relative \`data/...\` path for it: a relative path lands inside this worktree, and the worktree is destroyed at cleanup.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:

@@ -35,7 +35,10 @@
 #     absence of evidence. The refusal carries whatever the CLI reported,
 #     because an expired token, a missing scope, a rate limit, and a filter
 #     error each need a different fix. A failing count with no extractable row
-#     names refuses too, naming the count.
+#     names refuses too, naming the count. A rollup that is both incomplete and
+#     already red reports both facts, because "retry the CLI" is the wrong
+#     action for a check that failed and an override recorded as unreadable
+#     alone would lose the evidence that motivated it.
 # --allow-red-checks is the captain-authorized exception. It merges anyway and
 # records merge_checks_override=<reason> in the task's meta before the merge, so
 # the decision stays durable. The record is written above the canonical pr= line
@@ -237,6 +240,18 @@ $CHECK_ROWS
 EOF
 }
 
+# Collapse the failing rows that were read into one line, for the refusal the
+# operator acts on and for the durable override record alike. A rollup that was
+# only partly readable can still have named failing checks, and those names are
+# the actionable fact in both places.
+failing_summary() {
+  if [ -n "$FAILING" ]; then
+    printf '%s' "$FAILING" | tr '\n' ';' | sed 's/;$//;s/;/; /g'
+  else
+    printf '%s unnamed' "$CHECK_FAIL"
+  fi
+}
+
 # Record a captain-authorized merge over a non-green check state in the task's
 # meta. The override line is written above the canonical pr= block so the
 # metadata identity parse in bin/fm-pr-lib.sh still accepts the file.
@@ -311,8 +326,20 @@ else
 fi
 
 if [ -n "$UNREADABLE" ]; then
+  # A partly-read rollup can be unreadable AND already red. Both facts are
+  # reported, because "retry once gh can reach the PR" is the wrong action when
+  # the rows that did come back name failing checks, and an override recorded
+  # only as "unreadable" loses the evidence that motivated it.
+  if [ "$CHECK_FAIL" -gt 0 ]; then
+    UNREADABLE="$UNREADABLE, and the rows that were read name failing checks: $(failing_summary)"
+  fi
   if [ "$ALLOW_RED_CHECKS" = 0 ]; then
-    echo "error: could not read the check state of PR $URL ($UNREADABLE), refusing to merge; \"not red\" must be established, not assumed. Retry once gh can reach the PR, or pass --allow-red-checks for a captain-authorized exception." >&2
+    echo "error: could not read the check state of PR $URL ($UNREADABLE), refusing to merge; \"not red\" must be established, not assumed." >&2
+    if [ "$CHECK_FAIL" -gt 0 ]; then
+      echo "Fix those checks and retry once gh can read the whole rollup, or pass --allow-red-checks for a captain-authorized exception." >&2
+    else
+      echo "Retry once gh can reach the PR, or pass --allow-red-checks for a captain-authorized exception." >&2
+    fi
     exit 1
   fi
   OVERRIDE_REASON="check state unreadable: $UNREADABLE"
@@ -327,11 +354,7 @@ elif [ "$CHECK_FAIL" -gt 0 ]; then
     echo "Fix the checks, or pass --allow-red-checks for a captain-authorized exception." >&2
     exit 1
   fi
-  if [ -n "$FAILING" ]; then
-    OVERRIDE_REASON="failing checks: $(printf '%s' "$FAILING" | tr '\n' ';' | sed 's/;$//;s/;/; /g')"
-  else
-    OVERRIDE_REASON="failing checks: $CHECK_FAIL unnamed"
-  fi
+  OVERRIDE_REASON="failing checks: $(failing_summary)"
 fi
 
 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
