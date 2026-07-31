@@ -731,6 +731,25 @@ test_override_record_preserves_every_meta_field() {
 # jq gates the filter's semantics rather than byte-identical evaluation. jq is
 # not a firstmate dependency, so these cases skip where it is absent, the same
 # way this suite gates its other optional tooling.
+#
+# The payloads under tests/fixtures/gh-status-check-rollup/ were recorded from
+# `gh pr view <url> --json statusCheckRollup` with gh 2.92.0 (2026-04-28), then
+# had their repository, run, and deployment URLs rewritten to example/repo.
+# A CheckRun node carries a `conclusion` and no `state`, while a StatusContext
+# node - how external CI posts through the statuses API - carries a `state` and a
+# `context` rather than a `name`, and reading only the conclusion is what once let
+# a genuinely red external check merge as pending, so both shapes are recorded:
+#   check-run-failure.json        a workflow job that failed (conclusion FAILURE)
+#   commit-status-failure.json    external CI failing through a commit status
+#                                 (state FAILURE)
+#   expected-required-status.json a required status context declared but not yet
+#                                 reported (state EXPECTED)
+#   all-skipped.json              a rollup entirely path-filtered or cancelled
+#   unreadable.json               a payload whose rollup field is not an array,
+#                                 so the check state cannot be established
+# To re-record one, run that command against a real PR in the matching state,
+# replace the file's contents wholesale, and redact the repository and any
+# forge URLs back to example/repo before committing.
 FIXTURES="$ROOT/tests/fixtures/gh-status-check-rollup"
 
 # Run one recorded payload through the real filter. Args: name fixture pr-number
