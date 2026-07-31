@@ -35,6 +35,20 @@
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step, then require dependency installation before tooling or tests so fresh worktrees have usable language servers and test environments.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
+# Ship and scout scaffolds state the ABSOLUTE firstmate path for any report or
+# evidence output, because a relative data/ path resolves inside the disposable
+# worktree and is destroyed with it at cleanup. The ship scaffold keeps worktree
+# isolation as its default and permits that one write only when the # Task
+# section explicitly asks for a report or evidence file, and only as
+# data/<id>/report.md or an evidence file that section names beside it - never
+# data/<id>/brief.md, which is the crewmate's own instructions and the channel
+# firstmate amends to hand it a decision, so a permitted evidence write must not
+# be able to destroy it. The scout scaffold's deliverable is always that report.
+# Every firstmate path a scaffold bakes in - the firstmate root whose skills and
+# helpers the crewmate is told to read and run, the report or evidence dir, and
+# the status file alike - is resolved to a real absolute path first, and a
+# relative root, data, or state dir that cannot be resolved is refused rather
+# than asserted absolute.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -67,30 +81,41 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
-resolve_directory_input() {
-  local name=$1 path=$2 resolved
+# Every firstmate path a scaffold bakes in - the firstmate root whose skills and
+# helpers the crewmate is told to read and run, the report or evidence dir, and
+# the status file alike - is resolved by the crewmate from inside its own
+# disposable worktree, so each has to be genuinely absolute rather than merely
+# called absolute: a relative path resolves inside that worktree, where a helper
+# is simply not there and a write is destroyed at cleanup. Resolve them here,
+# and refuse rather than bake in a path the crewmate cannot reach.
+# The variables that can actually clear a refusal differ per dir: FM_ROOT is
+# resolved before FM_HOME is derived from it, so naming FM_HOME there would send
+# an operator back to the identical refusal.
+resolve_home_dir() {  # <name> <label> <path> <settable-vars>
+  local name=$1 label=$2 path=$3 settable=$4 resolved
+  if [ -d "$path" ]; then
+    # An inherited CDPATH would otherwise resolve a relative dir against a
+    # directory the caller never named, so ignore it here.
+    resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd) || {
+      echo "error: $name directory cannot be resolved: $path - the firstmate $label dir could not be resolved to an absolute path" >&2
+      return 1
+    }
+    path=$resolved
+  fi
   case "$path" in
-    /*) printf '%s\n' "$path"; return 0 ;;
+    /*) ;;
+    *)
+      echo "error: $name directory cannot be resolved: $path - the firstmate $label dir is relative and does not exist, so a brief cannot name a path the crewmate can reach from its own worktree; set $settable to an absolute path" >&2
+      return 1
+      ;;
   esac
-  resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || {
-    echo "error: $name directory cannot be resolved: $path" >&2
-    return 1
-  }
-  printf '%s\n' "$resolved"
+  printf '%s\n' "$path"
 }
 
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME=$(resolve_directory_input FM_HOME "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}") || exit 1
-if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
-  DATA=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
-else
-  DATA="$FM_HOME/data"
-fi
-if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
-  STATE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || exit 1
-else
-  STATE="$FM_HOME/state"
-fi
+FM_ROOT=$(resolve_home_dir FM_ROOT_OVERRIDE root "${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}" FM_ROOT_OVERRIDE) || exit 1
+FM_HOME=$(resolve_home_dir FM_HOME home "${FM_HOME:-$FM_ROOT}" FM_HOME) || exit 1
+DATA=$(resolve_home_dir FM_DATA_OVERRIDE data "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "FM_HOME or FM_DATA_OVERRIDE") || exit 1
+STATE=$(resolve_home_dir FM_STATE_OVERRIDE state "${FM_STATE_OVERRIDE:-$FM_HOME/state}" "FM_HOME or FM_STATE_OVERRIDE") || exit 1
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -285,7 +310,8 @@ The report is the only thing that survives, so anything worth keeping must be in
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 # Definition of done
-Write your findings to \`$DATA/$ID/report.md\`.
+Write your findings to the absolute path \`$DATA/$ID/report.md\`.
+Use that absolute path, never a relative \`data/...\` one: a relative path lands inside this worktree, and the worktree is destroyed at cleanup.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
@@ -376,7 +402,9 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+2. Stay inside this worktree; the status file below is the only file you write outside it.
+   The single exception: if the \`# Task\` section above explicitly asks you for a report or evidence file, write it at the absolute path \`$DATA/$ID/report.md\`, or at the absolute path of an evidence file that section names in that same directory - never \`$DATA/$ID/brief.md\`, which is these instructions and may be amended with a decision you must read - and nowhere else outside this worktree.
+   Never use a relative \`data/...\` path for it: a relative path lands inside this worktree, and the worktree is destroyed at cleanup.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`

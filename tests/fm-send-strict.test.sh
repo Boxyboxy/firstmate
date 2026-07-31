@@ -5,6 +5,11 @@
 # well-formed backend target must fail loudly. These tests pin the historical
 # silent-fallback failures: missing FM_HOME, unresolved selectors, prefixless
 # herdr pane ids, dead explicit endpoints, and the healthy exact/fm-id paths.
+#
+# They also pin the length refusal: two ~1,400-byte steers to one busy pane
+# both reported an unconfirmed send and never arrived, so text over
+# fm-send.sh's MAX_TEXT_BYTES constant is refused before any send, and
+# --allow-long is the explicit opt-out for a deliberate long send.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -163,9 +168,100 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
+# 1200 bytes: the size class of the steers that were verifiably lost.
+long_text() {
+  local text=
+  while [ "${#text}" -lt 1200 ]; do
+    text="${text}amend section 3 of the brief with the new acceptance criteria and rerun the suite. "
+  done
+  printf '%s' "$text"
+}
+
+test_over_long_text_is_refused_before_sending() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/too-long"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home toolong); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/lane-long.meta" "window=sess:fm-lane-long" "kind=ship"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-long "$(long_text)" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an over-long steer should be refused"
+  assert_contains "$(cat "$err")" "over the 400-byte limit" "length refusal should name the limit"
+  assert_contains "$(cat "$err")" "$home/data/lane-long/brief.md" \
+    "length refusal should point at the task's brief as the place for long content"
+  assert_contains "$(cat "$err")" "READ $home/data/lane-long/brief.md" \
+    "length refusal should model the pointer AGENTS.md requires: the absolute path plus READ"
+  assert_not_contains "$(cat "$err")" "re-read your brief" \
+    "length refusal should not model a pathless pointer a worker cannot act on"
+  assert_contains "$(cat "$err")" "--allow-long" "length refusal should name its explicit opt-out"
+  [ ! -s "$log" ] || fail "an over-long steer still reached the backend"$'\n'"$(cat "$log")"
+  pass "fm-send strict: over-long text is refused before any send"
+}
+
+# The refusal's whole job is to name the one place long content should go, so in
+# a home whose data dir is overridden it must name that dir rather than a
+# $FM_HOME/data path that does not exist there.
+test_length_refusal_honours_data_override() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/too-long-data-override"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home toolongoverride); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  mkdir -p "$dir/elsewhere-data"
+  fm_write_meta "$home/state/lane-ovr.meta" "window=sess:fm-lane-ovr" "kind=ship"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+  FM_DATA_OVERRIDE="$dir/elsewhere-data" \
+    "$SEND" lane-ovr "$(long_text)" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an over-long steer should be refused"
+  assert_contains "$(cat "$err")" "$dir/elsewhere-data/lane-ovr/brief.md" \
+    "length refusal should point at the overridden data dir's brief"
+  assert_not_contains "$(cat "$err")" "$home/data/lane-ovr/brief.md" \
+    "length refusal should not name a data dir this home does not use"
+  pass "fm-send strict: the length refusal points at the home's actual data dir"
+}
+
+test_allow_long_opt_out_sends() {
+  local dir fb home err log rc got
+  dir="$TMP_ROOT/allow-long"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home allowlong); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/lane-allow.meta" "window=sess:fm-lane-allow" "kind=ship"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-allow --allow-long "$(long_text)" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "--allow-long should send a deliberate long steer"
+  got=$(cat "$log")
+  assert_contains "$got" "target=sess:fm-lane-allow literal=1 arg=amend section 3" \
+    "--allow-long should type the text without the flag itself"
+  assert_not_contains "$got" "--allow-long" "--allow-long should be consumed, not typed into the pane"
+  pass "fm-send strict: --allow-long is an explicit opt-out from the length refusal"
+}
+
+test_short_text_and_key_paths_are_unaffected() {
+  local dir fb home err log rc got
+  dir="$TMP_ROOT/short-and-key"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home shortkey); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/lane-short.meta" "window=sess:fm-lane-short" "kind=ship"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-short "re-read your brief, section 3 amended" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a short pointer steer should still send"
+  got=$(cat "$log")
+  assert_contains "$got" "arg=re-read your brief, section 3 amended" "short text should type unchanged"
+
+  : > "$log"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-short --key Enter >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "the --key path should be unaffected by the length refusal"
+  assert_contains "$(cat "$log")" "arg=Enter" "--key should still submit the named key"
+  pass "fm-send strict: short steers and the --key path are unchanged"
+}
+
 test_exact_lane_id_send_still_works
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_healthy_fm_id_send_still_works
+test_over_long_text_is_refused_before_sending
+test_length_refusal_honours_data_override
+test_allow_long_opt_out_sends
+test_short_text_and_key_paths_are_unaffected

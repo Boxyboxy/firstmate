@@ -1,0 +1,24 @@
+{
+  "statusCheckRollup": [
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-07-29T17:58:03Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/example/repo/actions/runs/17245993001/job/48950113001",
+      "name": "Lint shell scripts",
+      "startedAt": "2026-07-29T17:57:11Z",
+      "status": "COMPLETED",
+      "workflowName": "checks"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-07-29T18:02:44Z",
+      "conclusion": "FAILURE",
+      "detailsUrl": "https://github.com/example/repo/actions/runs/17245993001/job/48950113002",
+      "name": "Behavior tests",
+      "startedAt": "2026-07-29T17:57:12Z",
+      "status": "COMPLETED",
+      "workflowName": "checks"
+    }
+  ]
+}
