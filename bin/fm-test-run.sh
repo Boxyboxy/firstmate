@@ -731,12 +731,6 @@ families_for_changed_path() {
           || printf '%s\n' "__unmapped__:$path"
       fi
       ;;
-    tests/fixtures/*)
-      # A fixture is data for whichever suites read it, and they name it by its
-      # directory, so that directory is the reference to resolve families from.
-      families_for_test_reference "$(basename "$(dirname "$path")")" \
-        || printf '%s\n' "__unmapped__:$path"
-      ;;
     tests/*)
       printf '%s\n' "__unmapped__:$path"
       ;;
