@@ -712,7 +712,8 @@ test_relative_home_is_resolved_or_refused() {
     "a brief was scaffolded naming skills and helpers the crewmate cannot reach"
 
   set +e
-  out=$( cd "$home" && FM_DATA_OVERRIDE=no-such-data "$ROOT/bin/fm-brief.sh" brief-relative-refused some-proj 2>&1 )
+  out=$( cd "$home" && FM_DATA_OVERRIDE=no-such-data FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" brief-relative-refused some-proj 2>&1 )
   rc=$?
   set -e
   expect_code 1 "$rc" "an unresolvable relative data dir should be refused, not asserted absolute"
@@ -724,7 +725,8 @@ test_relative_home_is_resolved_or_refused() {
     "a brief was scaffolded under an unresolvable relative data dir"
 
   set +e
-  out=$( cd "$home" && FM_STATE_OVERRIDE=no-such-state "$ROOT/bin/fm-brief.sh" brief-relative-state-refused some-proj 2>&1 )
+  out=$( cd "$home" && FM_STATE_OVERRIDE=no-such-state FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" brief-relative-state-refused some-proj 2>&1 )
   rc=$?
   set -e
   expect_code 1 "$rc" "an unresolvable relative state dir should be refused, not asserted absolute"

@@ -189,7 +189,10 @@ test_over_long_text_is_refused_before_sending() {
   assert_contains "$(cat "$err")" "over the 400-byte limit" "length refusal should name the limit"
   assert_contains "$(cat "$err")" "$home/data/lane-long/brief.md" \
     "length refusal should point at the task's brief as the place for long content"
-  assert_contains "$(cat "$err")" "re-read your brief" "length refusal should name the working pointer pattern"
+  assert_contains "$(cat "$err")" "READ $home/data/lane-long/brief.md" \
+    "length refusal should model the pointer AGENTS.md requires: the absolute path plus READ"
+  assert_not_contains "$(cat "$err")" "re-read your brief" \
+    "length refusal should not model a pathless pointer a worker cannot act on"
   assert_contains "$(cat "$err")" "--allow-long" "length refusal should name its explicit opt-out"
   [ ! -s "$log" ] || fail "an over-long steer still reached the backend"$'\n'"$(cat "$log")"
   pass "fm-send strict: over-long text is refused before any send"

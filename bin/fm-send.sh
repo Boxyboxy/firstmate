@@ -280,7 +280,7 @@ else
       else
         BRIEF_HINT="$DATA/<id>/brief.md"
       fi
-      echo "error: message is $MESSAGE_BYTES bytes, over the $MAX_TEXT_BYTES-byte limit; a steer this long is lost by a busy pane instead of landing. Append the content to $BRIEF_HINT, then send a short pointer such as 're-read your brief, section X amended'. Pass --allow-long right after the target for a deliberate long send." >&2
+      echo "error: message is $MESSAGE_BYTES bytes, over the $MAX_TEXT_BYTES-byte limit; a steer this long is lost by a busy pane instead of landing. Append the content to $BRIEF_HINT, then send a short pointer such as 'READ $BRIEF_HINT, section X amended' - the absolute path, because a worker cannot find a gitignored brief by searching from its own worktree. Pass --allow-long right after the target for a deliberate long send." >&2
       exit 1
     fi
   fi
