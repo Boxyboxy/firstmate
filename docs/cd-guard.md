@@ -74,13 +74,13 @@ It does not permit `cd /home/project`, because an absolute-path `cd` remains a p
 
 ## Transport and fail-open behavior
 
-`bin/fm-cd-pretool-check.sh` supports all six harness entry shapes used by the tracked adapters:
+`bin/fm-cd-pretool-check.sh` supports all six harness-engine entry shapes used by the tracked adapters, with pi-signed sharing Pi's shape:
 
 - Claude sends stdin JSON at `.tool_input.command` and adds `--claude` to preserve Claude's stderr-only deny requirement.
 - Codex sends stdin JSON at `.tool_input.command` without `--claude`.
 - Grok sends stdin JSON at `.toolInput.command`.
 - OpenCode sends the exact command string through `--command <exact string>`.
-- Pi sends the exact command string through `--command <exact string>`.
+- Pi and pi-signed send the exact command string through `--command <exact string>`.
 - omp sends the exact command string through `--command <exact string>`.
 
 Processing order is cheapest-first: a strict-superset prefilter, then the primary-checkout scope, then the Node policy owner.
@@ -100,7 +100,7 @@ Identical in shape to `docs/arm-pretool-check.md`:
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
 - OpenCode throws only when the checker exits 2.
-- Pi and omp return `{block: true}` only when the checker exits 2.
+- Pi, pi-signed, and omp return `{block: true}` only when the checker exits 2.
 
 ## Shared classifier ownership
 

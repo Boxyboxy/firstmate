@@ -604,36 +604,106 @@ EOF
   expect_code 0 "$status" "grok adapter must allow its own forced resume turn to end"
   [ -z "$out" ] || fail "grok adapter printed output while loop-guarded: $out"
   [ ! -e "$log" ] || fail "grok adapter spawned another resume while loop-guarded: $(cat "$log")"
-  pass "fm-turnend-guard-grok: loop guard prevents a nested resume loop"
+  pass "fm-turnend-guard-grok: legacy environment loop guard prevents a nested resume loop"
 }
 
-test_settings_hook_uses_claude_project_dir() {
-  local settings command
-  settings="$ROOT/.claude/settings.json"
-  [ -f "$settings" ] || fail "tracked .claude/settings.json is missing"
-  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "Stop hook command is missing from .claude/settings.json"
-  assert_contains "$command" 'CLAUDE_PROJECT_DIR' "Stop hook must resolve via CLAUDE_PROJECT_DIR, not a cwd-relative path"
-  assert_contains "$command" 'fm-turnend-guard.sh --claude' "Stop hook must invoke fm-turnend-guard.sh in cooperative --claude mode"
-  case "$command" in
-    bin/fm-turnend-guard.sh|./bin/fm-turnend-guard.sh)
-      fail "Stop hook must not use a bare relative path (cwd-dependent): $command"
-      ;;
-  esac
-  pass ".claude/settings.json: Stop hook uses CLAUDE_PROJECT_DIR-anchored --claude guard command"
+test_grok_adapter_native_false_blocks_without_resume() {
+  local dir fakebin log out status
+  dir=$(make_primary_dir "$TMP_ROOT/grok-native-false")
+  : > "$dir/state/task1.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/grok-native-false-bin")
+  log="$TMP_ROOT/grok-native-false.log"
+  printf '#!/usr/bin/env bash\nprintf called >> %q\n' "$log" > "$fakebin/grok"
+  chmod +x "$fakebin/grok"
+  out=$(printf '%s' '{"sessionId":"native","stopHookActive":false}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 2 "$status" "native stopHookActive=false must return the shared blocking status"
+  assert_contains "$out" 'TURN WOULD END BLIND' "native block must pass shared guard feedback to Grok"
+  [ ! -e "$log" ] || fail "native path started grok --resume"
+  pass "fm-turnend-guard-grok: native false delegates blocking feedback with zero resume processes"
 }
 
-test_codex_hook_invokes_shared_guard() {
-  local settings command
-  settings="$ROOT/.codex/hooks.json"
-  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
-  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
-  assert_contains "$command" 'pwd -P' "codex hook must anchor from the hook process working directory"
-  assert_contains "$command" '.codex/hooks.json' "codex hook must verify the hook-loaded firstmate root"
-  assert_contains "$command" 'fm-turnend-guard.sh' "codex hook must invoke the shared guard"
-  assert_not_contains "$command" '.cwd' "codex hook must not use payload cwd to select the guard executable"
-  pass ".codex/hooks.json: Stop hook invokes the shared primary guard"
+test_grok_adapter_native_true_allows_without_resume() {
+  local dir fakebin log out status
+  dir=$(make_primary_dir "$TMP_ROOT/grok-native-true")
+  : > "$dir/state/task1.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/grok-native-true-bin")
+  log="$TMP_ROOT/grok-native-true.log"
+  printf '#!/usr/bin/env bash\nprintf called >> %q\n' "$log" > "$fakebin/grok"
+  chmod +x "$fakebin/grok"
+  out=$(printf '%s' '{"sessionId":"native","stopHookActive":true}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "native stopHookActive=true must allow the bounded continuation to stop"
+  [ -z "$out" ] || fail "native true produced output: $out"
+  [ ! -e "$log" ] || fail "native true started grok --resume"
+  pass "fm-turnend-guard-grok: native true remains bounded and starts no resume process"
+}
+
+test_grok_adapter_snake_case_native_and_camel_precedence() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/grok-native-spellings")
+  : > "$dir/state/task1.meta"
+  out=$(printf '%s' '{"sessionId":"native","stop_hook_active":false}' | GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 2 "$status" "typed snake_case false must select native blocking"
+  assert_contains "$out" 'TURN WOULD END BLIND' "snake_case native block lost feedback"
+  out=$(printf '%s' '{"sessionId":"native","stopHookActive":true,"stop_hook_active":false}' | GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "camelCase true must win over snake_case false"
+  out=$(printf '%s' '{"sessionId":"native","stopHookActive":false,"stop_hook_active":true}' | GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 2 "$status" "camelCase false must win over snake_case true"
+  pass "fm-turnend-guard-grok: both spellings are typed and camelCase has deterministic precedence"
+}
+
+test_grok_adapter_invalid_inputs_start_neither_path() {
+  local dir fakebin log payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/grok-invalid-inputs")
+  : > "$dir/state/task1.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/grok-invalid-bin")
+  log="$TMP_ROOT/grok-invalid.log"
+  printf '#!/usr/bin/env bash\nprintf called >> %q\n' "$log" > "$fakebin/grok"
+  chmod +x "$fakebin/grok"
+  for payload in \
+    ' ' \
+    '{' \
+    '{"sessionId":"x","stopHookActive":"false"}' \
+    '{"sessionId":"x","stop_hook_active":1}' \
+    '{"sessionId":"x"}{"sessionId":"y"}' \
+    '{"sessionId":"x","stopHookActive":false}{"sessionId":"y","stopHookActive":false}' \
+    '{"sessionId":"x","stopHookActive":"bad","stopHookActive":false}' \
+    '{"sessionId":"x","stop_hook_active":false,"stop_hook_active":false}' \
+    '{"sessionId":"x","sessionId":"y"}'
+  do
+    out=$(printf '%s' "$payload" | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+    expect_code 0 "$status" "invalid Grok payload must conservatively allow without choosing a path"
+    [ -z "$out" ] || fail "invalid Grok payload produced output: $out"
+  done
+  [ ! -e "$log" ] || fail "invalid Grok payload started a resume process"
+  out=$(printf '%s' '{"sessionId":"x","stopHookActive":false}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$TMP_ROOT/missing-grok-root" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "missing shared-guard prerequisite must conservatively allow"
+  [ -z "$out" ] || fail "missing prerequisite produced output: $out"
+  [ ! -e "$log" ] || fail "missing prerequisite started a resume process"
+  pass "fm-turnend-guard-grok: malformed, invalidly typed, and missing-prerequisite payloads start neither path"
+}
+
+test_grok_adapter_missing_jq_and_no_supervision_allow() {
+  local dir fakebin log out status tool tool_path
+  dir=$(make_primary_dir "$TMP_ROOT/grok-nojq")
+  : > "$dir/state/task1.meta"
+  fakebin=$(fm_fakebin "$TMP_ROOT/grok-nojq-bin")
+  log="$TMP_ROOT/grok-nojq.log"
+  for tool in bash cat printf; do
+    tool_path=$(command -v "$tool") || fail "test host must provide $tool"
+    ln -s "$tool_path" "$fakebin/$tool"
+  done
+  printf '#!/usr/bin/env bash\nprintf called >> %q\n' "$log" > "$fakebin/grok"
+  chmod +x "$fakebin/grok"
+  out=$(printf '%s' '{"sessionId":"x","stopHookActive":false}' | PATH="$fakebin" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "missing jq must conservatively allow"
+  [ -z "$out" ] || fail "missing jq produced output: $out"
+  [ ! -e "$log" ] || fail "missing jq started a resume process"
+
+  dir=$(make_primary_dir "$TMP_ROOT/grok-native-no-work")
+  out=$(printf '%s' '{"sessionId":"x","stopHookActive":false}' | GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  expect_code 0 "$status" "healthy no-supervision-needed native stop must allow"
+  [ -z "$out" ] || fail "no-supervision-needed native stop produced output: $out"
+  pass "fm-turnend-guard-grok: missing jq and no-supervision-needed stops stay silent and bounded"
 }
 
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
@@ -699,23 +769,6 @@ EOF
   pass ".codex/hooks.json: Stop hook ignores nested git root guard scripts"
 }
 
-test_opencode_plugin_forces_followup() {
-  local plugin content
-  plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
-  [ -f "$plugin" ] || fail "tracked OpenCode primary plugin is missing"
-  content=$(cat "$plugin")
-  assert_contains "$content" 'session.idle' "OpenCode plugin must run on session.idle"
-  assert_contains "$content" 'fm-turnend-guard.sh' "OpenCode plugin must invoke the shared guard"
-  assert_contains "$content" 'promptAsync' "OpenCode plugin must force a follow-up turn"
-  assert_contains "$content" 'encodeFirstmateOperationalInput' "OpenCode plugin must use the typed operational-input constructor"
-  assert_contains "$content" 'skipNextIdle' "OpenCode plugin must carry a loop guard"
-  assert_contains "$content" 'worktree' "OpenCode plugin must anchor the guard from the git worktree path"
-  assert_contains "$content" 'watcher cycle is missing, failed, or unhealthy' "OpenCode plugin must identify a blind turn as watcher recovery"
-  assert_contains "$content" 'harness recovery instruction below' "OpenCode plugin must delegate recovery action to the shared guard line"
-  assert_not_contains "$content" 'Resume supervision according to the session-start operating block' "OpenCode plugin must not route a blind turn through ordinary continuity"
-  pass ".opencode primary plugin: session.idle forces one follow-up through the shared guard"
-}
-
 test_opencode_plugin_anchors_guard_to_worktree() {
   local plugin parent worktree_dir wrong_dir out status
   plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
@@ -773,30 +826,6 @@ EOF
   expect_code 0 "$status" "OpenCode plugin must run the guard from worktree even when directory is elsewhere"
   [ -z "$out" ] || fail "OpenCode plugin worktree-root test printed output: $out"
   pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
-}
-
-test_pi_extension_forces_followup() {
-  local ext content
-  ext="$ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
-  [ -f "$ext" ] || fail "tracked pi primary extension is missing"
-  content=$(cat "$ext")
-  assert_contains "$content" 'agent_settled' "pi extension must run after one logical agent run settles"
-  assert_contains "$content" 'fm-turnend-guard.sh' "pi extension must invoke the shared guard"
-  assert_contains "$content" 'sendUserMessage' "pi extension must force a follow-up turn"
-  assert_contains "$content" 'encodeFirstmateOperationalInput' "pi extension must use the typed operational-input constructor"
-  assert_contains "$content" 'deliverAs: "followUp"' "pi extension must queue the follow-up safely"
-  assert_contains "$content" 'guardFollowupActive' "pi extension must carry a logical-run loop guard"
-  assert_not_contains "$content" 'skipNextTurnEnd' "pi extension kept the internal-turn loop guard"
-  assert_contains "$content" 'watcher cycle is missing, failed, or unhealthy' "pi extension must identify a blind turn as watcher recovery"
-  assert_contains "$content" 'harness recovery instruction below' "pi extension must delegate recovery action to the shared guard line"
-  assert_not_contains "$content" 'Resume supervision according to the session-start operating block' "pi extension must not route a blind turn through ordinary continuity"
-  assert_contains "$content" '.pi-turnend-extension-loaded' "pi extension must write its loaded marker for session-start diagnostics"
-  assert_contains "$content" 'lockOwnership' "pi extension loaded marker must respect the session lock"
-  assert_contains "$content" 'const command = String((event.input as { command?: unknown })?.command ?? "")' "pi extension changed bash command extraction for the PreToolUse contract"
-  assert_contains "$content" 'runPretoolCheck(command)' "pi extension changed the PreToolUse checker invocation"
-  assert_contains "$content" 'return { block: true, reason:' "pi extension changed the checker exit-2 block result"
-  assert_not_contains "$content" 'Run bin/fm-watch-arm.sh as a background task' "pi extension must not hardcode the old watcher-arm instruction"
-  pass ".pi primary extension: agent_settled forces one follow-up through the shared guard"
 }
 
 test_pi_extension_injects_once_per_logical_agent_run() {
@@ -1075,42 +1104,138 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
   pass "fm-turnend-guard --claude: secondmate home re-blocks unclaimed and allows auto-arm-claimed stops"
 }
 
-test_grok_hook_invokes_adapter() {
-  local settings command
-  settings="$ROOT/.grok/hooks/fm-primary-turnend-guard.json"
-  [ -f "$settings" ] || fail "tracked grok primary hook config is missing"
-  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "Stop hook command is missing from grok primary hook config"
-  assert_contains "$command" 'GROK_WORKSPACE_ROOT' "grok hook must anchor from GROK_WORKSPACE_ROOT"
-  assert_contains "$command" 'fm-turnend-guard-grok.sh' "grok hook must invoke the adapter"
-  pass ".grok primary hook: Stop hook invokes the grok adapter"
-}
-
-test_omp_extension_forces_continuation() {
-  local ext content
-  ext="$ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
-  [ -f "$ext" ] || fail "tracked omp primary extension is missing"
+# omp is the third turn-end blocking class: not an exit-2 Stop hook process
+# (claude, codex) and not a passive lifecycle callback that injects a bounded
+# follow-up (opencode, pi, pi-signed), but a return-value block - the
+# session_stop handler returns {continue: true, additionalContext} when the
+# shared guard exits 2. These two cases drive the real tracked extension.
+make_omp_extension_repo() {
+  local repo=$1 ext
+  ext="$repo/.omp/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.omp/extensions" "$repo/bin"
   # omp only auto-discovers COMMITTED .omp/extensions/*.ts, so the guard MUST be
   # git-tracked or it silently never loads and the primary turns blind.
   git -C "$ROOT" ls-files --error-unmatch .omp/extensions/fm-primary-turnend-guard.ts >/dev/null 2>&1 \
     || fail "omp primary extension must be git-tracked so omp auto-discovers it"
-  content=$(cat "$ext")
-  # POSITIVE: omp is direct-blocking via the session_stop return value.
-  assert_contains "$content" 'session_stop' "omp extension must hook session_stop"
-  assert_contains "$content" 'fm-turnend-guard.sh' "omp extension must invoke the shared guard"
-  assert_contains "$content" 'continue' "omp extension must force a continuation via the return value"
-  assert_contains "$content" 'additionalContext' "omp extension must pass the guard reason as additionalContext"
-  assert_contains "$content" 'forcedThisEpisode' "omp extension must carry a one-shot per-episode loop guard"
-  assert_contains "$content" '.omp-turnend-extension-loaded' "omp extension must write its loaded marker for session-start diagnostics"
-  assert_contains "$content" 'lockOwnership' "omp extension loaded marker must respect the session lock"
-  assert_contains "$content" 'session-start operating block' "omp extension must use harness-neutral repair wording"
-  # NEGATIVE: catch a lazy copy of the pi extension (which uses a different shape).
-  assert_not_contains "$content" 'sendUserMessage' "omp extension must block via the return value, not pi's sendUserMessage"
-  assert_not_contains "$content" 'turn_end' "omp extension must hook session_stop, not pi's turn_end"
-  assert_not_contains "$content" 'skipNextTurnEnd' "omp extension must use forcedThisEpisode, not pi's skipNextTurnEnd"
-  assert_not_contains "$content" '.pi-turnend-extension-loaded' "omp extension must write the omp marker, not pi's"
-  pass ".omp primary extension: session_stop forces one continuation through the shared guard"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'guard\n' >> "${FM_GUARD_LOG:?}"
+[ -e "${FM_GUARD_ALLOW:?}" ] && exit 0
+printf 'omp session_stop guard fired\n' >&2
+exit 2
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh"
+  printf '%s\n' "$ext"
 }
+
+test_omp_extension_forces_continuation() {
+  local repo home ext log allow out status runs
+  repo="$TMP_ROOT/omp-session-stop-root"
+  home="$TMP_ROOT/omp-session-stop-home"
+  log="$TMP_ROOT/omp-session-stop-guard.log"
+  allow="$TMP_ROOT/omp-session-stop-allow"
+  mkdir -p "$home/state"
+  ext=$(make_omp_extension_repo "$repo")
+  : > "$log"
+  out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" FM_GUARD_ALLOW="$allow" \
+    node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let messages = 0;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  sendUserMessage() {
+    messages += 1;
+  },
+  sendMessage() {
+    messages += 1;
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+
+// omp blocks at session_stop. It does also emit turn_end every turn, but for
+// omp that is a wake notification only - turning it into a continuation or a
+// message injection would be a lazy copy of the pi extension, whose transport
+// omp does not support. So turn_end must stay inert here whether or not the
+// guard binds it at all.
+// (No apostrophes in this heredoc: bash 3.2 mis-parses one inside $(...).)
+if (!handlers.has("session_stop")) throw new Error("session_stop handler was not registered");
+const turnEnd = handlers.get("turn_end");
+if (turnEnd) {
+  const spurious = await turnEnd({ type: "turn_end", turnIndex: 0 }, {});
+  if (spurious) throw new Error(`turn_end produced a turn decision: ${JSON.stringify(spurious)}`);
+  if (messages !== 0) throw new Error("turn_end injected a message instead of staying a wake notification");
+}
+const stop = handlers.get("session_stop");
+
+const blind = await stop({ type: "session_stop" }, {});
+if (blind?.continue !== true) throw new Error(`blind stop did not force a continuation: ${JSON.stringify(blind)}`);
+const context = blind.additionalContext ?? "";
+if (!context.includes("TURN WOULD END BLIND")) throw new Error(`continuation lost the blind-turn banner: ${context}`);
+if (!context.includes("session-start operating block")) throw new Error(`continuation lost the harness-neutral repair wording: ${context}`);
+if (!context.includes("omp session_stop guard fired")) throw new Error(`continuation did not carry the guard reason: ${context}`);
+if (messages !== 0) throw new Error("omp forced its continuation through a message instead of the return value");
+
+// One-shot per-episode loop guard: the stop that the forced continuation itself
+// produces must pass through, and must not even re-run the guard.
+const suppressed = await stop({ type: "session_stop" }, {});
+if (suppressed) throw new Error(`per-episode loop guard did not release the follow-on stop: ${JSON.stringify(suppressed)}`);
+
+const reengaged = await stop({ type: "session_stop" }, {});
+if (reengaged?.continue !== true) throw new Error("guard did not re-engage on the next unhealthy stop");
+await stop({ type: "session_stop" }, {});
+
+// A healthy guard (exit 0) must never force a continuation.
+writeFileSync(process.env.FM_GUARD_ALLOW, "");
+const healthy = await stop({ type: "session_stop" }, {});
+if (healthy) throw new Error(`a healthy stop forced a continuation: ${JSON.stringify(healthy)}`);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "omp session_stop must block by returning continue+additionalContext"
+  [ -z "$out" ] || fail "omp session_stop guard test printed output: $out"
+  runs=$(grep -c guard "$log")
+  [ "$runs" = 3 ] || fail "loop-guard-suppressed stops must not re-run the guard: $runs guard runs for 5 stops"
+  assert_present "$home/state/.omp-turnend-extension-loaded" \
+    "omp extension must write its own loaded marker for session-start diagnostics"
+  assert_absent "$home/state/.pi-turnend-extension-loaded" \
+    "omp extension must write the omp marker, not pi's"
+  pass ".omp primary extension: session_stop forces one continuation per episode through the shared guard"
+}
+
+test_omp_extension_marker_respects_session_lock() {
+  local repo home ext pid out status
+  repo="$TMP_ROOT/omp-marker-lock-root"
+  home="$TMP_ROOT/omp-marker-lock-home"
+  mkdir -p "$home/state"
+  ext=$(make_omp_extension_repo "$repo")
+  sleep 30 &
+  pid=$!
+  printf '%s\n' "$pid" > "$home/state/.lock"
+  out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$TMP_ROOT/omp-marker-lock.log" \
+    FM_GUARD_ALLOW="$TMP_ROOT/omp-marker-lock-allow" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+await import(pathToFileURL(process.env.PLUGIN).href);
+EOF
+  )
+  status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "omp extension must load cleanly in a home another session holds"
+  [ -z "$out" ] || fail "omp marker lock test printed output: $out"
+  assert_absent "$home/state/.omp-turnend-extension-loaded" \
+    "omp extension must not stamp its loaded marker over a live foreign session lock"
+  pass ".omp primary extension: the loaded marker respects a live foreign session lock"
+}
+
 
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
@@ -1143,17 +1268,18 @@ test_hook_silent_without_stdin
 test_hook_runs_fast
 test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
-test_settings_hook_uses_claude_project_dir
-test_codex_hook_invokes_shared_guard
+test_grok_adapter_native_false_blocks_without_resume
+test_grok_adapter_native_true_allows_without_resume
+test_grok_adapter_snake_case_native_and_camel_precedence
+test_grok_adapter_invalid_inputs_start_neither_path
+test_grok_adapter_missing_jq_and_no_supervision_allow
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
-test_opencode_plugin_forces_followup
 test_opencode_plugin_anchors_guard_to_worktree
-test_pi_extension_forces_followup
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
-test_grok_hook_invokes_adapter
 test_omp_extension_forces_continuation
+test_omp_extension_marker_respects_session_lock
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive

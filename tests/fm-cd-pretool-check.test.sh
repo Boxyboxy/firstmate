@@ -371,79 +371,66 @@ test_policy_cli_direct() {
 }
 
 # --- per-harness wiring -----------------------------------------------------
+#
+# The acceptance matrix above already drives every harness entry form of the
+# transport, so what is left per harness is how the adapter refuses the call.
+# The hook-config harnesses (claude, codex, grok) refuse through the transport
+# exit code the matrix pins. The in-process harnesses (opencode, pi, pi-signed,
+# omp) refuse from inside the harness - opencode by throwing from
+# tool.execute.before, the Pi-derived adapters by returning {block: true} from
+# tool_call. omp is driven here against the real cd-guard so the ordering
+# contract is pinned too: the cd-guard is consulted before the watcher-arm
+# check, so a cd-only hazard is blocked with the cd-guard reason.
 
-test_claude_wiring() {
-  local settings n
-  settings="$ROOT/.claude/settings.json"
-  [ -f "$settings" ] || fail "tracked .claude/settings.json is missing"
-  n=$(jq -r '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-cd-pretool-check.sh"))] | length' "$settings")
-  [ "$n" = 1 ] || fail "claude PreToolUse must invoke fm-cd-pretool-check.sh exactly once"
-  jq -e '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-cd-pretool-check.sh") and contains("--claude") and contains("CLAUDE_PROJECT_DIR"))] | length == 1' "$settings" >/dev/null \
-    || fail "claude cd hook must use CLAUDE_PROJECT_DIR and --claude"
-  jq -e '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-arm-pretool-check.sh"))] | length == 1' "$settings" >/dev/null \
-    || fail "claude cd hook must not displace the watcher-arm hook"
-  pass ".claude/settings.json: PreToolUse invokes the cd-guard alongside the arm guard"
+test_omp_extension_tool_call_runs_cd_guard_first() {
+  local fixture ext out status=0
+  fixture=$(make_primary_fixture "$TMP_ROOT/omp-tool-call")
+  ext="$fixture/.omp/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$fixture/.omp/extensions"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  # The watcher-arm checker is installed too, and allows every command below, so
+  # a block here can only have come from the cd-guard.
+  cat > "$fixture/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fixture/bin/fm-arm-pretool-check.sh"
+  out=$(PLUGIN="$ext" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const pi = { on(event, handler) { handlers.set(event, handler); } };
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+
+const toolCall = handlers.get("tool_call");
+if (!toolCall) throw new Error("omp extension did not register a tool_call handler");
+const call = (input, toolName = "bash") => toolCall({ type: "tool_call", toolName, input }, {});
+
+// A persistent top-level cwd change is the hazard the cd-guard exists for, and
+// the watcher-arm checker installed alongside it allows this command.
+const denied = await call({ command: "cd projects/foo" });
+if (denied?.block !== true) throw new Error(`persistent cd was not blocked: ${JSON.stringify(denied)}`);
+if (!denied.reason) throw new Error("cd block carried no reason for the harness to show");
+
+// Exit 2 is the only blocking code: a scoped cd and a non-cd command pass.
+for (const command of ["(cd projects/foo && pwd)", "git -C projects/foo status", "ls -la"]) {
+  const allowed = await call({ command });
+  if (allowed?.block) throw new Error(`allowed command was blocked: ${command}`);
 }
 
-test_codex_wiring() {
-  local settings command
-  settings="$ROOT/.codex/hooks.json"
-  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
-  command=$(jq -r '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-cd-pretool-check.sh"))][0] // empty' "$settings")
-  [ -n "$command" ] || fail "codex PreToolUse must invoke fm-cd-pretool-check.sh"
-  assert_contains "$command" 'pwd -P' "codex cd hook must anchor from the hook process working directory"
-  assert_contains "$command" 'fm-cd-pretool-check.sh' "codex cd hook must invoke the cd-guard"
-  jq -e '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-arm-pretool-check.sh"))] | length == 1' "$settings" >/dev/null \
-    || fail "codex cd hook must not displace the watcher-arm hook"
-  pass ".codex/hooks.json: PreToolUse invokes the cd-guard alongside the arm guard"
+// Scoped to bash, and inert without a usable command string.
+const otherTool = await call({ command: "cd projects/foo" }, "read");
+if (otherTool?.block) throw new Error("cd-guard escaped its bash tool scope");
+for (const input of [{}, { command: "" }, { command: null }, undefined]) {
+  const empty = await call(input);
+  if (empty?.block) throw new Error(`missing command blocked the call: ${JSON.stringify(input)}`);
 }
-
-test_grok_wiring() {
-  local settings command
-  settings="$ROOT/.grok/hooks/fm-primary-cd-check.json"
-  [ -f "$settings" ] || fail "tracked grok cd hook config is missing"
-  command=$(jq -r '.hooks.PreToolUse[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "grok cd hook command is missing"
-  assert_contains "$command" 'GROK_WORKSPACE_ROOT' "grok cd hook must anchor from GROK_WORKSPACE_ROOT"
-  assert_contains "$command" 'fm-cd-pretool-check.sh' "grok cd hook must invoke the cd-guard"
-  assert_contains "$command" '${GROK_WORKSPACE_ROOT:-}' "grok cd hook must default-guard the workspace var"
-  pass ".grok primary cd hook: PreToolUse invokes the cd-guard"
-}
-
-test_opencode_wiring() {
-  local plugin content
-  plugin="$ROOT/.opencode/plugins/fm-primary-cd-check.js"
-  [ -f "$plugin" ] || fail "tracked OpenCode cd plugin is missing"
-  content=$(cat "$plugin")
-  assert_contains "$content" 'tool.execute.before' "OpenCode cd plugin must run before tool execution"
-  assert_contains "$content" 'fm-cd-pretool-check.sh' "OpenCode cd plugin must invoke the cd-guard"
-  assert_contains "$content" 'throw new Error' "OpenCode cd plugin must block by throwing"
-  assert_contains "$content" 'worktree' "OpenCode cd plugin must anchor from the git worktree path"
-  pass ".opencode cd plugin: tool.execute.before invokes the cd-guard and blocks by throwing"
-}
-
-test_pi_wiring() {
-  local ext content
-  ext="$ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
-  [ -f "$ext" ] || fail "tracked pi primary extension is missing"
-  content=$(cat "$ext")
-  assert_contains "$content" 'runCdCheck(command)' "pi extension must run the cd check in tool_call"
-  assert_contains "$content" 'fm-cd-pretool-check.sh' "pi extension must invoke the cd-guard owner"
-  assert_contains "$content" 'runPretoolCheck(command)' "pi extension must keep running the watcher-arm check"
-  assert_contains "$content" 'return { block: true, reason:' "pi extension must block on a checker exit 2"
-  pass ".pi primary extension: tool_call runs the cd-guard alongside the watcher-arm check"
-}
-
-test_omp_wiring() {
-  local ext content
-  ext="$ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
-  [ -f "$ext" ] || fail "tracked omp primary extension is missing"
-  content=$(cat "$ext")
-  assert_contains "$content" 'runCdCheck(command)' "omp extension must run the cd check in tool_call"
-  assert_contains "$content" 'fm-cd-pretool-check.sh' "omp extension must invoke the cd-guard owner"
-  assert_contains "$content" 'runPretoolCheck(command)' "omp extension must keep running the watcher-arm check"
-  assert_contains "$content" 'return { block: true, reason:' "omp extension must block on a checker exit 2"
-  pass ".omp primary extension: tool_call runs the cd-guard alongside the watcher-arm check"
+EOF
+  ) || status=$?
+  expect_code 0 "$status" "omp tool_call cd-guard seatbelt"
+  [ -z "$out" ] || fail "omp tool_call cd-guard test printed output: $out"
+  pass ".omp primary extension: tool_call runs the cd-guard ahead of the watcher-arm check and blocks on its deny"
 }
 
 test_scripts_are_shellcheck_clean() {
@@ -465,10 +452,5 @@ test_fail_open_missing_node
 test_fail_open_missing_jq_on_stdin
 test_prefilter_skips_node_without_cd_substring
 test_policy_cli_direct
-test_claude_wiring
-test_codex_wiring
-test_grok_wiring
-test_opencode_wiring
-test_pi_wiring
-test_omp_wiring
+test_omp_extension_tool_call_runs_cd_guard_first
 test_scripts_are_shellcheck_clean

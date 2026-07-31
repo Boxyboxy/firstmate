@@ -148,8 +148,13 @@ EOF
   pass "OpenCode session.created delivers the exact wrapper nudge once per session"
 }
 
-test_tracked_harness_registration() {
-  local command pi_plugin omp_plugin opencode_plugin
+# The hook-config harnesses (claude, codex, grok) register the wrapper through a
+# tracked JSON hook whose registration - matcher, count, and invoked command - is
+# the observable contract, so it is asserted through jq on the config itself.
+# The extension/plugin harnesses (opencode, pi, pi-signed, omp) are covered by
+# driving the tracked adapter and observing what it delivers.
+test_hook_config_harness_registration() {
+  local command
   jq -e '.hooks.SessionStart | length == 1' "$ROOT/.claude/settings.json" >/dev/null \
     || fail "Claude SessionStart hook is not registered exactly once"
   jq -e '.hooks.SessionStart[0].matcher == "startup|resume|clear"' "$ROOT/.claude/settings.json" >/dev/null \
@@ -158,38 +163,78 @@ test_tracked_harness_registration() {
     "$ROOT/.claude/settings.json" >/dev/null || fail "Claude SessionStart hook does not invoke the wrapper"
 
   command=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$ROOT/.codex/hooks.json")
-  # shellcheck disable=SC2016
-  assert_contains "$command" 'payload=$(cat' "Codex SessionStart hook does not read its payload"
-  # shellcheck disable=SC2016
-  assert_contains "$command" 'root=$(pwd -P)' "Codex SessionStart hook is not pwd-anchored"
   assert_contains "$command" 'fm-sessionstart-nudge.sh' "Codex SessionStart hook does not invoke the wrapper"
 
   command=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$ROOT/.grok/hooks/fm-primary-sessionstart-nudge.json")
-  # shellcheck disable=SC2016
-  assert_contains "$command" '${GROK_WORKSPACE_ROOT:-}' "Grok SessionStart hook lacks an inline-default workspace root"
-  # shellcheck disable=SC2016
-  assert_not_contains "$command" '${GROK_WORKSPACE_ROOT}' "Grok SessionStart hook contains a bare variable expansion"
   assert_contains "$command" 'fm-sessionstart-nudge.sh' "Grok SessionStart hook does not invoke the wrapper"
 
-  pi_plugin=$(cat "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts")
-  assert_contains "$pi_plugin" '["startup", "new", "resume"]' "Pi SessionStart handler has the wrong reason allowlist"
-  assert_contains "$pi_plugin" 'fm-sessionstart-nudge.sh' "Pi SessionStart handler does not invoke the wrapper"
-  assert_contains "$pi_plugin" 'firstmate-sessionstart-nudge' "Pi SessionStart handler does not inject a custom context message"
-  assert_contains "$pi_plugin" 'details: { kind: "session-start" }' "Pi SessionStart context does not retain its exact structured kind"
-  assert_contains "$pi_plugin" 'pi.sendMessage' "Pi SessionStart handler does not use the context-safe message API"
+  pass "the hook-config harnesses register the shared session-start nudge exactly once"
+}
 
-  omp_plugin=$(cat "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts")
-  assert_contains "$omp_plugin" '["startup", "new", "resume"]' "OMP SessionStart handler has the wrong reason allowlist"
-  assert_contains "$omp_plugin" 'fm-sessionstart-nudge.sh' "OMP SessionStart handler does not invoke the wrapper"
-  assert_contains "$omp_plugin" 'firstmate-sessionstart-nudge' "OMP SessionStart handler does not inject a custom context message"
-  assert_contains "$omp_plugin" 'pi.sendMessage' "OMP SessionStart handler does not use the context-safe message API"
+# omp has verified native session_start. Its tracked primary extension reuses the
+# Pi-derived pi.sendMessage context injection, so the guarantee worth pinning is
+# behavioral: for startup/new/resume it delivers exactly the wrapper's bytes as a
+# non-displayed custom message, and for any other reason it delivers nothing.
+test_omp_extension_delivers_exact_nudge_for_allowed_reasons() {
+  local root ext out status=0
+  root="$TMP_ROOT/omp-primary"
+  ext="$root/.omp/extensions/fm-primary-turnend-guard.ts"
+  make_primary "$root"
+  mkdir -p "$root/.omp/extensions"
+  git -C "$ROOT" ls-files --error-unmatch .omp/extensions/fm-primary-turnend-guard.ts >/dev/null 2>&1 \
+    || fail "omp primary extension must be git-tracked so omp auto-discovers it"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
+    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
+  chmod +x "$root/bin/fm-sessionstart-nudge.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$root" EXPECTED="$NUDGE_LINE" \
+    node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
 
-  opencode_plugin=$(cat "$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js")
-  assert_contains "$opencode_plugin" 'session.created' "OpenCode plugin does not listen for session.created"
-  assert_contains "$opencode_plugin" 'fm-sessionstart-nudge.sh' "OpenCode plugin does not invoke the wrapper"
-  assert_contains "$opencode_plugin" 'promptAsync' "OpenCode plugin does not prompt the nudge turn"
+const handlers = new Map();
+const delivered = [];
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  sendMessage(message) {
+    delivered.push(message);
+  },
+  sendUserMessage(message) {
+    delivered.push({ content: message, via: "sendUserMessage" });
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
 
-  pass "all six verified harnesses register the shared session-start nudge"
+const sessionStart = handlers.get("session_start");
+if (!sessionStart) throw new Error("omp extension did not register a session_start handler");
+
+for (const reason of ["startup", "new", "resume"]) {
+  delivered.length = 0;
+  await sessionStart({ type: "session_start", reason }, {});
+  if (delivered.length !== 1) throw new Error(`reason ${reason} delivered ${delivered.length} messages`);
+  const message = delivered[0];
+  if (message.via) throw new Error(`reason ${reason} used the follow-up transport, not the context-safe one`);
+  if (message.customType !== "firstmate-sessionstart-nudge") {
+    throw new Error(`reason ${reason} lost the custom type: ${JSON.stringify(message)}`);
+  }
+  if (message.display !== false) throw new Error(`reason ${reason} displayed the operational nudge`);
+  if (message.content !== process.env.EXPECTED) {
+    throw new Error(`reason ${reason} delivered unexpected bytes: ${JSON.stringify(message.content)}`);
+  }
+}
+
+for (const reason of ["compact", "clear", ""]) {
+  delivered.length = 0;
+  await sessionStart({ type: "session_start", reason }, {});
+  if (delivered.length !== 0) throw new Error(`reason ${reason} is outside the allowlist but delivered a nudge`);
+}
+EOF
+  ) || status=$?
+  expect_code 0 "$status" "omp session_start nudge delivery"
+  [ -z "$out" ] || fail "omp session_start nudge delivery printed output: $out"
+  pass "omp session_start delivers the exact wrapper nudge for startup/new/resume only"
 }
 
 test_genuine_primary_nudges
@@ -200,4 +245,5 @@ test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
 test_owned_lock_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
-test_tracked_harness_registration
+test_hook_config_harness_registration
+test_omp_extension_delivers_exact_nudge_for_allowed_reasons

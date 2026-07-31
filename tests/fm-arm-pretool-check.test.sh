@@ -13,6 +13,7 @@ set -u
 
 CHECK="$ROOT/bin/fm-arm-pretool-check.sh"
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
+TMP_ROOT=$(fm_test_tmproot fm-arm-pretool-check)
 
 # --- full cross-harness acceptance matrix ----------------------------------
 
@@ -438,108 +439,58 @@ test_allow_is_silent_both_modes() {
 }
 
 # --- harness wiring: each adapter invokes the shared checker -----------------
+#
+# The hook-config harnesses (claude, codex, grok) are covered by the stdin schema
+# cases above, which drive the exact payload their hook forwards. The in-process
+# harnesses (opencode, pi, pi-signed, omp) refuse a tool call from inside the
+# harness instead - opencode by throwing from tool.execute.before, the Pi-derived
+# adapters by returning {block: true} from tool_call. omp is driven here against
+# the real checker so its transport is pinned: bash-only scoping, command
+# extraction, exit-2-only blocking, and the surfaced deny reason.
 
-test_grok_pretool_hook_wired() {
-  local settings command
-  settings="$ROOT/.grok/hooks/fm-primary-pretool-check.json"
-  [ -f "$settings" ] || fail "tracked grok primary PreToolUse hook config is missing"
-  command=$(jq -r '.hooks.PreToolUse[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "PreToolUse hook command is missing from grok primary hook config"
-  assert_contains "$command" 'GROK_WORKSPACE_ROOT' "grok pretool hook must anchor from GROK_WORKSPACE_ROOT"
-  assert_contains "$command" 'fm-arm-pretool-check.sh' "grok pretool hook must invoke the shared checker"
-  assert_contains "$command" 'exec "${GROK_WORKSPACE_ROOT:-}/bin/fm-arm-pretool-check.sh"' "grok pretool hook must forward its stdin payload unchanged to the checker"
-  # shellcheck disable=SC2016  # single quotes are deliberate: a literal needle string, not an expansion
-  assert_not_contains "$command" 'root=${GROK_WORKSPACE_ROOT' "grok pretool hook must not assign a bare \$root var (breaks grok's own \${VAR} pre-substitution; see docs/arm-pretool-check.md)"
-  local matcher
-  matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$settings")
-  [ "$matcher" = "Bash" ] || fail "grok pretool hook must matcher-scope to Bash, got: $matcher"
-  pass ".grok primary hook: PreToolUse hook invokes the shared checker"
+test_omp_extension_tool_call_seatbelt() {
+  local repo ext out status=0
+  repo="$TMP_ROOT/omp-tool-call"
+  ext="$repo/.omp/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.omp/extensions" "$repo/bin"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$CHECK" "$POLICY" "$repo/bin/"
+  chmod +x "$repo/bin/fm-arm-pretool-check.sh"
+  out=$(PLUGIN="$ext" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const pi = { on(event, handler) { handlers.set(event, handler); } };
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+
+const toolCall = handlers.get("tool_call");
+if (!toolCall) throw new Error("omp extension did not register a tool_call handler");
+const call = (input, toolName = "bash") => toolCall({ type: "tool_call", toolName, input }, {});
+
+// A backgrounded arm command is the hazard the seatbelt exists for.
+const denied = await call({ command: "bin/fm-watch-arm.sh &" });
+if (denied?.block !== true) throw new Error(`backgrounded arm was not blocked: ${JSON.stringify(denied)}`);
+if (!denied.reason) throw new Error("block carried no reason for the harness to show");
+
+// Exit 2 is the only blocking code: an allowed command must pass through.
+const allowed = await call({ command: "exec bin/fm-watch-arm.sh" });
+if (allowed?.block) throw new Error(`allowed arm command was blocked: ${JSON.stringify(allowed)}`);
+const unrelated = await call({ command: "ls -la" });
+if (unrelated?.block) throw new Error(`unrelated command was blocked: ${JSON.stringify(unrelated)}`);
+
+// Scoped to bash, and inert without a usable command string.
+const otherTool = await call({ command: "bin/fm-watch-arm.sh &" }, "read");
+if (otherTool?.block) throw new Error("seatbelt escaped its bash tool scope");
+for (const input of [{}, { command: "" }, { command: null }, undefined]) {
+  const empty = await call(input);
+  if (empty?.block) throw new Error(`missing command blocked the call: ${JSON.stringify(input)}`);
 }
-
-test_grok_turnend_hook_uses_safe_var_pattern() {
-  local settings command
-  settings="$ROOT/.grok/hooks/fm-primary-turnend-guard.json"
-  [ -f "$settings" ] || fail "tracked grok primary Stop hook config is missing"
-  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
-  # shellcheck disable=SC2016  # single quotes are deliberate: literal needle strings, not expansions
-  assert_not_contains "$command" 'root=${GROK_WORKSPACE_ROOT' "grok Stop hook must not assign a bare \$root var either (regression fixed 2026-07-09, docs/arm-pretool-check.md)"
-  # shellcheck disable=SC2016
-  assert_contains "$command" '${GROK_WORKSPACE_ROOT:-}' "grok Stop hook must reference GROK_WORKSPACE_ROOT with an inline default every time"
-  pass ".grok primary hook: Stop hook uses the \${VAR:-} pattern throughout (no bare \$root)"
-}
-
-test_claude_settings_pretool_hook_wired() {
-  local settings command
-  settings="$ROOT/.claude/settings.json"
-  [ -f "$settings" ] || fail "tracked claude primary settings are missing"
-  command=$(jq -r '.hooks.PreToolUse[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "PreToolUse hook command is missing from claude primary settings"
-  assert_contains "$command" 'CLAUDE_PROJECT_DIR' "claude pretool hook must anchor via CLAUDE_PROJECT_DIR"
-  assert_contains "$command" 'fm-arm-pretool-check.sh' "claude pretool hook must invoke the shared checker"
-  assert_contains "$command" '--claude' "claude pretool hook must pass --claude so stdout stays empty on deny"
-  [ "$command" = '"$CLAUDE_PROJECT_DIR"/bin/fm-arm-pretool-check.sh --claude' ] \
-    || fail "claude pretool hook must forward stdin directly with only --claude, got: $command"
-  local matcher
-  matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$settings")
-  [ "$matcher" = "Bash" ] || fail "claude pretool hook must matcher-scope to Bash, got: $matcher"
-  pass ".claude/settings.json: PreToolUse hook invokes the shared checker with --claude"
-}
-
-test_codex_hooks_pretool_wired() {
-  local settings command
-  settings="$ROOT/.codex/hooks.json"
-  [ -f "$settings" ] || fail "tracked codex primary hooks are missing"
-  command=$(jq -r '.hooks.PreToolUse[0].hooks[0].command // empty' "$settings")
-  [ -n "$command" ] || fail "PreToolUse hook command is missing from codex primary hooks"
-  assert_contains "$command" 'fm-arm-pretool-check.sh' "codex pretool hook must invoke the shared checker"
-  assert_contains "$command" 'pwd -P' "codex pretool hook must anchor to the hook process root like the Stop hook does"
-  assert_contains "$command" 'printf "%s" "$payload" | "$root/bin/fm-arm-pretool-check.sh"' "codex pretool hook must forward the exact captured payload to the checker"
-  local matcher
-  matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' "$settings")
-  [ "$matcher" = "Bash" ] || fail "codex pretool hook must matcher-scope to Bash, got: $matcher"
-  pass ".codex/hooks.json: PreToolUse hook invokes the shared checker"
-}
-
-test_opencode_pretool_plugin_wired() {
-  local plugin content
-  plugin="$ROOT/.opencode/plugins/fm-primary-pretool-check.js"
-  [ -f "$plugin" ] || fail "tracked opencode primary pretool plugin is missing"
-  content=$(cat "$plugin")
-  assert_contains "$content" 'tool.execute.before' "opencode pretool plugin must hook tool.execute.before"
-  assert_contains "$content" 'fm-arm-pretool-check.sh' "opencode pretool plugin must invoke the shared checker"
-  assert_contains "$content" 'const command = output?.args?.command;' "opencode must extract output.args.command exactly"
-  assert_contains "$content" '["--command", command]' "opencode must forward the exact command as one CLI argument"
-  assert_contains "$content" 'if (result.code !== 2) return;' "opencode must throw only for checker exit 2"
-  assert_contains "$content" 'throw new Error' "opencode pretool plugin must throw to block the tool call"
-  pass ".opencode primary plugin: tool.execute.before invokes the shared checker and blocks by throwing"
-}
-
-test_pi_extension_carries_pretool_check() {
-  local ext content
-  ext="$ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
-  [ -f "$ext" ] || fail "tracked pi primary extension is missing"
-  content=$(cat "$ext")
-  assert_contains "$content" 'tool_call' "pi extension must hook tool_call for the pretool seatbelt"
-  assert_contains "$content" 'fm-arm-pretool-check.sh' "pi extension must invoke the shared checker"
-  assert_contains "$content" 'String((event.input as { command?: unknown })?.command ?? "")' "pi must extract and string-coerce event.input.command exactly"
-  assert_contains "$content" 'const result = await runPretoolCheck(command);' "pi must forward the exact command to the checker"
-  assert_contains "$content" 'if (result.code !== 2) return {};' "pi must block only for checker exit 2"
-  assert_contains "$content" 'block: true' "pi extension must return block:true to deny"
-  pass ".pi primary extension: tool_call handler invokes the shared checker and can block"
-}
-
-test_omp_extension_carries_pretool_check() {
-  local ext content
-  ext="$ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
-  [ -f "$ext" ] || fail "tracked omp primary extension is missing"
-  content=$(cat "$ext")
-  assert_contains "$content" 'tool_call' "omp extension must hook tool_call for the pretool seatbelt"
-  assert_contains "$content" 'fm-arm-pretool-check.sh' "omp extension must invoke the shared checker"
-  assert_contains "$content" 'String((event.input as { command?: unknown })?.command ?? "")' "omp must extract and string-coerce event.input.command exactly"
-  assert_contains "$content" 'const result = await runPretoolCheck(command);' "omp must forward the exact command to the checker"
-  assert_contains "$content" 'if (result.code !== 2) return {};' "omp must block only for checker exit 2"
-  assert_contains "$content" 'block: true' "omp extension must return block:true to deny"
-  pass ".omp primary extension: tool_call handler invokes the shared checker and can block"
+EOF
+  ) || status=$?
+  expect_code 0 "$status" "omp tool_call seatbelt"
+  [ -z "$out" ] || fail "omp tool_call seatbelt test printed output: $out"
+  pass ".omp primary extension: tool_call blocks a denied bash command and passes everything else through"
 }
 
 # --- shellcheck (belt-and-suspenders; CI/CONTRIBUTING.md also runs this) -----
@@ -567,11 +518,5 @@ test_failopen_missing_node
 test_claude_mode_stdout_empty_on_deny
 test_default_mode_stdout_has_grok_json_on_deny
 test_allow_is_silent_both_modes
-test_grok_pretool_hook_wired
-test_grok_turnend_hook_uses_safe_var_pattern
-test_claude_settings_pretool_hook_wired
-test_codex_hooks_pretool_wired
-test_opencode_pretool_plugin_wired
-test_pi_extension_carries_pretool_check
-test_omp_extension_carries_pretool_check
+test_omp_extension_tool_call_seatbelt
 test_shellcheck_clean

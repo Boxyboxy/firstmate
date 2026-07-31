@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Behavior tests for the omp (Oh My Pi) harness adapter: detection precedence,
 # crewmate/secondmate launch construction, the turn-end SIGNAL extension, model/
-# effort flag threading, the meta profile, and the busy-signature default it
-# shares with fm-tmux-lib.sh.
+# effort flag threading, the meta profile, and the delivery-guard busy token it
+# shares with fm-tmux-lib.sh. Task busy STATE is owned by bin/fm-busy-lib.sh's
+# semantic contract and is covered by tests/fm-busy-adapter-wiring.test.sh.
 #
 # Modeled on tests/fm-spawn-dispatch-profile.test.sh (NOT fm-grok-harness): a
 # fake tmux captures the literal command sent with `tmux send-keys -l`, so the
@@ -16,7 +17,6 @@ set -u
 
 HARNESS_BIN="$ROOT/bin/fm-harness.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
-WATCH="$ROOT/bin/fm-watch.sh"
 TMUX_LIB="$ROOT/bin/fm-tmux-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-omp-harness)
 
@@ -310,14 +310,10 @@ test_omp_meta_records_harness() {
   pass "omp spawn records harness=omp in state/<id>.meta"
 }
 
-# --- busy signature (per-harness omp default + shared default parity) ---
+# --- delivery-guard busy token (per-harness omp default + shared default) ---
 
-# Pull the shipped default literal out of each file rather than hardcode it, so
-# the test tracks whatever the two adapters actually ship.
-extract_watch_busy_default() {
-  sed -n "s/.*BUSY_REGEX=\${FM_BUSY_REGEX:-'\(.*\)'}.*/\1/p" "$WATCH"
-}
-
+# Pull the shipped default literal out of the adapter rather than hardcode it, so
+# the test tracks whatever the adapter actually ships.
 extract_tmux_busy_default() {
   sed -n "s/.*FM_TMUX_BUSY_REGEX_DEFAULT='\(.*\)'.*/\1/p" "$TMUX_LIB"
 }
@@ -326,23 +322,19 @@ extract_tmux_omp_busy_default() {
   sed -n "s/.*FM_TMUX_OMP_BUSY_REGEX_DEFAULT='\(.*\)'.*/\1/p" "$TMUX_LIB"
 }
 
-# Busy 11 (REQUIRED): omp's per-harness busy signature matches omp's ⟦esc⟧
+# Busy 11 (REQUIRED): omp's per-harness delivery-guard token matches omp's ⟦esc⟧
 # interrupt hint, ignores a clean idle line, and the shared ASCII "Working\.\.\."
-# token does NOT match omp's unicode-ellipsis "Working…"; plus the generic
-# fm-watch.sh / fm-tmux-lib.sh shared defaults stay in parity. fm-watch.sh
-# selects the per-harness signature through fm_busy_lines_match.
-test_omp_busy_signature_and_default_parity() {
-  local watch_re tmux_re omp_re
-  watch_re=$(extract_watch_busy_default)
+# token does NOT match omp's unicode-ellipsis "Working…".
+# This token is NOT a task-state source - bin/fm-busy-lib.sh's semantic contract
+# owns task busy state. It serves only fm-tmux-lib.sh's delivery guards (fm-send
+# submit acknowledgement and the away-mode supervisor-pane guard), so the
+# assertions below are scoped to fm-tmux-lib.sh alone.
+test_omp_busy_token_defaults() {
+  local tmux_re omp_re
   tmux_re=$(extract_tmux_busy_default)
   omp_re=$(extract_tmux_omp_busy_default)
-  [ -n "$watch_re" ] || fail "could not extract the BUSY_REGEX default from bin/fm-watch.sh"
   [ -n "$tmux_re" ] || fail "could not extract FM_TMUX_BUSY_REGEX_DEFAULT from bin/fm-tmux-lib.sh"
   [ -n "$omp_re" ] || fail "could not extract FM_TMUX_OMP_BUSY_REGEX_DEFAULT from bin/fm-tmux-lib.sh"
-  # FM_BUSY_REGEX overrides every harness matcher, so the two shipped generic
-  # defaults must stay byte-identical or a mixed-fleet override silently drifts.
-  [ "$watch_re" = "$tmux_re" ] \
-    || fail "fm-watch.sh BUSY_REGEX default desynced from fm-tmux-lib.sh FM_TMUX_BUSY_REGEX_DEFAULT"$'\n'"watch: $watch_re"$'\n'"tmux:  $tmux_re"
   # omp busy: the bracketed interrupt hint rides both the thinking + tool phases.
   printf '%s\n' '⠧ Working… ⟦esc⟧' | grep -qiE "$omp_re" \
     || fail "omp busy signature must match omp's ⟦esc⟧ interrupt hint"
@@ -359,7 +351,7 @@ test_omp_busy_signature_and_default_parity() {
   if printf '%s\n' '⠧ Working…' | grep -qiE "$tmux_re"; then
     fail "shared busy default must not match omp's unicode-ellipsis Working… via the ASCII token"
   fi
-  pass "omp busy signature matches ⟦esc⟧, ignores idle, ASCII Working token misses unicode Working…, and shared defaults are in parity"
+  pass "omp delivery-guard token matches ⟦esc⟧, ignores idle, and the ASCII Working token misses unicode Working…"
 }
 
 # Busy 12 (REQUIRED, behavioral): omp classifies busy through the real
@@ -372,6 +364,9 @@ test_omp_busy_signature_behavioral() {
   . "$TMUX_LIB"
   unset FM_BUSY_REGEX
   capture="$TMP_ROOT/omp-busy-pane"
+  # Invoked indirectly: fm_pane_is_busy shells out to `tmux capture-pane`, so
+  # the call site is not statically visible here.
+  # shellcheck disable=SC2329
   tmux() {
     case "${1:-}" in
       capture-pane) cat "$capture" ;;
@@ -406,7 +401,7 @@ test_omp_threads_model_flag
 test_omp_threads_thinking_effort
 test_omp_threads_max_effort
 test_omp_meta_records_harness
-test_omp_busy_signature_and_default_parity
+test_omp_busy_token_defaults
 test_omp_busy_signature_behavioral
 
 echo "# all fm-omp-harness tests passed"
