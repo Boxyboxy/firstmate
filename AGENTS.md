@@ -223,6 +223,9 @@ Route durable knowledge to its most specific owner:
 - Knowledge useful to almost every contributor to one project belongs in that project's committed `AGENTS.md`.
 - Knowledge general to every firstmate user belongs in this repo's shared tracked surface.
 
+An initiative whose plan the captain maintains outside firstmate, in their own planning documents, outranks every firstmate-derived record of that initiative; `data/captain.md` records where this home's planning sources live and which initiatives they cover.
+A backlog hold, task note, or report is a derived observation from one moment, so a hold that contradicts its initiative's planning source is stale by definition: re-verify a hold against that source before presenting it to the captain or briefing work from it, and correct or close the hold rather than the source.
+
 Firstmate never writes a project's `AGENTS.md` directly.
 A crewmate creates or updates it lazily through the project's selected delivery path, using `bin/fm-ensure-agents-md.sh` and preferring pointers to authoritative sources over copied detail.
 Keep fleet delivery posture and captain-private strategy out of project memory.

@@ -604,6 +604,60 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+# The premise check has to come from the scaffold, not from firstmate remembering
+# to append it: the whole failure it closes is a task text written from an earlier
+# reading of the code reaching a worker that implements against it after the code
+# moved. So it is asserted on plain generated output, with no extra flags, for
+# every ship delivery mode and for scouts.
+test_premise_check_is_structural_in_every_task_scaffold() {
+  local home id proj brief premise_line setup_line
+  home="$TMP_ROOT/premise-home"
+  write_registry "$home"
+  for id_proj in "brief-premise-nm-e1:no-registry-proj" "brief-premise-dpr-e2:direct-proj" \
+                 "brief-premise-lo-e3:local-proj" "brief-premise-scout-e4:no-registry-proj"; do
+    id=${id_proj%%:*}
+    proj=${id_proj##*:}
+    case "$id" in
+      *-scout-*) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --scout >/dev/null 2>&1 ;;
+      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_grep "# Verify the premise before you build on it" "$brief" \
+      "$id: brief lost the standing premise check"
+    assert_grep "confirm its central factual claims against the code as it is now" "$brief" \
+      "$id: premise check must send the worker to current code, not to the task text"
+    assert_grep "stop and report that instead of building on it" "$brief" \
+      "$id: premise check must require reporting a dead premise, not implementing against it"
+    assert_grep "do not quietly re-scope the task around it" "$brief" \
+      "$id: premise check must forbid silently re-scoping around a partly dead premise"
+    # It must be read before the work starts, so it precedes the setup steps.
+    premise_line=$(grep -n "^# Verify the premise before you build on it$" "$brief" | head -1 | cut -d: -f1)
+    setup_line=$(grep -n "^# Setup$" "$brief" | head -1 | cut -d: -f1)
+    [ -n "$premise_line" ] && [ -n "$setup_line" ] \
+      || fail "$id: brief is missing the premise or setup heading"
+    [ "$premise_line" -lt "$setup_line" ] \
+      || fail "$id: premise check must appear before the setup steps"
+  done
+  pass "fm-brief.sh: every ship and scout scaffold carries the premise check before setup"
+}
+
+# A secondmate charter is a standing role rather than a task written from a dated
+# observation, so the premise check stays out of it.
+test_premise_check_is_absent_from_secondmate_charter() {
+  local home charter
+  home="$TMP_ROOT/premise-charter-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    "$ROOT/bin/fm-brief.sh" premise-mate-e5 --secondmate alpha >/dev/null 2>&1 \
+    || fail "secondmate charter scaffold exited non-zero"
+  charter="$home/data/premise-mate-e5/brief.md"
+  assert_present "$charter" "secondmate charter was not scaffolded"
+  assert_no_grep "# Verify the premise before you build on it" "$charter" \
+    "secondmate charter must not carry the task-scoped premise check"
+  pass "fm-brief.sh: the premise check is scoped to task briefs, not standing charters"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -798,6 +852,8 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
+test_premise_check_is_structural_in_every_task_scaffold
+test_premise_check_is_absent_from_secondmate_charter
 test_scout_and_secondmate_load_decision_hold_policy
 test_evidence_paths_are_absolute
 test_relative_home_is_resolved_or_refused

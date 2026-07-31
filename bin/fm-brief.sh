@@ -49,6 +49,11 @@
 # the status file alike - is resolved to a real absolute path first, and a
 # relative root, data, or state dir that cannot be resolved is refused rather
 # than asserted absolute.
+# Every ship and scout scaffold carries a premise check: before building on the
+# task text, the crewmate re-verifies its central factual claims against current
+# code and reports rather than implements when one no longer holds. It belongs to
+# the scaffold contract, not to firstmate's memory, because the task text is
+# written from an observation made before dispatch and decays with the code.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -272,12 +277,27 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# Standing premise check, carried by every ship and scout scaffold. The task text
+# is written from an observation made before dispatch, and code moves between the
+# observation and the worker reading it, so the worker - not the scaffold, which
+# cannot inspect {TASK} - is the only party positioned to re-verify it.
+IFS= read -r -d '' PREMISE_SECTION <<'EOF' || true
+# Verify the premise before you build on it
+The `# Task` section above was written from an earlier reading of the code, and code moves.
+Before you implement or investigate, confirm its central factual claims against the code as it is now: that the behavior, symptom, gap, or file it names is still real and still unfixed.
+If a central premise no longer holds - the work already shipped, the code moved on, or the described problem cannot be reproduced - stop and report that instead of building on it: append `blocked: {the premise that no longer holds}`, or `needs-decision: {options}` when the dead premise leaves a real choice.
+Report it the same way when the premise holds only in part, and say which part failed; do not quietly re-scope the task around it.
+EOF
+PREMISE_SECTION=${PREMISE_SECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
 {TASK}
+
+$PREMISE_SECTION
 
 $HERDR_SECTION
 
@@ -387,6 +407,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
+
+$PREMISE_SECTION
 
 $HERDR_SECTION
 
