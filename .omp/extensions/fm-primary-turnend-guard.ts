@@ -78,9 +78,10 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
   return promise;
 }
 
-// omp 16.4.8 exposes Pi's tool_call API and honors {block: true} before bash
-// execution. Both shared checkers own their own decisions and fail open when
-// unavailable; this extension owns only the harness transport.
+// omp exposes Pi's tool_call API and honors {block: true} before bash
+// execution - verified on 16.4.8 and unchanged on 17.2.2. Both shared checkers
+// own their own decisions and fail open when unavailable; this extension owns
+// only the harness transport.
 function runChecker(script: string, command: string): Promise<{ code: number; stderr: string }> {
   const { promise, resolve: resolveResult } = Promise.withResolvers<{ code: number; stderr: string }>();
   const child = spawn(`${root}/bin/${script}`, ["--command", command], {

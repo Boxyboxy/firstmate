@@ -2376,18 +2376,19 @@ fm_backend_herdr_strip_ansi() {  # <text>
 # fm_backend_herdr_composer_state: classify the composer's own row as
 # empty|pending|unknown, scanning a generous tail-window capture of <target>.
 # herdr's CLI exposes no cursor-row primitive (unlike tmux's #{cursor_y}), so
-# this locates the composer structurally, recognizing THREE shapes and keeping
+# this locates the composer structurally, recognizing FOUR shapes and keeping
 # whichever match comes LAST (scanning forward), so a shape earlier in
 # scrollback/a popup can never outrank the real (bottom-anchored) composer:
 #
 #   bordered - a boxed composer (verified grok 0.2.82): the row's TRIMMED
 #              content both STARTS and ENDS with the same border glyph (│, ┃,
-#              or a plain ASCII |). The box's own top/bottom rows use rounded
-#              corners (╭─…─╮ / ╰─…─╯), which never match; popup item rows and
-#              horizontal separator rows carry no border glyph at all; the
-#              footer help line ("Enter:send │ … │ …") uses │ only as an
-#              INTERIOR separator and does not start with one, so it never
-#              matches either.
+#              or a plain ASCII |). A box's own top/bottom rows use rounded
+#              corners (╭─…─╮ / ╰─…─╯), which never satisfy THIS shape (see
+#              the rounded shape below, which is the one that reads them);
+#              popup item rows and horizontal separator rows carry no border
+#              glyph at all; the footer help line ("Enter:send │ … │ …") uses
+#              │ only as an INTERIOR separator and does not start with one, so
+#              it never matches either.
 #   bare     - an UNBORDERED composer (verified real claude 2.x and codex
 #              0.142.x, both under herdr 0.7.1, docs/herdr-backend.md
 #              "Incident (2026-07-07)"): the row's TRIMMED content starts with
@@ -2414,6 +2415,25 @@ fm_backend_herdr_strip_ansi() {  # <text>
 #              pair remains unknown. This identity + structure conjunction is
 #              what makes a blank Pi row safe without weakening dead-shell or
 #              ambiguous-pane refusal.
+#   rounded  - omp's composer is a bottom-anchored ROUNDED PAIR (verified omp
+#              17.2.2 under herdr 0.7.5, protocol 17): a status row
+#              `╭── π > <model> > <cwd> > <branch> ▶───╮` with the input row
+#              `╰─ <typed text> ─╯` DIRECTLY below it. Neither row starts and
+#              ends with the same side-border glyph, so the bordered shape
+#              above cannot read either one, and before this shape existed an
+#              unrelated row higher up the capture won instead - an idle omp
+#              holding unsubmitted captain text classified `empty`, which is
+#              the away-mode injector's go-signal. Accepted ONLY when Herdr's
+#              native `agent get` identifies the target as omp AND reports it
+#              idle, done, or blocked, exactly like the Pi conjunction above:
+#              omp closes ordinary transcript boxes with the same ╰────╯
+#              glyph, so structure alone would let a leftover output box pass
+#              as a ready composer - the dead-shell hazard
+#              bin/fm-composer-lib.sh exists to prevent. Adjacency is the
+#              bound that keeps the pair honest: a transcript box spans its
+#              content rows, so only the composer's own back-to-back pair
+#              qualifies. The closing `─╯` is deliberately NOT required, since
+#              pane width decides whether omp renders it.
 #
 #   empty   - blank, a bare prompt glyph, known ghost/placeholder text
 #             ("Type a message...", verified grok 0.2.82's empty-composer
@@ -2427,8 +2447,8 @@ fm_backend_herdr_strip_ansi() {  # <text>
 #             composer (e.g. "/compact" -> "/compact compaction
 #             instructions", verified live against real grok 0.2.82) - that
 #             first Enter is a SELECTION, not a submission.
-#   unknown - the pane could not be read, or no composer row (of either shape)
-#             was found in the captured window.
+#   unknown - the pane could not be read, or no composer row (of any recognized
+#             shape) was found in the captured window.
 #
 # Ghost/placeholder note: herdr's ANSI pane read preserves the harness's own
 # de-emphasis styling, and the classifier extracts real typed content with the
@@ -2516,6 +2536,45 @@ $cap
 EOF
 }
 
+# Locate the input row and both row positions of the bottom-most ADJACENT
+# rounded-arc pair (omp's composer: a `╭…` status row with a `╰…` input row
+# directly below it). Adjacency is the whole bound: an ordinary transcript box
+# opens and closes around its content rows, so it can never present a
+# back-to-back pair, while the live composer always does. Scanning forward and
+# keeping the last match makes a bottom-anchored composer outrank anything
+# earlier in the capture. Globals let the caller compare this shape's screen
+# position against generic bordered/bare candidates without losing an empty
+# composer's content through command substitution, exactly as the Pi pair does.
+fm_backend_herdr_omp_composer_find() {  # <ansi-capture>
+  local cap=$1 line plain row=0 open_row=0
+  FM_BACKEND_HERDR_OMP_PAIR_FOUND=0
+  FM_BACKEND_HERDR_OMP_PAIR_OPEN_LINE=0
+  FM_BACKEND_HERDR_OMP_PAIR_LINE=0
+  FM_BACKEND_HERDR_OMP_CONTENT=""
+  while IFS= read -r line; do
+    row=$((row + 1))
+    plain=$(fm_backend_herdr_strip_ansi "$line")
+    plain="${plain#"${plain%%[![:space:]]*}"}"
+    plain="${plain%"${plain##*[![:space:]]}"}"
+    case "$plain" in
+      '╭'*)
+        open_row=$row
+        ;;
+      '╰'*)
+        if [ "$open_row" -ne 0 ] && [ "$row" -eq "$((open_row + 1))" ]; then
+          FM_BACKEND_HERDR_OMP_PAIR_FOUND=1
+          FM_BACKEND_HERDR_OMP_PAIR_OPEN_LINE=$open_row
+          FM_BACKEND_HERDR_OMP_PAIR_LINE=$row
+          FM_BACKEND_HERDR_OMP_CONTENT=$line
+        fi
+        open_row=0
+        ;;
+    esac
+  done <<EOF
+$cap
+EOF
+}
+
 fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   local out
   out=$(fm_backend_herdr_cli "$1" agent get "$2" 2>/dev/null) || return 1
@@ -2562,6 +2621,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   # row can never suppress the live Pi composer. Identity is consulted only when
   # a lower separator pair could change the verdict.
   fm_backend_herdr_pi_composer_find "$cap"
+  fm_backend_herdr_omp_composer_find "$cap"
   if [ "$FM_BACKEND_HERDR_PI_PAIR_FOUND" -eq 1 ] \
      && [ "$FM_BACKEND_HERDR_PI_PAIR_LINE" -gt "$generic_line" ] \
      && [ "$generic_line" -lt "$FM_BACKEND_HERDR_PI_PAIR_OPEN_LINE" ]; then
@@ -2591,6 +2651,30 @@ EOF
     # A lower unmatched separator proves the generic row is stale, but does
     # not provide the complete Pi composer structure required for injection.
     found=0
+  elif [ "$FM_BACKEND_HERDR_OMP_PAIR_FOUND" -eq 1 ] \
+       && [ "$FM_BACKEND_HERDR_OMP_PAIR_LINE" -gt "$generic_line" ] \
+       && [ "$generic_line" -lt "$FM_BACKEND_HERDR_OMP_PAIR_OPEN_LINE" ]; then
+    # omp's rounded composer pair sits below the last generic match, so a
+    # bordered transcript or splash row above it is not the live composer.
+    # Deliberately the LAST branch of this chain: every Pi refusal above keeps
+    # precedence, so this can only ADD a recognized shape, never weaken one.
+    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    case "$agent:$agent_status" in
+      omp:idle|omp:done|omp:blocked)
+        shape=rounded
+        raw_match=$FM_BACKEND_HERDR_OMP_CONTENT
+        found=1
+        ;;
+      omp:*|:*)
+        # A working omp or an unreadable identity cannot authorize injection,
+        # and the lower arc pair proves any generic row above it is stale.
+        found=0
+        ;;
+      *) : ;; # A known non-omp agent keeps its established generic verdict.
+    esac
   fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   # Content: extract the real typed text from the raw row with the shared,
@@ -2616,6 +2700,19 @@ EOF
     # composer container, equivalent to a bordered box for shared content
     # classification. ANSI stripping keeps real text and drops only styling.
     bordered=1
+  elif [ "$shape" = rounded ]; then
+    # The native omp identity plus the adjacent arc pair is likewise a genuine
+    # composer container. omp de-emphasises its own arcs, so the ghost stripper
+    # normally drops them with the rest of the border styling, but a light
+    # theme can leave them behind - strip the row's own leading ╰─… and
+    # trailing …─╯ explicitly so an EMPTY composer cannot read as pending.
+    bordered=1
+    stripped=${stripped#╰}
+    while [ "${stripped#─}" != "$stripped" ]; do stripped=${stripped#─}; done
+    stripped=${stripped%╯}
+    while [ "${stripped%─}" != "$stripped" ]; do stripped=${stripped%─}; done
+    stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+    stripped="${stripped%"${stripped##*[![:space:]]}"}"
   fi
   # Delegate the empty/pending/unknown decision to the shared owner. The bare
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE

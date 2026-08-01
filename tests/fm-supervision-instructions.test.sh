@@ -103,6 +103,16 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_contains "$out" "Grok tracked background task" "grok recovery line lost its tracked background repair"
   assert_contains "$out" "bin/fm-watch-arm.sh" "grok recovery line lost the arm command"
 
+  out=$("$RENDER" --harness omp)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "re-arm" "omp ordinary-wake line does not tell the model to re-arm"
+  assert_contains "$ordinary" "omp background async job" "omp ordinary-wake line fell through to the generic continuation"
+  assert_contains "$ordinary" "bin/fm-watch-arm.sh" "omp ordinary-wake line lost the background arm command"
+  assert_contains "$ordinary" "command deadline disabled" "omp ordinary-wake line lost the deadline-disabled arm requirement"
+  out=$("$RENDER" --harness omp --repair-line)
+  assert_contains "$out" "omp background async job" "omp recovery line lost its background async repair"
+  assert_contains "$out" "command deadline disabled" "omp recovery line lost the deadline-disabled arm requirement"
+
   out=$("$RENDER" --harness codex)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
   assert_contains "$ordinary" "next foreground" "codex ordinary-wake line lost its foreground checkpoint"
@@ -177,6 +187,8 @@ test_omp_is_background_notify() {
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: omp" "omp heading missing"
   assert_contains "$out" "Mode: omp background-notify supervision." "omp snippet missing background-notify mode line"
   assert_contains "$out" "bin/fm-watch-arm.sh" "omp snippet missing the watcher arm step"
+  assert_contains "$out" "command deadline is disabled" \
+    "omp snippet does not require arming with the command deadline disabled, so a quiet fleet loses the wake delivery path"
   assert_not_contains "$out" "Mode: Unknown harness fallback." "omp resolved the unknown fallback instead of omp.md"
   assert_not_contains "$out" "__FM_X_MODE_ENV" "renderer leaked an x-mode path placeholder when x-mode is off"
   pass "omp supervision is background-notify (fm-watch-arm.sh), not the unknown fallback, no x-mode leak"

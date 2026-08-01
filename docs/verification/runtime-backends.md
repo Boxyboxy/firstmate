@@ -30,7 +30,7 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Claude, Codex, OpenCode, and Grok were observed under their own process names.
 Kimi Code CLI 0.29.1 was observed under `kimi` on 2026-07-25.
-OMP 16.4.8 was observed under the exact process name `omp` on 2026-07-13.
+OMP 16.4.8 was observed in a pane under the exact process name `omp` on 2026-07-13, and 17.2.2 still reports that exact process name on 2026-07-31 (`ps -o comm=` against a live `omp` process).
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
 Installed-wrapper checks:
