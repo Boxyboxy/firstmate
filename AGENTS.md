@@ -488,6 +488,8 @@ Firstmate's shared instruction surface reaches running homes only after it lands
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are loaded by a running firstmate; public `skills/` is an installer-facing surface.
 When the captain invokes `/updatefirstmate` or asks to update firstmate, load the `/updatefirstmate` skill.
 It performs guarded fast-forward updates of firstmate and registered secondmate homes, refreshes instructions, and never touches anything under `projects/`.
+When the captain invokes `/omp-firstmate-leverage`, asks to update omp and firstmate together, asks whether firstmate is leveraging omp, or when that recurring sweep comes due, load the `omp-firstmate-leverage` skill.
+It owns the omp update, the fast-forward, the merge into the local omp adapter branch, and the audit of which omp capabilities firstmate never uses.
 
 ## 13. Agent-only reference skills
 
