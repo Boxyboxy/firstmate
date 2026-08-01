@@ -503,6 +503,10 @@ launch_template() {
       # HAS an approval system). Crewmate/scout load a turn-end SIGNAL extension via -e
       # (written outside the worktree, like pi). Secondmate needs neither: its primary
       # guard auto-discovers from the home's tracked .omp/extensions/, watcher is native.
+      # Intentionally leave --smol, --slow, --plan, --prewalk, and --no-prewalk unset.
+      # omp applies the captain's global modelRoles map to positional launches even when
+      # --model and --thinking select the parent model, and omitting both prewalk switches
+      # preserves the captain's global prewalk.enabled setting.
       if [ "$kind" = secondmate ]; then
         printf '%s' 'omp --auto-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else

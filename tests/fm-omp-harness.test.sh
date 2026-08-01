@@ -253,6 +253,30 @@ test_omp_threads_model_flag() {
   pass "omp threads --model when set and omits it by default"
 }
 
+# Role models 7b (REQUIRED): firstmate selects only the parent model and leaves
+# omp's global modelRoles map authoritative for smol, slow, plan, and every role
+# without a CLI flag. It also respects the captain's global prewalk setting.
+test_omp_preserves_global_role_resolution() {
+  local rec id out status launch
+  id=omp-role-models-o7b
+  rec=$(make_spawn_case omp-role-models omp "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort high)
+  status=$?
+  expect_code 0 "$status" "omp spawn with a parent profile should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'openai-codex/gpt-5.6-sol'" \
+    "omp launch did not select the requested parent model"
+  assert_not_contains "$launch" "--smol" "omp launch must leave the global smol role authoritative"
+  assert_not_contains "$launch" "--slow" "omp launch must leave the global slow role authoritative"
+  assert_not_contains "$launch" "--plan" "omp launch must leave the global plan role authoritative"
+  assert_not_contains "$launch" "--prewalk" "omp launch must respect the global prewalk setting"
+  assert_not_contains "$launch" "--no-prewalk" "omp launch must not override an enabled global prewalk setting"
+  pass "omp selects the parent profile without overriding global role models or prewalk"
+}
+
 # Effort 8 (REQUIRED): --thinking <effort> for low|medium|high|xhigh, never --effort.
 test_omp_threads_thinking_effort() {
   local rec id out status launch rec2 id2 status2 launch2
@@ -398,6 +422,7 @@ test_omp_crewmate_launch_shape
 test_omp_crewmate_writes_turnend_ext
 test_omp_secondmate_launch_omits_ext
 test_omp_threads_model_flag
+test_omp_preserves_global_role_resolution
 test_omp_threads_thinking_effort
 test_omp_threads_max_effort
 test_omp_meta_records_harness
