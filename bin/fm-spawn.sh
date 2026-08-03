@@ -22,12 +22,11 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
-#   config/omp-max-time is an optional per-home omp runtime bound. Its first
-#   non-empty, non-comment line must be a positive integer number of seconds,
-#   or a positive integer suffixed with `m` for minutes or `h` for hours.
-#   When configured, verified omp launch templates pass `--max-time=<duration>`;
-#   an absent file preserves the existing unbounded launch exactly. Other
-#   harnesses and raw launch commands omit this omp-only axis.
+#   omp crewmates default to `--max-time=3h`. config/omp-max-time may override
+#   that per-home default: its first non-empty, non-comment line must be `off`,
+#   a positive integer number of seconds, or a positive integer suffixed with
+#   `m` for minutes or `h` for hours. `off` restores an unbounded omp launch.
+#   Other harnesses and raw launch commands omit this omp-only axis.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -535,33 +534,37 @@ fi
 
 # Print the verified omp-only runtime-bound fragment from config/omp-max-time.
 # The first non-empty, non-comment line is authoritative, matching the existing
-# per-home text config pattern. An absent file is the backward-compatible
-# unbounded path; a present file without a supported positive duration is a
-# configuration error.
+# per-home text config pattern. Every healthy task observed on 2026-08-02
+# finished in 20-60 minutes, while one converge ran 9h24m until manual
+# intervention. The 3h default is roughly three times the longest healthy task,
+# and remains an operator-controlled backstop through an override or `off`.
 omp_max_time_flag() {
-  local config_file="$CONFIG/omp-max-time" line value= amount
-  [ -e "$config_file" ] || return 0
-  [ -f "$config_file" ] || {
-    echo "error: config/omp-max-time must be a regular file containing a positive duration such as 3600, 10m, or 1h" >&2
-    return 1
-  }
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-    [ -n "$line" ] || continue
-    case "$line" in
-      '#'*) continue ;;
-    esac
-    value=$line
-    break
-  done < "$config_file"
+  local config_file="$CONFIG/omp-max-time" line value=3h amount
+  if [ -e "$config_file" ]; then
+    [ -f "$config_file" ] || {
+      echo "error: config/omp-max-time must be a regular file containing off or a positive duration such as 3600, 10m, or 1h" >&2
+      return 1
+    }
+    value=
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      [ -n "$line" ] || continue
+      case "$line" in
+        '#'*) continue ;;
+      esac
+      value=$line
+      break
+    done < "$config_file"
+  fi
+  [ "$value" != off ] || return 0
   case "$value" in
     *m|*h) amount=${value%?} ;;
     *) amount=$value ;;
   esac
   case "$amount" in
     ''|0*|*[!0-9]*)
-      echo "error: config/omp-max-time must contain a positive integer number of seconds, minutes (10m), or hours (1h)" >&2
+      echo "error: config/omp-max-time must contain off or a positive integer number of seconds, minutes (10m), or hours (1h)" >&2
       return 1
       ;;
   esac
@@ -616,8 +619,8 @@ launch_template() {
       # Intentionally leave --smol, --slow, --plan, --prewalk, and --no-prewalk unset.
       # omp applies the captain's global modelRoles map to positional launches even when
       # --model and --thinking select the parent model, and omitting both prewalk switches
-      # preserves the captain's global prewalk.enabled setting. __OMPMAXTIME__ is empty
-      # unless this home opts in through config/omp-max-time.
+      # preserves the captain's global prewalk.enabled setting. __OMPMAXTIME__
+      # carries the 3h default or the home's override, and is empty only for `off`.
       if [ "$kind" = secondmate ]; then
         printf '%s' 'omp --auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else

@@ -239,49 +239,74 @@ test_omp_secondmate_launch_omits_ext() {
   pass "omp secondmate launch omits the -e signal extension and writes no ext file"
 }
 
-# Runtime bound 6b (REQUIRED): config/omp-max-time is an opt-in per-home
-# duration. Configured omp launches receive the exact flag, while an absent
-# config keeps the previous unbounded launch. Unsupported values stop the spawn.
-test_omp_threads_optional_max_time() {
-  local rec id out status launch rec2 id2 status2 launch2 rec3 id3 out3 status3 help
+# Runtime bound 6b (REQUIRED): omp defaults to three hours, a home can override
+# or disable that bound, unsupported values stop the spawn, and other harnesses
+# do not receive the omp-only axis.
+test_omp_threads_configurable_max_time() {
+  local rec id out status launch help
   help=$("$SPAWN" --help)
+  assert_contains "$help" "default to \`--max-time=3h\`" \
+    "fm-spawn help did not state the omp runtime-bound default"
   assert_contains "$help" "config/omp-max-time" \
     "fm-spawn help did not name the omp runtime-bound config"
-  assert_contains "$help" "positive integer suffixed with \`m\` for minutes or \`h\` for hours" \
-    "fm-spawn help did not define accepted omp max-time values"
-  id=omp-max-time-o6b
-  rec=$(make_spawn_case omp-max-time omp "$id")
+  assert_contains "$help" "\`off\` restores an unbounded omp launch" \
+    "fm-spawn help did not define how to disable the omp runtime bound"
+
+  id=omp-max-time-override-o6b
+  rec=$(make_spawn_case omp-max-time-override omp "$id")
   read_case_record "$rec"
   printf '# bounded crewmates\n  10m  \n' > "$HOME_DIR/config/omp-max-time"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "omp spawn with config/omp-max-time should succeed"
+  expect_code 0 "$status" "omp spawn with a max-time override should succeed"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "omp --auto-approve --max-time=10m" \
-    "configured omp launch did not thread --max-time"
+    "configured omp launch did not thread the max-time override"
 
-  id2=omp-max-time-absent-o6c
-  rec2=$(make_spawn_case omp-max-time-absent omp "$id2")
-  read_case_record "$rec2"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id2" "$PROJ_DIR")
-  status2=$?
-  expect_code 0 "$status2" "omp spawn without config/omp-max-time should remain unbounded"
-  launch2=$(cat "$LAUNCH_LOG")
-  assert_not_contains "$launch2" "--max-time" \
-    "unconfigured omp launch must omit --max-time"
+  id=omp-max-time-default-o6c
+  rec=$(make_spawn_case omp-max-time-default omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "omp spawn without config/omp-max-time should use the default"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "omp --auto-approve --max-time=3h" \
+    "unconfigured omp launch did not receive the three-hour default"
 
-  id3=omp-max-time-invalid-o6d
-  rec3=$(make_spawn_case omp-max-time-invalid omp "$id3")
-  read_case_record "$rec3"
+  id=omp-max-time-off-o6d
+  rec=$(make_spawn_case omp-max-time-off omp "$id")
+  read_case_record "$rec"
+  printf 'off\n' > "$HOME_DIR/config/omp-max-time"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "omp spawn with max-time disabled should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--max-time" \
+    "config/omp-max-time=off did not restore an unbounded omp launch"
+
+  id=omp-max-time-invalid-o6e
+  rec=$(make_spawn_case omp-max-time-invalid omp "$id")
+  read_case_record "$rec"
   printf '0\n' > "$HOME_DIR/config/omp-max-time"
-  out3=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id3" "$PROJ_DIR")
-  status3=$?
-  [ "$status3" -ne 0 ] || fail "invalid config/omp-max-time should stop the spawn"
-  assert_contains "$out3" "must contain a positive integer" \
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "invalid config/omp-max-time should stop the spawn"
+  assert_contains "$out" "must contain off or a positive integer" \
     "invalid max-time refusal did not explain accepted values"
   assert_not_contains "$(cat "$LAUNCH_LOG")" "omp --auto-approve" \
     "invalid max-time config still reached the launch command"
-  pass "omp threads configured max-time, omits it by default, and rejects invalid durations"
+
+  id=claude-ignores-omp-max-time-o6f
+  rec=$(make_spawn_case claude-ignores-omp-max-time claude "$id")
+  read_case_record "$rec"
+  printf '10m\n' > "$HOME_DIR/config/omp-max-time"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "non-omp spawn with config/omp-max-time should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--max-time" \
+    "omp max-time config leaked into another harness"
+  pass "omp max-time defaults to 3h, supports override and off, validates input, and stays omp-only"
 }
 
 # Model 7 (REQUIRED): --model is threaded for a set model and absent by default.
@@ -295,7 +320,7 @@ test_omp_threads_model_flag() {
   expect_code 0 "$status" "omp spawn with a model should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" omp omp-fast default
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "omp --auto-approve --model 'omp-fast'" "omp launch did not thread --model"
+  assert_contains "$launch" "omp --auto-approve --max-time=3h --model 'omp-fast'" "omp launch did not thread --model"
 
   id2=omp-model-default-o7b
   rec2=$(make_spawn_case omp-model-default omp "$id2")
@@ -369,7 +394,7 @@ test_omp_threads_max_effort() {
   expect_code 0 "$status" "omp spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" omp omp-fast max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "omp --auto-approve --model 'omp-fast' --thinking 'max' -e" \
+  assert_contains "$launch" "omp --auto-approve --max-time=3h --model 'omp-fast' --thinking 'max' -e" \
     "omp launch did not thread --thinking max after the 16.4.8 capability change"
   pass "omp threads the supported max thinking effort"
 }
@@ -476,7 +501,7 @@ test_omp_detection_layer2_ancestry
 test_omp_crewmate_launch_shape
 test_omp_crewmate_writes_turnend_ext
 test_omp_secondmate_launch_omits_ext
-test_omp_threads_optional_max_time
+test_omp_threads_configurable_max_time
 test_omp_threads_model_flag
 test_omp_preserves_global_role_resolution
 test_omp_threads_thinking_effort

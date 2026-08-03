@@ -61,7 +61,10 @@ make_spawn_case() {
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
-    printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+    {
+      printf 'brief for %s\n' "$id"
+      printf 'Delivery contract: mode=no-mistakes\n'
+    } > "$home/data/$id/brief.md"
   done
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
@@ -692,7 +695,7 @@ test_omp_refuses_unapproved_project_extensions() {
   read_case_record "$rec"
   commit_project_omp_extension "$PROJ_DIR"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "omp spawn should refuse tracked project extensions without approval"
   assert_contains "$out" "refusing omp launch because the project tracks auto-executed .omp/extensions code" \
@@ -712,7 +715,7 @@ test_omp_allows_explicitly_approved_project_extensions() {
   read_case_record "$rec"
   commit_project_omp_extension "$PROJ_DIR"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --allow-project-omp-extensions)
   status=$?
   expect_code 0 "$status" "explicit approval should allow the omp project extension"
@@ -730,7 +733,7 @@ test_omp_allows_exact_firstmate_primary_guard() {
   read_case_record "$rec"
   commit_project_omp_extension "$PROJ_DIR" "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "the exact sole firstmate primary guard should be allowlisted"
   assert_not_contains "$out" "refusing omp launch" "the exact firstmate primary guard was not allowlisted"

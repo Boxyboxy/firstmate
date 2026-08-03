@@ -174,6 +174,8 @@ test_help_includes_entire_header() {
   local help
   help=$("$ROOT/bin/fm-brief.sh" --help)
   assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
+  assert_contains "$help" "work-in-progress commits at natural boundaries" \
+    "fm-brief.sh --help omitted the ship checkpoint contract"
   pass "fm-brief.sh: --help renders the complete header"
 }
 
@@ -212,6 +214,8 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep "Commit work in progress at natural boundaries so an unexpected stop cannot destroy uncommitted work." "$brief" \
+      "$id: ship brief missing the natural-boundary checkpoint instruction"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
