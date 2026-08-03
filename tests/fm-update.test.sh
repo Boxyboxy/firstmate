@@ -394,7 +394,7 @@ test_omp_update_is_guarded_and_channel_preserving() {
     OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
     OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE")
 
-  assert_contains "$out" "omp: channel: $channel_a/omp" "omp update uses the which-resolved channel"
+  assert_contains "$out" "omp: channel: $channel_a/omp" "omp update uses the first channel on PATH, as the shell would"
   assert_contains "$out" "omp: before: omp/17.2.6" "omp update reports its starting version"
   assert_contains "$out" "omp: after: omp/99.1.0" "omp update reports its ending version"
   [ -f "$case_dir/install-marker" ] || fail "empty-fleet omp update did not run"
@@ -627,6 +627,108 @@ test_omp_update_covers_second_mate_homes() {
   pass "omp accounts for every local second mate home, not just this one"
 }
 
+# A tmux whose inventory read fails with an error that proves nothing, so
+# fm_backend_agent_state classifies the recorded endpoint `unreadable` - what a
+# host with no usable tmux at all answers for any recorded window.
+make_unreadable_endpoint_tmux() {
+  local dir=$1
+  mkdir -p "$dir"
+  cat > "$dir/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'tmux: something unexpected\n' >&2
+exit 1
+SH
+  chmod +x "$dir/tmux"
+}
+
+# A remote second mate's worker runs on another machine, so this machine's omp
+# cannot break it. Its local record is only a proxy - `window=remote:<id>` with
+# no backend field - so classifying it against the LOCAL backend asks about the
+# wrong machine and, on a host whose local backend cannot answer, would wedge
+# every normal update for a worker that was never at risk.
+test_omp_update_ignores_a_remote_second_mate_record() {
+  local case_dir="$TMP_ROOT/omp-sm-remote" fixture home channel_a out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  channel_a=${fixture#*|}
+  channel_a=${channel_a%%|*}
+  make_unreadable_endpoint_tmux "$case_dir/fakebin"
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  {
+    printf 'window=remote:sm2\n'
+    printf 'kind=secondmate\n'
+    printf 'home=/srv/sm2\n'
+    printf 'remote_host=h1\n'
+    printf 'remote_root=/srv/fm\n'
+    printf 'remote_backend=tmux\n'
+    printf 'remote_target=main:fm-sm2\n'
+  } > "$home/state/sm2.meta"
+
+  out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE")
+
+  assert_contains "$out" "omp: after: omp/99.1.0" "a remote record does not block the local channel"
+  [ -f "$case_dir/install-marker" ] || fail "a remote second mate record wedged the local omp update"
+  pass "omp never classifies a remote second mate's record against the local backend"
+}
+
+# The gate refuses to call an endpoint it cannot classify stopped, so a whole
+# home or registry it cannot reach must not be counted as proof of an empty
+# fleet either. Both report the place they could not reach and point at --force.
+test_omp_update_reports_places_it_cannot_reach() {
+  local case_dir="$TMP_ROOT/omp-unreachable" fixture home channel_a out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  channel_a=${fixture#*|}
+  channel_a=${channel_a%%|*}
+  make_dead_endpoint_tmux "$case_dir/fakebin"
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  # The record's own endpoint is authoritatively gone, so the only thing left
+  # unproven is the home its unusable path was supposed to point at.
+  {
+    printf 'kind=secondmate\n'
+    printf 'window=main:fm-sm1\n'
+    printf 'home=relative/sm1\n'
+  } > "$home/state/sm1.meta"
+
+  if out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "an unreachable second mate home was treated as an empty fleet"
+  fi
+  assert_contains "$out" "second mate sm1's home: its recorded location is not a usable path (relative/sm1)" \
+    "a home the sweep cannot reach is named, not silently dropped"
+  assert_contains "$out" "rerun with --force" "the refusal names the operator's way through"
+  [ ! -f "$case_dir/install-marker" ] || fail "unreachable home still attempted an install"
+
+  out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" --force 2>&1)
+  assert_contains "$out" "omp: after: omp/99.1.0" "the override completes the update"
+
+  # A registry that is not a plain file is the same kind of unproven gap: the
+  # whole registered-home backstop went unread.
+  rm -f "$home/state/sm1.meta" "$case_dir/install-marker"
+  mkdir -p "$home/data"
+  printf -- '- sm1 - a second mate (home: %s/sm1; scope: x; projects: p; added 2026-06-23)\n' \
+    "$case_dir" > "$case_dir/registry.md"
+  ln -s "$case_dir/registry.md" "$home/data/secondmates.md"
+  if out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "an unread registry was treated as an empty fleet"
+  fi
+  assert_contains "$out" "the second mate registry: $home/data/secondmates.md is not a plain file" \
+    "an unread registry is reported instead of assumed empty"
+  [ ! -f "$case_dir/install-marker" ] || fail "unread registry still attempted an install"
+  pass "omp reports every place it could not reach instead of assuming it is empty"
+}
+
 test_omp_check_is_detect_only_with_live_fleet() {
   local case_dir="$TMP_ROOT/omp-check" fixture home channel_a out
   fixture=$(make_fake_omp "$case_dir")
@@ -738,6 +840,8 @@ test_omp_update_separates_unclassifiable_state_and_honours_force
 test_omp_update_ignores_records_whose_endpoint_is_gone
 test_omp_update_names_a_second_mate_correctly
 test_omp_update_covers_second_mate_homes
+test_omp_update_ignores_a_remote_second_mate_record
+test_omp_update_reports_places_it_cannot_reach
 test_omp_check_is_detect_only_with_live_fleet
 
 echo "# all fm-update tests passed"

@@ -7,13 +7,15 @@
 # allowed only when every worker recorded in this home AND in every local
 # second mate home has confidently stopped. A second mate reached over SSH runs
 # its workers on another machine, where this machine's omp cannot break
-# anything, so its route is deliberately not part of this sweep.
+# anything, so neither its route nor its local proxy record is part of this
+# sweep, in either the home collection or the record classification.
 # --check performs omp's detect-only update check and does not need that
 # guarantee because it cannot replace the executable.
 # --force is the operator's explicit override, for the case where a backend has
-# no recovery-grade liveness classifier (the experimental backends) or an
-# endpoint read keeps failing, which would otherwise leave the update wedged
-# with no way through. It names what it overrode.
+# no recovery-grade liveness classifier (the experimental backends), an endpoint
+# read keeps failing, or a home the sweep must account for cannot be reached,
+# any of which would otherwise leave the update wedged with no way through. It
+# names what it overrode.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,6 +33,18 @@ usage() {
 
 first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
+}
+
+meta_is_secondmate() {  # <meta-file>
+  grep -qx 'kind=secondmate' "$1" 2>/dev/null
+}
+
+# A record whose worker runs on another machine over SSH. This machine's omp
+# cannot break it, and its recorded window is a local-looking proxy selector
+# with no backend field, so classifying it against a LOCAL backend would answer
+# a question about the wrong machine.
+meta_is_remote_route() {  # <meta-file>
+  grep -q '^remote_host=.' "$1" 2>/dev/null
 }
 
 # Classify what <meta-file>'s recorded endpoint proves, as "<class> <reason>":
@@ -67,13 +81,29 @@ meta_endpoint_class() {
 # Second mate homes come from this home's own kind=secondmate records and from
 # the registry, so a second mate that is registered but not currently recorded
 # live is still swept.
+#
+# A place this sweep cannot reach is unproven, exactly like an endpoint that
+# cannot be classified, so it is recorded in SWEEP_UNREACHABLE and reported as
+# an unconfirmed blocker instead of being silently counted as empty. A state
+# directory that simply does not exist yet is different: a home with no records
+# genuinely has nothing running, so it is not a blocker.
 SWEEP_DIRS=""
 SWEEP_SEEN=" "
+SWEEP_UNREACHABLE=""
+
+note_unreachable() {  # <what> <reason>
+  SWEEP_UNREACHABLE="$SWEEP_UNREACHABLE$1: $2
+"
+}
 
 add_sweep_state() {  # <state-dir> <owner-label>
   local dir=$1 owner=$2 resolved
   [ -n "$dir" ] || return 0
-  resolved=$(cd "$dir" 2>/dev/null && pwd -P) || return 0
+  [ -d "$dir" ] || return 0
+  resolved=$(cd "$dir" 2>/dev/null && pwd -P) || {
+    note_unreachable "${owner:-this home}" "its local records at $dir cannot be read"
+    return 0
+  }
   case "$SWEEP_SEEN" in *" $resolved "*) return 0 ;; esac
   SWEEP_SEEN="$SWEEP_SEEN$resolved "
   SWEEP_DIRS="$SWEEP_DIRS$resolved	$owner
@@ -82,7 +112,13 @@ add_sweep_state() {  # <state-dir> <owner-label>
 
 add_sweep_home() {  # <home> <owner-label>
   local home=$1 owner=$2
-  case "$home" in /*) ;; *) return 0 ;; esac
+  case "$home" in
+    /*) ;;
+    *)
+      note_unreachable "${owner:-this home}" "its recorded location is not a usable path (${home:-empty})"
+      return 0
+      ;;
+  esac
   add_sweep_state "$home/state" "$owner"
 }
 
@@ -90,14 +126,15 @@ collect_sweep_dirs() {
   local meta id home line
   SWEEP_DIRS=""
   SWEEP_SEEN=" "
+  SWEEP_UNREACHABLE=""
   add_sweep_state "$STATE" ""
   if [ -d "$STATE" ]; then
     for meta in "$STATE"/*.meta; do
       [ -f "$meta" ] || continue
-      grep -qx 'kind=secondmate' "$meta" 2>/dev/null || continue
-      if grep -q '^remote_host=.' "$meta" 2>/dev/null; then continue; fi
+      meta_is_secondmate "$meta" || continue
+      if meta_is_remote_route "$meta"; then continue; fi
       id=$(basename "$meta" .meta)
-      home=$(grep '^home=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      home=$(fm_meta_get "$meta" home)
       add_sweep_home "$home" "second mate $id's home"
     done
   fi
@@ -108,6 +145,8 @@ collect_sweep_dirs() {
       [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
       add_sweep_home "$SECONDMATE_REGISTRY_HOME" "second mate $SECONDMATE_REGISTRY_ID's home"
     done < "$SECONDMATES_MD"
+  elif [ -e "$SECONDMATES_MD" ] || [ -L "$SECONDMATES_MD" ]; then
+    note_unreachable "the second mate registry" "$SECONDMATES_MD is not a plain file, so registered homes could not be swept"
   fi
 }
 
@@ -115,7 +154,8 @@ collect_sweep_dirs() {
 # which class of blocker it is. A persistent second mate is never a task, so it
 # is never labelled one. A verifiably running worker outranks a merely
 # unclassified one, so the sweep keeps looking after the first unclassified
-# record and reports the strongest evidence it found.
+# record and reports the strongest evidence it found, and a place the sweep
+# could not reach at all is weighed last as unconfirmed.
 BLOCK_KIND=""
 BLOCK_WHAT=""
 
@@ -128,12 +168,13 @@ find_blocker() {
     [ -d "$dir" ] || continue
     for meta in "$dir"/*.meta; do
       [ -f "$meta" ] || continue
+      if meta_is_remote_route "$meta"; then continue; fi
       out=$(meta_endpoint_class "$meta")
       class=${out%% *}
       reason=${out#* }
       [ "$class" != stopped ] || continue
       id=$(basename "$meta" .meta)
-      if grep -qx 'kind=secondmate' "$meta" 2>/dev/null; then
+      if meta_is_secondmate "$meta"; then
         label="second mate $id"
       else
         label="task $id"
@@ -152,6 +193,10 @@ find_blocker() {
   done <<EOF
 $SWEEP_DIRS
 EOF
+  if [ -z "$BLOCK_KIND" ] && [ -n "$SWEEP_UNREACHABLE" ]; then
+    BLOCK_KIND=unclassified
+    BLOCK_WHAT=$(printf '%s' "$SWEEP_UNREACHABLE" | sed -n '1p')
+  fi
   [ -n "$BLOCK_KIND" ]
 }
 
@@ -191,7 +236,7 @@ if [ "$mode" = check ] && [ "$force" = yes ]; then
   exit 2
 fi
 
-omp_path=$(which omp 2>/dev/null) || {
+omp_path=$(command -v omp 2>/dev/null) || {
   echo 'omp: unavailable on PATH' >&2
   exit 1
 }

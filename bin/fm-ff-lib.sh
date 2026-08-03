@@ -367,9 +367,11 @@ shared_ref_repo() {
 # `secondmate <id>: skipped:` lines as startup diagnostics and bin/fm-spawn.sh
 # warns on the first line. That skip line comes FIRST for exactly that reason,
 # with the plain ref-advance fact on the line after it.
+# ff_target owns proving the base exists and passes its resolved commit in, so
+# there is exactly one place that reports a missing base.
 ff_default_ref_while_off_branch() {
-  local dir=$1 label=$2 default=$3 base=$4 cur=$5
-  local default_ref holder holder_rc local_rev base_rev before after out shared refname
+  local dir=$1 label=$2 default=$3 base=$4 cur=$5 base_rev=$6
+  local default_ref holder holder_rc local_rev before after out shared refname
   default_ref="refs/heads/$default"
   refname="$default ref"
   if shared=$(shared_ref_repo "$dir"); then
@@ -389,10 +391,6 @@ ff_default_ref_while_off_branch() {
 
   local_rev=$(git -C "$dir" rev-parse --verify "$default_ref^{commit}" 2>/dev/null) || {
     echo "$label: skipped: cannot read $default; checkout stayed on $cur"
-    return 0
-  }
-  base_rev=$(git -C "$dir" rev-parse "$base^{commit}" 2>/dev/null) || {
-    echo "$label: skipped: cannot read $base; checkout stayed on $cur"
     return 0
   }
   if [ "$local_rev" = "$base_rev" ]; then
@@ -452,7 +450,7 @@ ff_target() {
     base="$base_mode"
   fi
 
-  if ! git -C "$dir" rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
+  if ! base_rev=$(git -C "$dir" rev-parse --verify --quiet "$base^{commit}"); then
     echo "$label: skipped: $base does not exist"
     return 0
   fi
@@ -463,7 +461,7 @@ ff_target() {
     return 0
   fi
   if [ -n "$cur" ] && [ "$cur" != "$default" ]; then
-    ff_default_ref_while_off_branch "$dir" "$label" "$default" "$base" "$cur"
+    ff_default_ref_while_off_branch "$dir" "$label" "$default" "$base" "$cur" "$base_rev"
     return 0
   fi
 
