@@ -29,7 +29,10 @@
 # that checkout, but a ref held by another worktree is left alone. Advancing
 # that ref never silences the off-branch condition itself - the checkout is
 # still running whatever its own branch holds - so every off-branch outcome
-# also reports a skip that names the branch to repair.
+# also reports a skip that names the branch to repair. A linked worktree shares
+# its ref store with the whole repository, so a ref outcome there names the
+# repository the branch actually belongs to rather than implying it is private
+# to that home.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -337,6 +340,22 @@ default_branch_worktree() {
   return 1
 }
 
+# Echo the repository that owns refs/heads/<default> for this checkout, when
+# that repository is not the checkout itself. A linked worktree shares one ref
+# store with its main worktree, so advancing the default ref there moves the
+# whole repository's branch rather than anything private to this home, and the
+# report has to name it. Returns 1 for a standalone clone or a main worktree,
+# whose default ref is its own.
+shared_ref_repo() {
+  local dir=$1 gitdir common main
+  gitdir=$(git -C "$dir" rev-parse --path-format=absolute --git-dir 2>/dev/null) || return 1
+  common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ "$gitdir" != "$common" ] || return 1
+  main=$(git -C "$dir" worktree list --porcelain 2>/dev/null | sed -n '1s|^worktree ||p')
+  [ -n "$main" ] || return 1
+  printf '%s\n' "$main"
+}
+
 # Advance only refs/heads/<default> while a different named branch remains
 # checked out. The compare-and-swap update-ref is the final ancestry/race guard.
 #
@@ -350,8 +369,12 @@ default_branch_worktree() {
 # with the plain ref-advance fact on the line after it.
 ff_default_ref_while_off_branch() {
   local dir=$1 label=$2 default=$3 base=$4 cur=$5
-  local default_ref holder holder_rc local_rev base_rev before after out
+  local default_ref holder holder_rc local_rev base_rev before after out shared refname
   default_ref="refs/heads/$default"
+  refname="$default ref"
+  if shared=$(shared_ref_repo "$dir"); then
+    refname="$default ref (shared with $shared)"
+  fi
 
   if holder=$(default_branch_worktree "$dir" "$default"); then
     echo "$label: skipped: $default is checked out in another worktree (${holder:-unknown}); checkout stayed on $cur"
@@ -374,8 +397,8 @@ ff_default_ref_while_off_branch() {
   }
   if [ "$local_rev" = "$base_rev" ]; then
     FF_STATUS="current"
-    echo "$label: skipped: on $cur, expected $default; $default ref already current, checkout not advanced"
-    echo "$label: $default ref already current; checkout stayed on $cur"
+    echo "$label: skipped: on $cur, expected $default; $refname already current, checkout not advanced"
+    echo "$label: $refname already current; checkout stayed on $cur"
     return 0
   fi
   if ! git -C "$dir" merge-base --is-ancestor "$local_rev" "$base_rev" 2>/dev/null; then
@@ -385,13 +408,13 @@ ff_default_ref_while_off_branch() {
 
   before=$(git -C "$dir" rev-parse --short "$local_rev")
   if ! out=$(git -C "$dir" update-ref "$default_ref" "$base_rev" "$local_rev" 2>&1); then
-    echo "$label: skipped: $default ref fast-forward failed: $(first_line "$out"); checkout stayed on $cur"
+    echo "$label: skipped: $refname fast-forward failed: $(first_line "$out"); checkout stayed on $cur"
     return 0
   fi
   after=$(git -C "$dir" rev-parse --short "$base_rev")
   FF_STATUS="ref-updated"
-  echo "$label: skipped: on $cur, expected $default; $default ref advanced $before..$after, checkout not advanced"
-  echo "$label: advanced $default ref $before..$after; checkout stayed on $cur"
+  echo "$label: skipped: on $cur, expected $default; $refname advanced $before..$after, checkout not advanced"
+  echo "$label: advanced $refname $before..$after; checkout stayed on $cur"
 }
 
 ff_target() {

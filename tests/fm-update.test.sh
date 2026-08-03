@@ -407,20 +407,65 @@ test_omp_update_refuses_live_fleet() {
   home=${fixture%%|*}
   channels=${fixture#*|}
   channel_a=${channels%%|*}
+  make_alive_endpoint_tmux "$case_dir/fakebin"
   printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
-  : > "$home/state/live.meta"
+  printf 'window=main:win\n' > "$home/state/live.meta"
 
-  if out=$(PATH="$channel_a:$BASE_PATH" FM_HOME="$home" \
+  if out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
     OMP_FAKE_VERSION_FILE="$case_dir/version" \
     OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
     OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
     fail "omp update succeeded with a live fleet"
   fi
   assert_contains "$out" "omp: refused: a worker is still running (task live)" \
-    "unverifiable endpoint counts as running and is named as a task"
+    "a verifiably running endpoint blocks the swap and is named as a task"
   [ ! -f "$case_dir/install-marker" ] || fail "live-fleet guard attempted an install"
   [ "$(cat "$case_dir/version")" = "omp/17.2.6" ] || fail "live-fleet guard changed omp version"
   pass "omp update refuses a running worker without invoking the updater"
+}
+
+# An endpoint whose state cannot be classified at all - an experimental backend
+# with no recovery-grade classifier, or a record with no endpoint - must not be
+# reported as a running worker, and must not wedge the update with no way out.
+test_omp_update_separates_unclassifiable_state_and_honours_force() {
+  local case_dir="$TMP_ROOT/omp-unclassified" fixture home channel_a out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  channel_a=${fixture#*|}
+  channel_a=${channel_a%%|*}
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  {
+    printf 'backend=orca\n'
+    printf 'terminal=t1\n'
+  } > "$home/state/exp.meta"
+
+  if out=$(PATH="$channel_a:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "omp update ran with an unclassifiable endpoint"
+  fi
+  assert_contains "$out" "omp: refused: could not confirm every worker has stopped (task exp: its orca endpoint reads unverified)" \
+    "an unclassifiable endpoint is reported as unconfirmed, not as a running worker"
+  assert_contains "$out" "rerun with --force" "the refusal names the operator's way through"
+  [ ! -f "$case_dir/install-marker" ] || fail "unclassifiable endpoint still attempted an install"
+
+  out=$(PATH="$channel_a:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" --force 2>&1)
+  assert_contains "$out" "omp: forced past a worker whose state could not be confirmed (task exp" \
+    "the override says exactly what it overrode"
+  assert_contains "$out" "omp: after: omp/99.1.0" "the override completes the update"
+  [ -f "$case_dir/install-marker" ] || fail "--force did not run the update"
+
+  if PATH="$channel_a:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" --check --force >/dev/null 2>&1; then
+    fail "--check accepted a meaningless --force"
+  fi
+  pass "omp separates an unclassifiable endpoint from a running one and offers an override"
 }
 
 # A tmux that answers every window inventory with the definitive missing-session
@@ -434,6 +479,27 @@ if [ "${1:-}" = list-windows ]; then
   printf "can't find session: %s\n" "${3:-}" >&2
 fi
 exit 1
+SH
+  chmod +x "$dir/tmux"
+}
+
+# A tmux whose inventory names window `win` and whose pane runs a verified
+# harness, so fm_backend_agent_state classifies that endpoint `alive`.
+make_alive_endpoint_tmux() {
+  local dir=$1
+  mkdir -p "$dir"
+  cat > "$dir/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message)
+    for a in "$@"; do
+      case "$a" in *pane_current_command*) printf '%s\n' claude; exit 0 ;; esac
+    done
+    exit 0
+    ;;
+  list-windows) printf '%s\n' win; exit 0 ;;
+esac
+exit 0
 SH
   chmod +x "$dir/tmux"
 }
@@ -469,13 +535,15 @@ test_omp_update_names_a_second_mate_correctly() {
   channel_a=${fixture#*|}
   channel_a=${channel_a%%|*}
   make_dead_endpoint_tmux "$case_dir/fakebin"
+  make_alive_endpoint_tmux "$case_dir/alivebin"
   printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
   {
     printf 'kind=secondmate\n'
     printf 'home=%s/sm\n' "$case_dir"
+    printf 'window=main:win\n'
   } > "$home/state/sm1.meta"
 
-  if out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+  if out=$(PATH="$channel_a:$case_dir/alivebin:$BASE_PATH" FM_HOME="$home" \
     OMP_FAKE_VERSION_FILE="$case_dir/version" \
     OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
     OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
@@ -486,7 +554,11 @@ test_omp_update_names_a_second_mate_correctly() {
   [ ! -f "$case_dir/install-marker" ] || fail "running second mate did not stop the install"
 
   # The same record stops blocking once its endpoint is authoritatively gone.
-  printf 'window=main:fm-sm1\n' >> "$home/state/sm1.meta"
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=%s/sm\n' "$case_dir"
+    printf 'window=main:fm-sm1\n'
+  } > "$home/state/sm1.meta"
   out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
     OMP_FAKE_VERSION_FILE="$case_dir/version" \
     OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
@@ -494,6 +566,65 @@ test_omp_update_names_a_second_mate_correctly() {
   assert_contains "$out" "omp: after: omp/99.1.0" "a second mate that is not running does not wedge omp"
   [ -f "$case_dir/install-marker" ] || fail "non-running second mate wedged the omp update"
   pass "omp names a second mate correctly and only blocks while it is running"
+}
+
+# omp is one machine-wide executable, so a second mate's OWN crewmates are just
+# as breakable as this home's. Their records live in that second mate's isolated
+# home, which the gate has to reach through both the live record and the registry.
+test_omp_update_covers_second_mate_homes() {
+  local case_dir="$TMP_ROOT/omp-sm-home" fixture home channel_a sm_home out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  channel_a=${fixture#*|}
+  channel_a=${channel_a%%|*}
+  make_alive_endpoint_tmux "$case_dir/alivebin"
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  sm_home="$case_dir/sm-home"
+  mkdir -p "$sm_home/state"
+  printf 'window=main:win\n' > "$sm_home/state/busy.meta"
+  # This home's own record carries no endpoint, so only the second mate home's
+  # crewmate can supply the running verdict the refusal must report.
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=%s\n' "$sm_home"
+  } > "$home/state/sm1.meta"
+
+  if out=$(PATH="$channel_a:$case_dir/alivebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "omp update swapped the executable under a second mate's crewmate"
+  fi
+  assert_contains "$out" "omp: refused: a worker is still running (task busy in second mate sm1's home)" \
+    "a second mate home's running crewmate blocks the swap and is located"
+  [ ! -f "$case_dir/install-marker" ] || fail "second mate home's crewmate did not stop the install"
+
+  # The registry is the same guarantee for a second mate with no live record.
+  rm -f "$home/state/sm1.meta"
+  mkdir -p "$home/data"
+  printf -- '- sm1 - a second mate (home: %s; scope: x; projects: p; added 2026-06-23)\n' \
+    "$sm_home" > "$home/data/secondmates.md"
+  if out=$(PATH="$channel_a:$case_dir/alivebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "a registry-only second mate home was left unswept"
+  fi
+  assert_contains "$out" "omp: refused: a worker is still running (task busy in second mate sm1's home)" \
+    "the registry reaches a second mate home with no live record"
+
+  # A remote second mate's workers run on another machine, where this machine's
+  # omp cannot break them, so its route never blocks the local update.
+  rm -f "$sm_home/state/busy.meta"
+  printf -- '- sm2 - a remote second mate (host: h1; root: /srv/fm; home: /srv/sm2; scope: y; projects: p; added 2026-06-23)\n' \
+    > "$home/data/secondmates.md"
+  out=$(PATH="$channel_a:$case_dir/alivebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE")
+  assert_contains "$out" "omp: after: omp/99.1.0" "a remote second mate does not block the local channel"
+  [ -f "$case_dir/install-marker" ] || fail "remote second mate wedged the local omp update"
+  pass "omp accounts for every local second mate home, not just this one"
 }
 
 test_omp_check_is_detect_only_with_live_fleet() {
@@ -517,6 +648,38 @@ test_omp_check_is_detect_only_with_live_fleet() {
   pass "omp check remains detect-only even with a live fleet"
 }
 
+
+# A linked-worktree secondmate home shares its ref store with the whole repo, so
+# an off-branch ref advance there moves the PRIMARY's default branch, not
+# anything private to that home. Reachable whenever the primary itself holds no
+# default-branch checkout, so the report must name the repository it moved.
+test_off_branch_ref_advance_names_the_shared_repo() {
+  local w out before_main shared
+  w=$(new_world t14)
+  git -C "$w/main" worktree add -q -b sm/wip "$w/sm1" main
+  printf 'sm1\n' > "$w/sm1/.fm-secondmate-home"
+  {
+    printf 'window=main:fm-sm1\n'
+    printf 'kind=secondmate\n'
+    printf 'home=%s/sm1\n' "$w"
+  } > "$w/home/state/sm1.meta"
+  git -C "$w/main" checkout -q --detach HEAD
+  before_main=$(git -C "$w/main" rev-parse main)
+  bump_origin "$w" instr
+  shared=$(cd "$w/main" && pwd -P)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "secondmate sm1: skipped: on sm/wip, expected main" \
+    "the off-branch home stays visible as a repair"
+  assert_contains "$out" "advanced main ref (shared with $shared)" \
+    "the ref advance names the repository whose branch actually moved"
+  [ "$(git -C "$w/main" rev-parse main)" != "$before_main" ] \
+    || fail "the free shared default ref did not advance"
+  [ "$(git -C "$w/sm1" rev-parse --abbrev-ref HEAD)" = "sm/wip" ] \
+    || fail "the off-branch home's checkout moved"
+  pass "T14 a shared default ref advance names the repository it moved"
+}
 
 test_firstmate_detached_head_skipped() {
   local w out before
@@ -566,12 +729,15 @@ test_firstmate_wrong_branch_ref_update
 test_firstmate_off_branch_diverged_default_ref_skipped
 test_firstmate_off_branch_default_ref_in_other_worktree_skipped
 test_firstmate_off_branch_default_ref_held_by_rebase_skipped
+test_off_branch_ref_advance_names_the_shared_repo
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
 test_omp_update_is_guarded_and_channel_preserving
 test_omp_update_refuses_live_fleet
+test_omp_update_separates_unclassifiable_state_and_honours_force
 test_omp_update_ignores_records_whose_endpoint_is_gone
 test_omp_update_names_a_second_mate_correctly
+test_omp_update_covers_second_mate_homes
 test_omp_check_is_detect_only_with_live_fleet
 
 echo "# all fm-update tests passed"
