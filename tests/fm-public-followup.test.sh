@@ -25,6 +25,11 @@ TMP_ROOT=$(fm_test_tmproot fm-public-followup)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
+# tasks-axi owns the obligation state machine, so a build without the
+# `public-followup` command cannot run this suite at all. That is the same
+# unavailable-tool condition as the gate above, not a product failure.
+tasks-axi public-followup --help >/dev/null 2>&1 \
+  || { echo "skip: installed tasks-axi has no public-followup command"; exit 0; }
 
 # A fakebin `curl` standing in for the relay. It logs every call so a test can
 # prove exactly how many public posts happened, and honours FAKE_FOLLOWUP_CODE so

@@ -135,7 +135,9 @@ done < "$BRIEF" > "$TMP/charter.remote"
 
 PROJECTS_CSV=
 : > "$TMP/project.records"
-for project in "${PROJECT_NAMES[@]}"; do
+# --no-projects leaves PROJECT_NAMES empty, and bash 3.2 (the system bash on
+# macOS) treats a plain "${empty[@]}" as unbound under `set -u`.
+for project in "${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}"; do
   SRC="$PROJECTS/$project"
   [ -d "$SRC/.git" ] || die "project clone is unavailable: $SRC"
   MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")

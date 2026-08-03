@@ -2074,7 +2074,12 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$STATE/$ID.meta" || exit 1
+# `set -e` does NOT abort on a redirection failure attached to a compound command
+# (only on a simple one), so without that explicit `|| exit 1` an unwritable
+# state/<id>.meta would print its shell diagnostic and then let the spawn report
+# success with no durable record - and, on Orca, disarm the abort cleanup below
+# and leak the worktree and terminal it just created.
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
