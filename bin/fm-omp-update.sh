@@ -173,7 +173,7 @@ find_blocker() {
     for meta in "$dir"/*.meta; do
       [ -f "$meta" ] || continue
       if meta_is_remote_route "$meta"; then continue; fi
-      out=$(meta_endpoint_class "$meta")
+      out=$(meta_endpoint_class "$meta" </dev/null)
       class=${out%% *}
       reason=${out#* }
       [ "$class" != stopped ] || continue

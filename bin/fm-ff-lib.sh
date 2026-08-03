@@ -340,6 +340,20 @@ default_branch_worktree() {
   return 1
 }
 
+# Echo a git-reported directory as an absolute physical path, resolving it
+# against <dir> when git reported it relative. `rev-parse --path-format=absolute`
+# would do this in one call, but it only exists from git 2.31 and this repo
+# pins no minimum git version; on an older git that flag fails outright and a
+# shared ref store would be silently misreported as private.
+git_reported_dir() {  # <dir> <git-reported-path>
+  local dir=$1 path=$2
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /*) (cd "$path" 2>/dev/null && pwd -P) ;;
+    *) (cd "$dir" 2>/dev/null && cd "$path" 2>/dev/null && pwd -P) ;;
+  esac
+}
+
 # Echo the repository that owns refs/heads/<default> for this checkout, when
 # that repository is not the checkout itself. A linked worktree shares one ref
 # store with its main worktree, so advancing the default ref there moves the
@@ -348,8 +362,9 @@ default_branch_worktree() {
 # whose default ref is its own.
 shared_ref_repo() {
   local dir=$1 gitdir common main
-  gitdir=$(git -C "$dir" rev-parse --path-format=absolute --git-dir 2>/dev/null) || return 1
-  common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  gitdir=$(git_reported_dir "$dir" "$(git -C "$dir" rev-parse --git-dir 2>/dev/null || true)") || return 1
+  common=$(git_reported_dir "$dir" "$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null || true)") || return 1
+  [ -n "$gitdir" ] && [ -n "$common" ] || return 1
   [ "$gitdir" != "$common" ] || return 1
   main=$(git -C "$dir" worktree list --porcelain 2>/dev/null | sed -n '1s|^worktree ||p')
   [ -n "$main" ] || return 1
@@ -390,7 +405,7 @@ ff_default_ref_while_off_branch() {
   fi
 
   local_rev=$(git -C "$dir" rev-parse --verify "$default_ref^{commit}" 2>/dev/null) || {
-    echo "$label: skipped: cannot read $default; checkout stayed on $cur"
+    echo "$label: skipped: cannot read $refname; checkout stayed on $cur"
     return 0
   }
   if [ "$local_rev" = "$base_rev" ]; then
@@ -400,7 +415,7 @@ ff_default_ref_while_off_branch() {
     return 0
   fi
   if ! git -C "$dir" merge-base --is-ancestor "$local_rev" "$base_rev" 2>/dev/null; then
-    echo "$label: skipped: $default diverged from $base; checkout stayed on $cur"
+    echo "$label: skipped: $refname diverged from $base; checkout stayed on $cur"
     return 0
   fi
 

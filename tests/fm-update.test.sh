@@ -280,7 +280,7 @@ test_firstmate_off_branch_diverged_default_ref_skipped() {
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "firstmate: skipped: main diverged from origin/main" \
+  assert_contains "$out" "firstmate: skipped: main ref diverged from origin/main" \
     "diverged off-default default ref is skipped"
   assert_contains "$out" "checkout stayed on feature/wip" \
     "diverged ref skip reports the unchanged checkout"
@@ -798,6 +798,43 @@ test_off_branch_ref_advance_names_the_shared_repo() {
   pass "T14 a shared default ref advance names the repository it moved"
 }
 
+# The registry sweep reads data/secondmates.md on stdin, and ssh forwards stdin
+# to the remote command. A remote second mate that consumed it would eat every
+# entry after its own, so each home registered below a remote route would stop
+# being updated with no report at all - the silent refresh gap in person.
+test_remote_secondmate_does_not_consume_the_registry() {
+  local w out
+  w=$(new_world t15)
+  # A tracked remote control command so the transport is actually reached, and a
+  # stand-in ssh that drains stdin exactly as the real one forwards it.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$w/seed/bin/fm-remote-secondmate-control.sh"
+  chmod +x "$w/seed/bin/fm-remote-secondmate-control.sh"
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm remote-control
+  git -C "$w/seed" push -q origin main
+  git -C "$w/main" fetch -q origin
+  git -C "$w/main" merge -q --ff-only origin/main
+  printf '#!/usr/bin/env bash\ncat >/dev/null 2>&1 || true\nexit 255\n' > "$w/fake-ssh"
+  chmod +x "$w/fake-ssh"
+  # reg1 is registry-only, so it is resolved by the registry sweep alone and
+  # cannot be rescued by the live-metadata pass that runs before it.
+  git -C "$w/main" worktree add -q --detach "$w/reg1" main
+  printf 'reg1\n' > "$w/reg1/.fm-secondmate-home"
+  {
+    printf -- '- smr - remote route (host: h1; root: /srv/fm; home: /srv/smr; scope: x; projects: p; added 2026-06-23)\n'
+    printf -- '- reg1 - registered below the remote route (home: %s/reg1; scope: y; projects: p; added 2026-06-23)\n' "$w"
+  } > "$w/home/data/secondmates.md"
+  bump_origin "$w" instr
+
+  out=$(FM_SSH_BIN="$w/fake-ssh" run_update "$w")
+
+  assert_contains "$out" "secondmate reg1: updated " \
+    "a home registered after a remote route is still updated"
+  [ "$(git -C "$w/reg1" rev-parse HEAD)" = "$(git -C "$w/reg1" rev-parse origin/main)" ] \
+    || fail "the home below the remote route never fast-forwarded"
+  pass "T15 a remote second mate does not swallow the rest of the registry sweep"
+}
+
 test_firstmate_detached_head_skipped() {
   local w out before
   w=$(new_world t12)
@@ -847,6 +884,7 @@ test_firstmate_off_branch_diverged_default_ref_skipped
 test_firstmate_off_branch_default_ref_in_other_worktree_skipped
 test_firstmate_off_branch_default_ref_held_by_rebase_skipped
 test_off_branch_ref_advance_names_the_shared_repo
+test_remote_secondmate_does_not_consume_the_registry
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
 test_omp_update_is_guarded_and_channel_preserving
