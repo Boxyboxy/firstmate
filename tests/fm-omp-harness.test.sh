@@ -70,7 +70,10 @@ make_spawn_case() {
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
-    printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+    {
+      printf 'brief for %s\n' "$id"
+      printf 'Delivery contract: mode=no-mistakes\n'
+    } > "$home/data/$id/brief.md"
   done
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
@@ -84,15 +87,22 @@ make_seeded_secondmate_home() {
 }
 
 run_spawn() {
-  local home=$1 wt=$2 fakebin=$3 launchlog=$4
+  local home=$1 wt=$2 fakebin=$3 launchlog=$4 arg
+  local -a delivery
   shift 4
+  delivery=(--mode no-mistakes --yolo off)
+  for arg in "$@"; do
+    case "$arg" in
+      --secondmate|--scout) delivery=(); break ;;
+    esac
+  done
   : > "$launchlog"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$@" 2>&1
+    "$SPAWN" "$@" "${delivery[@]+"${delivery[@]}"}" 2>&1
 }
 
 read_case_record() {
@@ -227,6 +237,51 @@ test_omp_secondmate_launch_omits_ext() {
   assert_absent "$HOME_DIR/state/$id.omp-ext.ts" \
     "omp secondmate must not write a crewmate turn-end signal extension"
   pass "omp secondmate launch omits the -e signal extension and writes no ext file"
+}
+
+# Runtime bound 6b (REQUIRED): config/omp-max-time is an opt-in per-home
+# duration. Configured omp launches receive the exact flag, while an absent
+# config keeps the previous unbounded launch. Unsupported values stop the spawn.
+test_omp_threads_optional_max_time() {
+  local rec id out status launch rec2 id2 status2 launch2 rec3 id3 out3 status3 help
+  help=$("$SPAWN" --help)
+  assert_contains "$help" "config/omp-max-time" \
+    "fm-spawn help did not name the omp runtime-bound config"
+  assert_contains "$help" "positive integer suffixed with \`m\` for minutes or \`h\` for hours" \
+    "fm-spawn help did not define accepted omp max-time values"
+  id=omp-max-time-o6b
+  rec=$(make_spawn_case omp-max-time omp "$id")
+  read_case_record "$rec"
+  printf '# bounded crewmates\n  10m  \n' > "$HOME_DIR/config/omp-max-time"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "omp spawn with config/omp-max-time should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "omp --auto-approve --max-time=10m" \
+    "configured omp launch did not thread --max-time"
+
+  id2=omp-max-time-absent-o6c
+  rec2=$(make_spawn_case omp-max-time-absent omp "$id2")
+  read_case_record "$rec2"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id2" "$PROJ_DIR")
+  status2=$?
+  expect_code 0 "$status2" "omp spawn without config/omp-max-time should remain unbounded"
+  launch2=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch2" "--max-time" \
+    "unconfigured omp launch must omit --max-time"
+
+  id3=omp-max-time-invalid-o6d
+  rec3=$(make_spawn_case omp-max-time-invalid omp "$id3")
+  read_case_record "$rec3"
+  printf '0\n' > "$HOME_DIR/config/omp-max-time"
+  out3=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id3" "$PROJ_DIR")
+  status3=$?
+  [ "$status3" -ne 0 ] || fail "invalid config/omp-max-time should stop the spawn"
+  assert_contains "$out3" "must contain a positive integer" \
+    "invalid max-time refusal did not explain accepted values"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "omp --auto-approve" \
+    "invalid max-time config still reached the launch command"
+  pass "omp threads configured max-time, omits it by default, and rejects invalid durations"
 }
 
 # Model 7 (REQUIRED): --model is threaded for a set model and absent by default.
@@ -421,6 +476,7 @@ test_omp_detection_layer2_ancestry
 test_omp_crewmate_launch_shape
 test_omp_crewmate_writes_turnend_ext
 test_omp_secondmate_launch_omits_ext
+test_omp_threads_optional_max_time
 test_omp_threads_model_flag
 test_omp_preserves_global_role_resolution
 test_omp_threads_thinking_effort
