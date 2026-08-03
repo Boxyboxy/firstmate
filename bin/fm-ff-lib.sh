@@ -26,7 +26,10 @@
 # fast-forward advances HEAD only and never moves the shared default branch or
 # any other worktree's checkout. A primary checkout on another named branch is
 # handled separately: its free default-branch ref may advance without moving
-# that checkout, but a ref held by another worktree is left alone.
+# that checkout, but a ref held by another worktree is left alone. Advancing
+# that ref never silences the off-branch condition itself - the checkout is
+# still running whatever its own branch holds - so every off-branch outcome
+# also reports a skip that names the branch to repair.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -276,10 +279,41 @@ live_secondmate_meta_records() {
 # fast-forward; HEAD, the index, and the working tree remain untouched.
 FF_STATUS=""
 FF_INSTR=""
-# Print the worktree holding refs/heads/<default>, if any. Returns 0 when found,
+# Echo the branch an interrupted rebase or bisect in <git-dir> will restore, if
+# any. Such a worktree reports a detached HEAD in the worktree inventory, yet
+# git still refuses to force-update that branch under it - and update-ref's
+# compare-and-swap does NOT apply that refusal, so the ref-only path has to make
+# the same check itself. Mirrors git's own is_worktree_being_rebased /
+# is_worktree_being_bisected sources: a `git am` in progress writes no head-name
+# and holds no branch.
+worktree_operation_branch() {
+  local gitdir=$1 file value
+  for file in rebase-merge/head-name rebase-apply/head-name; do
+    [ -f "$gitdir/$file" ] || continue
+    value=$(sed -n '1p' "$gitdir/$file" 2>/dev/null || true)
+    case "$value" in
+      refs/heads/?*)
+        printf '%s\n' "${value#refs/heads/}"
+        return 0
+        ;;
+    esac
+  done
+  if [ -f "$gitdir/BISECT_START" ]; then
+    value=$(sed -n '1p' "$gitdir/BISECT_START" 2>/dev/null || true)
+    if [ -n "$value" ]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# Print the worktree holding refs/heads/<default>, if any - either by having it
+# checked out, or by an interrupted rebase or bisect that will restore it while
+# the inventory still reports the worktree as detached. Returns 0 when found,
 # 1 when the branch is free, and 2 when the worktree inventory cannot be read.
 default_branch_worktree() {
-  local dir=$1 default=$2 line worktree="" inventory
+  local dir=$1 default=$2 line worktree="" inventory opgit
   inventory=$(git -C "$dir" worktree list --porcelain 2>/dev/null) || return 2
   while IFS= read -r line; do
     case "$line" in
@@ -287,6 +321,15 @@ default_branch_worktree() {
       "branch refs/heads/$default")
         printf '%s\n' "$worktree"
         return 0
+        ;;
+      detached)
+        if [ -n "$worktree" ] && [ -d "$worktree" ]; then
+          opgit=$(git -C "$worktree" rev-parse --absolute-git-dir 2>/dev/null) || return 2
+          if [ "$(worktree_operation_branch "$opgit" || true)" = "$default" ]; then
+            printf '%s\n' "$worktree"
+            return 0
+          fi
+        fi
         ;;
       '') worktree="" ;;
     esac
@@ -296,32 +339,42 @@ default_branch_worktree() {
 
 # Advance only refs/heads/<default> while a different named branch remains
 # checked out. The compare-and-swap update-ref is the final ancestry/race guard.
+#
+# Every outcome names the off-branch checkout, because that - not whichever git
+# obstacle stopped the ref - is what an operator has to repair before this
+# target follows the fleet again. Even a successful ref advance therefore still
+# emits its own `skipped:` line, carrying the ref outcome, so callers that
+# surface skips keep seeing an off-branch target: bin/fm-bootstrap.sh relays
+# `secondmate <id>: skipped:` lines as startup diagnostics and bin/fm-spawn.sh
+# warns on the first line. That skip line comes FIRST for exactly that reason,
+# with the plain ref-advance fact on the line after it.
 ff_default_ref_while_off_branch() {
   local dir=$1 label=$2 default=$3 base=$4 cur=$5
   local default_ref holder holder_rc local_rev base_rev before after out
   default_ref="refs/heads/$default"
 
   if holder=$(default_branch_worktree "$dir" "$default"); then
-    echo "$label: skipped: $default is checked out in another worktree (${holder:-unknown})"
+    echo "$label: skipped: $default is checked out in another worktree (${holder:-unknown}); checkout stayed on $cur"
     return 0
   else
     holder_rc=$?
     if [ "$holder_rc" -eq 2 ]; then
-      echo "$label: skipped: cannot inspect worktrees before updating $default"
+      echo "$label: skipped: cannot inspect worktrees before updating $default; checkout stayed on $cur"
       return 0
     fi
   fi
 
   local_rev=$(git -C "$dir" rev-parse --verify "$default_ref^{commit}" 2>/dev/null) || {
-    echo "$label: skipped: cannot read $default"
+    echo "$label: skipped: cannot read $default; checkout stayed on $cur"
     return 0
   }
   base_rev=$(git -C "$dir" rev-parse "$base^{commit}" 2>/dev/null) || {
-    echo "$label: skipped: cannot read $base"
+    echo "$label: skipped: cannot read $base; checkout stayed on $cur"
     return 0
   }
   if [ "$local_rev" = "$base_rev" ]; then
     FF_STATUS="current"
+    echo "$label: skipped: on $cur, expected $default; $default ref already current, checkout not advanced"
     echo "$label: $default ref already current; checkout stayed on $cur"
     return 0
   fi
@@ -332,11 +385,12 @@ ff_default_ref_while_off_branch() {
 
   before=$(git -C "$dir" rev-parse --short "$local_rev")
   if ! out=$(git -C "$dir" update-ref "$default_ref" "$base_rev" "$local_rev" 2>&1); then
-    echo "$label: skipped: $default ref fast-forward failed: $(first_line "$out")"
+    echo "$label: skipped: $default ref fast-forward failed: $(first_line "$out"); checkout stayed on $cur"
     return 0
   fi
   after=$(git -C "$dir" rev-parse --short "$base_rev")
   FF_STATUS="ref-updated"
+  echo "$label: skipped: on $cur, expected $default; $default ref advanced $before..$after, checkout not advanced"
   echo "$label: advanced $default ref $before..$after; checkout stayed on $cur"
 }
 

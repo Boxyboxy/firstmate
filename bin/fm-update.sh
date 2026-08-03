@@ -28,7 +28,9 @@
 # It does NOT re-read AGENTS.md or nudge secondmates itself - those are LLM /
 # tmux actions the skill performs. The script's job is the safe git mechanics
 # plus a parseable summary telling the caller what to do next:
-#   - one status line per target (updated/ref-advanced/already current/skipped)
+#   - one status line per target (updated/advanced <default> ref/already
+#     current/skipped); an off-default target reports both its `skipped:` line
+#     naming the branch to repair and its ref outcome
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
 #

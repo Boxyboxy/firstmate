@@ -229,6 +229,8 @@ test_ff_inflight_feature_branch() {
   [ "$FF_STATUS" = skipped ] || fail "FF_STATUS: expected skipped, got '$FF_STATUS'"
   assert_contains "$FF_OUT" "secondmate sm: skipped: main is checked out in another worktree" \
     "a home on a feature branch cannot move the default ref held by the primary worktree"
+  assert_contains "$FF_OUT" "checkout stayed on feature/wip" \
+    "the skip names the home's own branch, not just the worktree holding the ref"
   [ "$(head_of "$w/sm")" = "$before" ] || fail "in-flight home HEAD moved (work at risk)"
   pass "T5 in-flight: a home on a feature branch is skipped, its work preserved"
 }
@@ -697,6 +699,46 @@ test_bootstrap_sweep_surfaces_skipped_home() {
   pass "T9 bootstrap surfaces a skipped dirty live secondmate home"
 }
 
+# --- T9a: an off-branch home stays visible even when its default ref advances --
+# A standalone-clone home on its own named branch holds a FREE refs/heads/main,
+# so the ref advances. That advance must not silence the condition an operator
+# actually has to repair: the home is still running whatever its feature branch
+# holds, so bootstrap must still surface a skip naming that branch.
+test_bootstrap_sweep_surfaces_off_branch_home_whose_ref_advanced() {
+  local w c1 base before_head before_ref out skip_line
+  w=$(new_world boot-offbranch)
+  c1=$(head_of "$w/main")
+  git clone -q "$w/main" "$w/sm-off"
+  printf 'sm-off\n' > "$w/sm-off/.fm-secondmate-home"
+  {
+    printf 'window=firstmate:fm-sm-off\n'
+    printf 'kind=secondmate\n'
+    printf 'home=%s/sm-off\n' "$w"
+  } > "$w/home/state/sm-off.meta"
+  git -C "$w/sm-off" checkout -q -b feature/wip
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  git -C "$w/sm-off" fetch -q origin
+  before_head=$(head_of "$w/sm-off")
+  before_ref=$(git -C "$w/sm-off" rev-parse main)
+  [ "$before_ref" = "$c1" ] || fail "precondition: the home's default ref should start behind"
+
+  fakebin=$(make_fake_toolchain "$w")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  skip_line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate sm-off: skipped:' || true)
+  [ -n "$skip_line" ] || fail "an off-branch home whose ref advanced was surfaced as nothing (got: $out)"
+  assert_contains "$skip_line" "on feature/wip, expected main" \
+    "the surfaced skip names the branch the home is stuck on"
+  assert_contains "$skip_line" "main ref advanced" "the surfaced skip carries the ref outcome"
+  [ "$(git -C "$w/sm-off" rev-parse main)" = "$base" ] || fail "free default ref did not advance"
+  [ "$(head_of "$w/sm-off")" = "$before_head" ] || fail "off-branch home HEAD moved"
+  [ "$(git -C "$w/sm-off" symbolic-ref --short HEAD)" = "feature/wip" ] \
+    || fail "off-branch home left its own branch"
+  pass "T9a bootstrap still surfaces an off-branch home after advancing its free default ref"
+}
+
 # --- T10: spawning a secondmate fast-forwards its worktree before launch ------
 test_spawn_fast_forwards_before_launch() {
   local w c1 c2 fakebin
@@ -855,6 +897,7 @@ test_bootstrap_nudge_retry_is_idempotent
 test_bootstrap_nudge_retry_refuses_changed_home
 test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
 test_bootstrap_sweep_surfaces_skipped_home
+test_bootstrap_sweep_surfaces_off_branch_home_whose_ref_advanced
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch
 test_seed_marker_clean_when_gitignored

@@ -255,6 +255,8 @@ test_firstmate_wrong_branch_ref_update() {
 
   assert_contains "$out" "firstmate: advanced main ref " "off-default firstmate advances the free default ref"
   assert_contains "$out" "checkout stayed on feature/wip" "ref-only update reports the unchanged checkout"
+  assert_contains "$out" "firstmate: skipped: on feature/wip, expected main" \
+    "an advanced ref still reports the off-default checkout that needs repair"
   assert_contains "$out" "reread-firstmate: no" "ref-only update does not request a reread"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before_head" ] \
     || fail "off-default firstmate HEAD moved"
@@ -307,6 +309,47 @@ test_firstmate_off_branch_default_ref_in_other_worktree_skipped() {
   pass "T11 default ref checked out in another worktree is left alone"
 }
 
+# A worktree paused mid-rebase on the default branch reports a DETACHED head in
+# the worktree inventory, yet git still refuses to force-update that branch and
+# the rebase's own completion or --abort would rewrite the ref. update-ref's
+# compare-and-swap does not carry that protection, so the ref must stay put.
+test_firstmate_off_branch_default_ref_held_by_rebase_skipped() {
+  local w out before_main holder_gitdir
+  w=$(new_world t11b)
+  # main gets a commit that conflicts with branch `conflict`, and origin keeps
+  # that commit, so main stays a strict fast-forward candidate throughout.
+  git -C "$w/main" checkout -q -b conflict
+  printf 'theirs\n' > "$w/main/README.md"
+  git -C "$w/main" commit -qam theirs
+  git -C "$w/main" checkout -q main
+  printf 'ours\n' > "$w/main/README.md"
+  git -C "$w/main" commit -qam ours
+  git -C "$w/main" push -q origin main
+  git -C "$w/main" checkout -q -b feature/wip
+  git -C "$w/main" worktree add -q "$w/main-holder" main
+  # The conflicting rebase leaves the holder detached with main as its head-name,
+  # while refs/heads/main stays exactly where it was.
+  git -C "$w/main-holder" rebase conflict >/dev/null 2>&1 && fail "fixture rebase did not conflict"
+  git -C "$w/main-holder" symbolic-ref -q HEAD >/dev/null \
+    && fail "fixture rebase left the holder on a branch, not detached"
+  holder_gitdir=$(git -C "$w/main-holder" rev-parse --absolute-git-dir)
+  [ "$(cat "$holder_gitdir/rebase-merge/head-name" 2>/dev/null)" = refs/heads/main ] \
+    || fail "fixture rebase does not name refs/heads/main"
+  before_main=$(git -C "$w/main" rev-parse main)
+  bump_origin "$w" instr
+  git -C "$w/main" fetch -q origin
+  git -C "$w/main" merge-base --is-ancestor main origin/main \
+    || fail "fixture left main unable to fast-forward"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: main is checked out in another worktree" \
+    "a default ref held by an interrupted rebase is skipped"
+  [ "$(git -C "$w/main" rev-parse main)" = "$before_main" ] \
+    || fail "default ref moved under an interrupted rebase"
+  pass "T11b default ref held by an interrupted rebase is left alone"
+}
+
 make_fake_omp() {
   local case_dir=$1 channel_a channel_b
   channel_a="$case_dir/channel-a"
@@ -338,17 +381,13 @@ SH
 }
 
 test_omp_update_is_guarded_and_channel_preserving() {
-  local case_dir="$TMP_ROOT/omp-update" fixture home channel_a channel_b fakebin out
+  local case_dir="$TMP_ROOT/omp-update" fixture home channel_a channel_b out
   fixture=$(make_fake_omp "$case_dir")
   home=${fixture%%|*}
   fixture=${fixture#*|}
   channel_a=${fixture%%|*}
   channel_b=${fixture#*|}
-  fakebin="$case_dir/bin"
-  mkdir -p "$fakebin"
   printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
-  touch "$case_dir/install-marker"
-  rm -f "$case_dir/install-marker"
 
   out=$(PATH="$channel_a:$channel_b:$BASE_PATH" FM_HOME="$home" \
     OMP_FAKE_VERSION_FILE="$case_dir/version" \
@@ -377,11 +416,84 @@ test_omp_update_refuses_live_fleet() {
     OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
     fail "omp update succeeded with a live fleet"
   fi
-  assert_contains "$out" "omp: refused: fleet is not empty (live task live)" \
-    "live-fleet guard reports the recorded task"
+  assert_contains "$out" "omp: refused: a worker is still running (task live)" \
+    "unverifiable endpoint counts as running and is named as a task"
   [ ! -f "$case_dir/install-marker" ] || fail "live-fleet guard attempted an install"
   [ "$(cat "$case_dir/version")" = "omp/17.2.6" ] || fail "live-fleet guard changed omp version"
-  pass "omp update refuses a recorded live fleet without invoking the updater"
+  pass "omp update refuses a running worker without invoking the updater"
+}
+
+# A tmux that answers every window inventory with the definitive missing-session
+# response, so fm_backend_agent_state classifies the recorded endpoint `missing`.
+make_dead_endpoint_tmux() {
+  local dir=$1
+  mkdir -p "$dir"
+  cat > "$dir/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = list-windows ]; then
+  printf "can't find session: %s\n" "${3:-}" >&2
+fi
+exit 1
+SH
+  chmod +x "$dir/tmux"
+}
+
+# A stale record left by an interrupted cleanup must not wedge omp forever: its
+# recorded endpoint is gone, so nothing is running that omp could break.
+test_omp_update_ignores_records_whose_endpoint_is_gone() {
+  local case_dir="$TMP_ROOT/omp-stale" fixture home channel_a out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  channel_a=${fixture#*|}
+  channel_a=${channel_a%%|*}
+  make_dead_endpoint_tmux "$case_dir/fakebin"
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  printf 'window=main:fm-gone\n' > "$home/state/gone.meta"
+
+  out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE")
+
+  assert_contains "$out" "omp: after: omp/99.1.0" "stale record does not block the update"
+  [ -f "$case_dir/install-marker" ] || fail "stale record wedged the omp update"
+  pass "omp update ignores a record whose endpoint is authoritatively gone"
+}
+
+# A persistent second mate is never a backlog task, so the refusal must not call
+# it one - and its record only blocks while its endpoint is actually running.
+test_omp_update_names_a_second_mate_correctly() {
+  local case_dir="$TMP_ROOT/omp-sm" fixture home channel_a out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  channel_a=${fixture#*|}
+  channel_a=${channel_a%%|*}
+  make_dead_endpoint_tmux "$case_dir/fakebin"
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=%s/sm\n' "$case_dir"
+  } > "$home/state/sm1.meta"
+
+  if out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "omp update succeeded with a running second mate"
+  fi
+  assert_contains "$out" "omp: refused: a worker is still running (second mate sm1)" \
+    "a persistent second mate is never reported as a task"
+  [ ! -f "$case_dir/install-marker" ] || fail "running second mate did not stop the install"
+
+  # The same record stops blocking once its endpoint is authoritatively gone.
+  printf 'window=main:fm-sm1\n' >> "$home/state/sm1.meta"
+  out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE")
+  assert_contains "$out" "omp: after: omp/99.1.0" "a second mate that is not running does not wedge omp"
+  [ -f "$case_dir/install-marker" ] || fail "non-running second mate wedged the omp update"
+  pass "omp names a second mate correctly and only blocks while it is running"
 }
 
 test_omp_check_is_detect_only_with_live_fleet() {
@@ -453,10 +565,13 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_ref_update
 test_firstmate_off_branch_diverged_default_ref_skipped
 test_firstmate_off_branch_default_ref_in_other_worktree_skipped
+test_firstmate_off_branch_default_ref_held_by_rebase_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
 test_omp_update_is_guarded_and_channel_preserving
 test_omp_update_refuses_live_fleet
+test_omp_update_ignores_records_whose_endpoint_is_gone
+test_omp_update_names_a_second_mate_correctly
 test_omp_check_is_detect_only_with_live_fleet
 
 echo "# all fm-update tests passed"
