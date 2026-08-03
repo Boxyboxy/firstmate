@@ -726,6 +726,21 @@ test_omp_update_reports_places_it_cannot_reach() {
   assert_contains "$out" "the second mate registry: $home/data/secondmates.md is not a plain file" \
     "an unread registry is reported instead of assumed empty"
   [ ! -f "$case_dir/install-marker" ] || fail "unread registry still attempted an install"
+
+  # A registry entry the strict parser rejects hides one whole home the same
+  # way, so it is reported rather than skipped past.
+  rm -f "$home/data/secondmates.md" "$case_dir/install-marker"
+  printf -- '- sm2 - a second mate (home: %s/sm2; scope: x; added 2026-06-23)\n' \
+    "$case_dir" > "$home/data/secondmates.md"
+  if out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "a malformed registry entry was treated as an empty fleet"
+  fi
+  assert_contains "$out" "the second mate registry: its entry \"- sm2 - a second mate" \
+    "a malformed registry entry is named instead of silently dropped"
+  [ ! -f "$case_dir/install-marker" ] || fail "malformed registry entry still attempted an install"
   pass "omp reports every place it could not reach instead of assuming it is empty"
 }
 

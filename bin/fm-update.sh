@@ -29,8 +29,10 @@
 # tmux actions the skill performs. The script's job is the safe git mechanics
 # plus a parseable summary telling the caller what to do next:
 #   - one status line per target (updated/advanced <default> ref/already
-#     current/skipped); an off-default target reports both its `skipped:` line
-#     naming the branch to repair and its ref outcome
+#     current/skipped); an off-default target always reports a `skipped:` line
+#     naming the branch to repair, plus a second ref-outcome line when that ref
+#     was already current or advanced - every other ref obstacle is carried in
+#     the skip line alone
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
 #

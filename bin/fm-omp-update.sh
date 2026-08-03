@@ -141,7 +141,11 @@ collect_sweep_dirs() {
   if [ -f "$SECONDMATES_MD" ] && [ ! -L "$SECONDMATES_MD" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in "- "*) ;; *) continue ;; esac
-      secondmate_registry_parse_line "$line" || continue
+      if ! secondmate_registry_parse_line "$line"; then
+        note_unreachable "the second mate registry" \
+          "its entry \"$line\" could not be read, so that home could not be swept"
+        continue
+      fi
       [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
       add_sweep_home "$SECONDMATE_REGISTRY_HOME" "second mate $SECONDMATE_REGISTRY_ID's home"
     done < "$SECONDMATES_MD"

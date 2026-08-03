@@ -31,7 +31,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    ```
    It fast-forwards this firstmate repo's default branch from origin, then updates every registered local or remote secondmate home through its placement-specific guarded path.
    It prints one status line per target (`updated <old>..<new>` / `already current` / `advanced <default> ref <old>..<new>` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next.
-   A target on another named branch prints two lines: a `skipped:` line naming the branch its checkout is stuck on, and the ref outcome that went with it.
+   A target on another named branch always prints a `skipped:` line naming the branch its checkout is stuck on, and adds a second line carrying the ref outcome when that outcome is `already current` or an advance; any other ref obstacle (the branch held by another worktree, an unreadable or diverged ref, or a failed update) is reported in the skip line itself, so a single line there is complete output rather than truncated.
    When that target shares its ref store with the wider repo, the ref outcome names the repository whose branch actually moved, because the move is not private to that home.
    The action lines are:
    - `reread-firstmate: yes|no`
