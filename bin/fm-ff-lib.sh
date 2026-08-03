@@ -9,6 +9,8 @@
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
 #     base_mode is that local commit, with NO fetch and no origin dependency.
+# Project-clone refresh in bin/fm-fleet-sync.sh has separate recovery rules and
+# does not source this library; its off-default clones remain reported STUCK.
 #
 # A linked-worktree secondmate home already holds the primary's commit in the
 # shared object store, so its local-HEAD sync is a purely local fast-forward that
@@ -20,9 +22,11 @@
 # The seeded .fm-secondmate-home identity marker is gitignored too; the local
 # sync tolerates only that marker during the one-time upgrade of pre-ignore
 # linked-worktree homes.
-# Homes are leased at a detached HEAD on the
-# default branch, so the fast-forward advances HEAD only and never moves the
-# shared default branch or any other worktree's checkout.
+# Homes are leased at a detached HEAD on the default branch, so their
+# fast-forward advances HEAD only and never moves the shared default branch or
+# any other worktree's checkout. A primary checkout on another named branch is
+# handled separately: its free default-branch ref may advance without moving
+# that checkout, but a ref held by another worktree is left alone.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -255,8 +259,8 @@ live_secondmate_meta_records() {
 
 # Fast-forward one target to a base. Prints its status line. Sets globals for the
 # caller:
-#   FF_STATUS = updated|current|skipped
-#   FF_INSTR  = comma list of changed instruction paths (only when updated)
+#   FF_STATUS = updated|ref-updated|current|skipped
+#   FF_INSTR  = comma list of changed instruction paths (only when HEAD updated)
 #
 # base_mode selects where the fast-forward base comes from:
 #   origin       - fetch origin and advance to origin/<default> (the /updatefirstmate
@@ -266,10 +270,76 @@ live_secondmate_meta_records() {
 #                  already exist in the target's object store, which it always does
 #                  for a worktree of this same repo; a standalone clone that lacks
 #                  it is skipped rather than fetched.
-# Guards are identical in both modes: ff-only (never force/merge/stash); skip a
-# dirty, diverged, or wrong-branch target and leave its work untouched.
+# The checked-out-default and detached-HEAD guards are unchanged: ff-only,
+# clean-tree-only, and never force/merge/stash. When another named branch is
+# checked out, only the free default-branch ref may advance by strict
+# fast-forward; HEAD, the index, and the working tree remain untouched.
 FF_STATUS=""
 FF_INSTR=""
+# Print the worktree holding refs/heads/<default>, if any. Returns 0 when found,
+# 1 when the branch is free, and 2 when the worktree inventory cannot be read.
+default_branch_worktree() {
+  local dir=$1 default=$2 line worktree="" inventory
+  inventory=$(git -C "$dir" worktree list --porcelain 2>/dev/null) || return 2
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *) worktree=${line#worktree } ;;
+      "branch refs/heads/$default")
+        printf '%s\n' "$worktree"
+        return 0
+        ;;
+      '') worktree="" ;;
+    esac
+  done <<< "$inventory"
+  return 1
+}
+
+# Advance only refs/heads/<default> while a different named branch remains
+# checked out. The compare-and-swap update-ref is the final ancestry/race guard.
+ff_default_ref_while_off_branch() {
+  local dir=$1 label=$2 default=$3 base=$4 cur=$5
+  local default_ref holder holder_rc local_rev base_rev before after out
+  default_ref="refs/heads/$default"
+
+  if holder=$(default_branch_worktree "$dir" "$default"); then
+    echo "$label: skipped: $default is checked out in another worktree (${holder:-unknown})"
+    return 0
+  else
+    holder_rc=$?
+    if [ "$holder_rc" -eq 2 ]; then
+      echo "$label: skipped: cannot inspect worktrees before updating $default"
+      return 0
+    fi
+  fi
+
+  local_rev=$(git -C "$dir" rev-parse --verify "$default_ref^{commit}" 2>/dev/null) || {
+    echo "$label: skipped: cannot read $default"
+    return 0
+  }
+  base_rev=$(git -C "$dir" rev-parse "$base^{commit}" 2>/dev/null) || {
+    echo "$label: skipped: cannot read $base"
+    return 0
+  }
+  if [ "$local_rev" = "$base_rev" ]; then
+    FF_STATUS="current"
+    echo "$label: $default ref already current; checkout stayed on $cur"
+    return 0
+  fi
+  if ! git -C "$dir" merge-base --is-ancestor "$local_rev" "$base_rev" 2>/dev/null; then
+    echo "$label: skipped: $default diverged from $base; checkout stayed on $cur"
+    return 0
+  fi
+
+  before=$(git -C "$dir" rev-parse --short "$local_rev")
+  if ! out=$(git -C "$dir" update-ref "$default_ref" "$base_rev" "$local_rev" 2>&1); then
+    echo "$label: skipped: $default ref fast-forward failed: $(first_line "$out")"
+    return 0
+  fi
+  after=$(git -C "$dir" rev-parse --short "$base_rev")
+  FF_STATUS="ref-updated"
+  echo "$label: advanced $default ref $before..$after; checkout stayed on $cur"
+}
+
 ff_target() {
   local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
   FF_STATUS="skipped"
@@ -316,7 +386,7 @@ ff_target() {
     return 0
   fi
   if [ -n "$cur" ] && [ "$cur" != "$default" ]; then
-    echo "$label: skipped: on $cur, expected $default"
+    ff_default_ref_while_off_branch "$dir" "$label" "$default" "$base" "$cur"
     return 0
   fi
 

@@ -227,8 +227,8 @@ test_ff_inflight_feature_branch() {
   run_ff "$w/sm" "$base"
 
   [ "$FF_STATUS" = skipped ] || fail "FF_STATUS: expected skipped, got '$FF_STATUS'"
-  assert_contains "$FF_OUT" "secondmate sm: skipped: on feature/wip, expected main" \
-    "a home on a feature branch is skipped"
+  assert_contains "$FF_OUT" "secondmate sm: skipped: main is checked out in another worktree" \
+    "a home on a feature branch cannot move the default ref held by the primary worktree"
   [ "$(head_of "$w/sm")" = "$before" ] || fail "in-flight home HEAD moved (work at risk)"
   pass "T5 in-flight: a home on a feature branch is skipped, its work preserved"
 }

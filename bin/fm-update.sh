@@ -2,19 +2,24 @@
 # Self-update a running firstmate and its secondmates to the latest origin.
 #
 # Mechanical half of the /updatefirstmate skill. Fast-forwards the running
-# firstmate repo's default branch from origin, then fast-forwards every
-# registered secondmate home. Local homes are treehouse worktrees or standalone
-# clones; remote routes update their configured code root on that host and then
-# fast-forward the persistent home to that root. FAST-FORWARD ONLY, exactly like
-# fm-fleet-sync.sh: never force, never create a merge commit, never stash;
-# advance a target only when it is a clean fast-forward, otherwise skip and
-# report. A tracked-files fast-forward never touches the gitignored operational
-# dirs (data/, state/, config/, projects/, .no-mistakes/), so a secondmate's
-# in-flight work is never disrupted. Worktrees of this repo share one object
-# store, so a single fetch refreshes them all; standalone-clone homes are
-# fetched on their own. Secondmate homes are leased at a detached HEAD on the
-# default branch, so a fast-forward there advances HEAD only and never touches
-# any other worktree's checkout or the shared `main` branch.
+# firstmate repo's default branch from origin, or advances only that free
+# default-branch ref when the running checkout is on another named branch.
+# The latter leaves HEAD, the index, and the working tree untouched and refuses
+# to move the ref when another worktree has the default branch checked out.
+# Then fast-forwards every registered secondmate home. Local homes are treehouse
+# worktrees or standalone clones; remote routes update their configured code root
+# on that host and then fast-forward the persistent home to that root.
+# The shared path is FAST-FORWARD ONLY: never force, create a merge commit, or
+# stash; advance a target only when it is a clean fast-forward, otherwise skip
+# and report. Project refresh in fm-fleet-sync.sh has separate STUCK reporting.
+# A tracked-files fast-forward never touches the gitignored operational dirs
+# (data/, state/, config/, projects/, .no-mistakes/), so a secondmate's
+# in-flight work is never disrupted.
+# Worktrees of this repo share one object store, so a single fetch refreshes
+# them all; standalone-clone homes are fetched on their own. Secondmate homes
+# are leased at a detached HEAD on the default branch, so a fast-forward there
+# advances HEAD only and never touches any other worktree's checkout or the
+# shared `main` branch.
 #
 # The fast-forward mechanics live in bin/fm-ff-lib.sh (base_mode "origin" here);
 # the same library drives the local-HEAD secondmate sync used by fm-spawn.sh and
@@ -23,7 +28,7 @@
 # It does NOT re-read AGENTS.md or nudge secondmates itself - those are LLM /
 # tmux actions the skill performs. The script's job is the safe git mechanics
 # plus a parseable summary telling the caller what to do next:
-#   - one status line per target (updated/already current/skipped)
+#   - one status line per target (updated/ref-advanced/already current/skipped)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
 #

@@ -3,11 +3,13 @@
 # firstmate repo and every registered secondmate home.
 #
 # The guarantees under test mirror fm-fleet-sync.sh and prime directive #3:
-#   - The running firstmate repo (on its default branch) fast-forwards from
-#     origin; a leased secondmate home (detached HEAD on the default branch)
-#     fast-forwards the same way.
-#   - FAST-FORWARD ONLY: a dirty, diverged, offline, or wrong-branch target is
-#     skipped and reported, never forced or stashed, so unlanded work survives.
+#   - The running firstmate repo fast-forwards from origin on its default branch,
+#     or advances only a free default-branch ref while staying on another branch.
+#     A leased secondmate home (detached HEAD on the default branch) fast-forwards
+#     the same way.
+#   - FAST-FORWARD ONLY: a dirty, diverged, offline, or unsafe target is skipped
+#     and reported, never forced or stashed, so unlanded work survives. An
+#     off-default checkout never moves its HEAD, index, or working tree.
 #   - The update is a single-parent fast-forward (never a merge commit) and a
 #     fast-forward of one worktree never disturbs another worktree's checkout
 #     or the shared default branch.
@@ -21,8 +23,12 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+
 
 UPDATE="$ROOT/bin/fm-update.sh"
+OMP_UPDATE="$ROOT/bin/fm-omp-update.sh"
+
 
 # Deterministic, isolated git identity for fixture commits.
 fm_git_identity fmtest fmtest@example.com
@@ -235,27 +241,174 @@ test_registry_backstop_dedup_and_self_exclusion() {
   pass "T7 registry backstop resolves, dedups meta+registry, excludes the firstmate repo"
 }
 
-# --- T9: firstmate repo on a feature branch is skipped ---------------------
-test_firstmate_wrong_branch_skipped() {
-  local w out before
+# --- T9: firstmate repo on a feature branch advances only free main ref -----
+test_firstmate_wrong_branch_ref_update() {
+  local w out before_head before_status
   w=$(new_world t9)
   bump_origin "$w" instr
-  # Simulate firstmate mid-shipping its own change: not on the default branch.
   git -C "$w/main" checkout -q -b feature/wip
-  before=$(git -C "$w/main" rev-parse HEAD)
+  before_head=$(git -C "$w/main" rev-parse HEAD)
+  printf 'local work\n' > "$w/main/local-work.txt"
+  before_status=$(git -C "$w/main" status --porcelain)
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "firstmate: skipped: on feature/wip, expected main" "off-default firstmate skipped"
-  assert_contains "$out" "reread-firstmate: no" "no reread when firstmate was skipped"
-  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
-    || fail "skipped firstmate HEAD moved"
-  pass "T9 firstmate off its default branch is skipped, not forced"
+  assert_contains "$out" "firstmate: advanced main ref " "off-default firstmate advances the free default ref"
+  assert_contains "$out" "checkout stayed on feature/wip" "ref-only update reports the unchanged checkout"
+  assert_contains "$out" "reread-firstmate: no" "ref-only update does not request a reread"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before_head" ] \
+    || fail "off-default firstmate HEAD moved"
+  [ "$(git -C "$w/main" rev-parse main)" = "$(git -C "$w/main" rev-parse origin/main)" ] \
+    || fail "default branch ref did not advance"
+  [ "$(git -C "$w/main" status --porcelain)" = "$before_status" ] \
+    || fail "off-default working tree changed"
+  [ -f "$w/main/local-work.txt" ] || fail "off-default working tree file disappeared"
+  pass "T9 firstmate off its default branch advances only the free default ref"
 }
+
+test_firstmate_off_branch_diverged_default_ref_skipped() {
+  local w out before_main
+  w=$(new_world t10)
+  printf 'local main work\n' >> "$w/main/README.md"
+  git -C "$w/main" add README.md
+  git -C "$w/main" commit -qm local-main
+  before_main=$(git -C "$w/main" rev-parse main)
+  git -C "$w/main" checkout -q -b feature/wip
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: main diverged from origin/main" \
+    "diverged off-default default ref is skipped"
+  assert_contains "$out" "checkout stayed on feature/wip" \
+    "diverged ref skip reports the unchanged checkout"
+  [ "$(git -C "$w/main" rev-parse main)" = "$before_main" ] \
+    || fail "diverged default ref moved"
+  pass "T10 diverged off-default default ref is refused"
+}
+
+test_firstmate_off_branch_default_ref_in_other_worktree_skipped() {
+  local w out before_main before_holder
+  w=$(new_world t11)
+  git -C "$w/main" checkout -q -b feature/wip
+  git -C "$w/main" worktree add -q "$w/main-holder" main
+  before_main=$(git -C "$w/main" rev-parse main)
+  before_holder=$(git -C "$w/main-holder" rev-parse HEAD)
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: main is checked out in another worktree" \
+    "default ref checked out elsewhere is skipped"
+  [ "$(git -C "$w/main" rev-parse main)" = "$before_main" ] \
+    || fail "default ref checked out elsewhere moved"
+  [ "$(git -C "$w/main-holder" rev-parse HEAD)" = "$before_holder" ] \
+    || fail "other worktree HEAD moved"
+  pass "T11 default ref checked out in another worktree is left alone"
+}
+
+make_fake_omp() {
+  local case_dir=$1 channel_a channel_b
+  channel_a="$case_dir/channel-a"
+  channel_b="$case_dir/channel-b"
+  mkdir -p "$channel_a" "$channel_b" "$case_dir/home/state"
+  for channel in "$channel_a" "$channel_b"; do
+    cat > "$channel/omp" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  cat "${OMP_FAKE_VERSION_FILE:?}"
+  exit 0
+fi
+case "${1:-}" in
+  update)
+    if [ "${2:-}" = --check ]; then
+      : > "${OMP_FAKE_CHECK_MARKER:?}"
+      printf '%s\n' 'check only'
+    else
+      : > "${OMP_FAKE_INSTALL_MARKER:?}"
+      printf '%s\n' 'installed'
+      printf '%s\n' 'omp/99.1.0' > "${OMP_FAKE_VERSION_FILE:?}"
+    fi
+    ;;
+esac
+SH
+    chmod +x "$channel/omp"
+  done
+  printf '%s|%s|%s\n' "$case_dir/home" "$channel_a" "$channel_b"
+}
+
+test_omp_update_is_guarded_and_channel_preserving() {
+  local case_dir="$TMP_ROOT/omp-update" fixture home channel_a channel_b fakebin out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  fixture=${fixture#*|}
+  channel_a=${fixture%%|*}
+  channel_b=${fixture#*|}
+  fakebin="$case_dir/bin"
+  mkdir -p "$fakebin"
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  touch "$case_dir/install-marker"
+  rm -f "$case_dir/install-marker"
+
+  out=$(PATH="$channel_a:$channel_b:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE")
+
+  assert_contains "$out" "omp: channel: $channel_a/omp" "omp update uses the which-resolved channel"
+  assert_contains "$out" "omp: before: omp/17.2.6" "omp update reports its starting version"
+  assert_contains "$out" "omp: after: omp/99.1.0" "omp update reports its ending version"
+  [ -f "$case_dir/install-marker" ] || fail "empty-fleet omp update did not run"
+  [ ! -f "$case_dir/check-marker" ] || fail "normal omp update unexpectedly ran check mode"
+  pass "omp update is allowed for an empty fleet and preserves the resolved channel"
+}
+test_omp_update_refuses_live_fleet() {
+  local case_dir="$TMP_ROOT/omp-live" fixture home channels channel_a out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  channels=${fixture#*|}
+  channel_a=${channels%%|*}
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  : > "$home/state/live.meta"
+
+  if out=$(PATH="$channel_a:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "omp update succeeded with a live fleet"
+  fi
+  assert_contains "$out" "omp: refused: fleet is not empty (live task live)" \
+    "live-fleet guard reports the recorded task"
+  [ ! -f "$case_dir/install-marker" ] || fail "live-fleet guard attempted an install"
+  [ "$(cat "$case_dir/version")" = "omp/17.2.6" ] || fail "live-fleet guard changed omp version"
+  pass "omp update refuses a recorded live fleet without invoking the updater"
+}
+
+test_omp_check_is_detect_only_with_live_fleet() {
+  local case_dir="$TMP_ROOT/omp-check" fixture home channel_a out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  channel_a=${fixture#*|}
+  channel_a=${channel_a%%|*}
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  : > "$home/state/live.meta"
+
+  out=$(PATH="$channel_a:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" --check)
+
+  assert_contains "$out" "check only" "omp check runs the channel's check command"
+  [ -f "$case_dir/check-marker" ] || fail "omp check did not run check mode"
+  [ ! -f "$case_dir/install-marker" ] || fail "omp check attempted an install"
+  [ "$(cat "$case_dir/version")" = "omp/17.2.6" ] || fail "omp check changed omp version"
+  pass "omp check remains detect-only even with a live fleet"
+}
+
 
 test_firstmate_detached_head_skipped() {
   local w out before
-  w=$(new_world t10)
+  w=$(new_world t12)
   bump_origin "$w" instr
   git -C "$w/main" checkout -q --detach HEAD
   before=$(git -C "$w/main" rev-parse HEAD)
@@ -266,12 +419,12 @@ test_firstmate_detached_head_skipped() {
   assert_contains "$out" "reread-firstmate: no" "no reread when detached firstmate was skipped"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "detached firstmate HEAD moved"
-  pass "T10 firstmate detached HEAD is skipped"
+  pass "T12 firstmate detached HEAD is skipped"
 }
 
 test_unsafe_secondmate_home_skipped_before_git_update() {
   local w out bad before
-  w=$(new_world t11)
+  w=$(new_world t13)
   bad="$w/home/projects/bad"
   mkdir -p "$w/home/projects"
   git clone -q "$w/origin.git" "$bad"
@@ -288,7 +441,7 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   assert_contains "$out" "nudge-secondmates: none" "unsafe home is not nudged"
   [ "$(git -C "$bad" rev-parse HEAD)" = "$before" ] \
     || fail "unsafe secondmate home HEAD moved"
-  pass "T11 unsafe secondmate home is not fast-forwarded"
+  pass "T13 unsafe secondmate home is not fast-forwarded"
 }
 
 test_updates_main_and_secondmate
@@ -297,8 +450,13 @@ test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped
 test_idempotent_already_current
 test_registry_backstop_dedup_and_self_exclusion
-test_firstmate_wrong_branch_skipped
+test_firstmate_wrong_branch_ref_update
+test_firstmate_off_branch_diverged_default_ref_skipped
+test_firstmate_off_branch_default_ref_in_other_worktree_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_omp_update_is_guarded_and_channel_preserving
+test_omp_update_refuses_live_fleet
+test_omp_check_is_detect_only_with_live_fleet
 
 echo "# all fm-update tests passed"
