@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Update the omp executable through the channel that currently owns it.
-# Usage: fm-omp-update.sh [--check] [--force]
+# Usage: fm-omp-update.sh [--check]
 #
 # omp is ONE machine-wide executable, so replacing it can break any worker
 # running on this machine - not only this home's. A normal update is therefore
@@ -11,11 +11,6 @@
 # sweep, in either the home collection or the record classification.
 # --check performs omp's detect-only update check and does not need that
 # guarantee because it cannot replace the executable.
-# --force is the operator's explicit override, for the case where a backend has
-# no recovery-grade liveness classifier (the experimental backends), an endpoint
-# read keeps failing, or a home the sweep must account for cannot be reached,
-# any of which would otherwise leave the update wedged with no way through. It
-# names what it overrode.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,7 +23,7 @@ SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
 usage() {
-  printf '%s\n' 'usage: fm-omp-update.sh [--check] [--force]' >&2
+  printf '%s\n' 'usage: fm-omp-update.sh [--check]' >&2
 }
 
 first_line() {
@@ -58,7 +53,7 @@ meta_is_remote_route() {  # <meta-file>
 # fm_backend_agent_state is the recovery-grade read, and only its confident
 # `dead` and `missing` verdicts prove there is nothing running. Everything else
 # stays unclassified rather than being reported as a running worker, so the
-# refusal says what is actually known and points at the override.
+# refusal says exactly what remains unproven.
 meta_endpoint_class() {
   local meta=$1 backend target verdict
   backend=$(fm_backend_of_meta "$meta")
@@ -207,38 +202,24 @@ EOF
 gate_allows_update() {
   collect_sweep_dirs
   find_blocker || return 0
-  if [ "$force" = yes ]; then
-    if [ "$BLOCK_KIND" = running ]; then
-      printf 'omp: forced past a worker that is still running (%s)\n' "$BLOCK_WHAT" >&2
-    else
-      printf 'omp: forced past a worker whose state could not be confirmed (%s)\n' "$BLOCK_WHAT" >&2
-    fi
-    return 0
-  fi
   if [ "$BLOCK_KIND" = running ]; then
     printf 'omp: refused: a worker is still running (%s)\n' "$BLOCK_WHAT" >&2
   else
-    printf 'omp: refused: could not confirm every worker has stopped (%s); rerun with --force once you know nothing is running\n' \
+    printf 'omp: refused: could not confirm every worker has stopped (%s)\n' \
       "$BLOCK_WHAT" >&2
   fi
   return 1
 }
 
 mode=update
-force=no
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --check) mode=check ;;
-    --force) force=yes ;;
     --help|-h) usage; exit 0 ;;
     *) usage; exit 2 ;;
   esac
   shift
 done
-if [ "$mode" = check ] && [ "$force" = yes ]; then
-  echo 'omp: --force does not apply to --check, which never replaces the executable' >&2
-  exit 2
-fi
 
 omp_path=$(command -v omp 2>/dev/null) || {
   echo 'omp: unavailable on PATH' >&2

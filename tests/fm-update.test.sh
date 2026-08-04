@@ -425,9 +425,9 @@ test_omp_update_refuses_live_fleet() {
 }
 
 # An endpoint whose state cannot be classified at all - an experimental backend
-# with no recovery-grade classifier, or a record with no endpoint - must not be
-# reported as a running worker, and must not wedge the update with no way out.
-test_omp_update_separates_unclassifiable_state_and_honours_force() {
+# with no recovery-grade classifier, or a record with no endpoint - must refuse
+# the update rather than being reported as a running worker.
+test_omp_update_refuses_unclassifiable_state() {
   local case_dir="$TMP_ROOT/omp-unclassified" fixture home channel_a out
   fixture=$(make_fake_omp "$case_dir")
   home=${fixture%%|*}
@@ -447,25 +447,15 @@ test_omp_update_separates_unclassifiable_state_and_honours_force() {
   fi
   assert_contains "$out" "omp: refused: could not confirm every worker has stopped (task exp: its orca endpoint reads unverified)" \
     "an unclassifiable endpoint is reported as unconfirmed, not as a running worker"
-  assert_contains "$out" "rerun with --force" "the refusal names the operator's way through"
   [ ! -f "$case_dir/install-marker" ] || fail "unclassifiable endpoint still attempted an install"
-
-  out=$(PATH="$channel_a:$BASE_PATH" FM_HOME="$home" \
-    OMP_FAKE_VERSION_FILE="$case_dir/version" \
-    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
-    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" --force 2>&1)
-  assert_contains "$out" "omp: forced past a worker whose state could not be confirmed (task exp" \
-    "the override says exactly what it overrode"
-  assert_contains "$out" "omp: after: omp/99.1.0" "the override completes the update"
-  [ -f "$case_dir/install-marker" ] || fail "--force did not run the update"
-
+  [ "$(cat "$case_dir/version")" = "omp/17.2.6" ] || fail "unclassifiable endpoint changed omp version"
   if PATH="$channel_a:$BASE_PATH" FM_HOME="$home" \
     OMP_FAKE_VERSION_FILE="$case_dir/version" \
     OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
-    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" --check --force >/dev/null 2>&1; then
-    fail "--check accepted a meaningless --force"
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" --force >/dev/null 2>&1; then
+    fail "omp update accepted an unsafe override"
   fi
-  pass "omp separates an unclassifiable endpoint from a running one and offers an override"
+  pass "omp refuses an unclassifiable endpoint without an override"
 }
 
 # A tmux that answers every window inventory with the definitive missing-session
@@ -674,9 +664,9 @@ test_omp_update_ignores_a_remote_second_mate_record() {
   pass "omp never classifies a remote second mate's record against the local backend"
 }
 
-# The gate refuses to call an endpoint it cannot classify stopped, so a whole
+# The gate refuses to call an endpoint it cannot classify as stopped, so a whole
 # home or registry it cannot reach must not be counted as proof of an empty
-# fleet either. Both report the place they could not reach and point at --force.
+# fleet either.
 test_omp_update_reports_places_it_cannot_reach() {
   local case_dir="$TMP_ROOT/omp-unreachable" fixture home channel_a out
   fixture=$(make_fake_omp "$case_dir")
@@ -685,8 +675,6 @@ test_omp_update_reports_places_it_cannot_reach() {
   channel_a=${channel_a%%|*}
   make_dead_endpoint_tmux "$case_dir/fakebin"
   printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
-  # The record's own endpoint is authoritatively gone, so the only thing left
-  # unproven is the home its unusable path was supposed to point at.
   {
     printf 'kind=secondmate\n'
     printf 'window=main:fm-sm1\n'
@@ -701,18 +689,11 @@ test_omp_update_reports_places_it_cannot_reach() {
   fi
   assert_contains "$out" "second mate sm1's home: its recorded location is not a usable path (relative/sm1)" \
     "a home the sweep cannot reach is named, not silently dropped"
-  assert_contains "$out" "rerun with --force" "the refusal names the operator's way through"
   [ ! -f "$case_dir/install-marker" ] || fail "unreachable home still attempted an install"
-
-  out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
-    OMP_FAKE_VERSION_FILE="$case_dir/version" \
-    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
-    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" --force 2>&1)
-  assert_contains "$out" "omp: after: omp/99.1.0" "the override completes the update"
 
   # A registry that is not a plain file is the same kind of unproven gap: the
   # whole registered-home backstop went unread.
-  rm -f "$home/state/sm1.meta" "$case_dir/install-marker"
+  rm -f "$home/state/sm1.meta"
   mkdir -p "$home/data"
   printf -- '- sm1 - a second mate (home: %s/sm1; scope: x; projects: p; added 2026-06-23)\n' \
     "$case_dir" > "$case_dir/registry.md"
@@ -889,7 +870,7 @@ test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
 test_omp_update_is_guarded_and_channel_preserving
 test_omp_update_refuses_live_fleet
-test_omp_update_separates_unclassifiable_state_and_honours_force
+test_omp_update_refuses_unclassifiable_state
 test_omp_update_ignores_records_whose_endpoint_is_gone
 test_omp_update_names_a_second_mate_correctly
 test_omp_update_covers_second_mate_homes
