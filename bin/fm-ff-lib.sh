@@ -24,15 +24,20 @@
 # linked-worktree homes.
 # Homes are leased at a detached HEAD on the default branch, so their
 # fast-forward advances HEAD only and never moves the shared default branch or
-# any other worktree's checkout. A primary checkout on another named branch is
-# handled separately: its free default-branch ref may advance without moving
-# that checkout, but a ref held by another worktree is left alone. Advancing
-# that ref never silences the off-branch condition itself - the checkout is
-# still running whatever its own branch holds - so every off-branch outcome
-# also reports a skip that names the branch to repair. A linked worktree shares
-# its ref store with the whole repository, so a ref outcome there names the
-# repository the branch actually belongs to rather than implying it is private
-# to that home.
+# any other worktree's checkout. A checkout on another named branch is handled
+# separately: its free default-branch ref may advance without moving that
+# checkout, but a ref held by another worktree is left alone. Advancing that ref
+# never silences the off-branch condition itself - the checkout is still running
+# whatever its own branch holds - so every off-branch outcome also reports a
+# skip that names the branch to repair.
+# A linked worktree shares its ref store with the whole repository, so a default
+# ref there is not private to that home: moving it moves the repository's
+# branch. That shared movement is OWNED BY THE PRIMARY sync path, which alone
+# passes owns_shared_ref=yes; a secondmate convergence sweep advances only its
+# own detached HEAD or a default ref its own repository owns outright, and
+# reports a shared ref as skipped instead of moving the primary's branch under
+# it. When the owner does move a shared ref, the outcome names the repository
+# the branch actually belongs to rather than implying it is private.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -265,7 +270,11 @@ live_secondmate_meta_records() {
 
 # Fast-forward one target to a base. Prints its status line. Sets globals for the
 # caller:
-#   FF_STATUS = updated|ref-updated|current|skipped
+#   FF_STATUS = updated|ref-updated|current|ref-current|skipped
+#     `current` means this target's own checkout is at the base and needs
+#     nothing. `ref-current` is the off-branch sibling: only the default REF was
+#     level, while the checkout is still stranded on another branch, so a caller
+#     must not read it as "this target is up to date".
 #   FF_INSTR  = comma list of changed instruction paths (only when HEAD updated)
 #
 # base_mode selects where the fast-forward base comes from:
@@ -279,7 +288,9 @@ live_secondmate_meta_records() {
 # The checked-out-default and detached-HEAD guards are unchanged: ff-only,
 # clean-tree-only, and never force/merge/stash. When another named branch is
 # checked out, only the free default-branch ref may advance by strict
-# fast-forward; HEAD, the index, and the working tree remain untouched.
+# fast-forward; HEAD, the index, and the working tree remain untouched. A
+# default ref shared with a wider repository advances only for the caller that
+# owns it (owns_shared_ref=yes, the primary sync path).
 FF_STATUS=""
 FF_INSTR=""
 # Echo the branch an interrupted rebase or bisect in <git-dir> will restore, if
@@ -384,12 +395,23 @@ shared_ref_repo() {
 # with the plain ref-advance fact on the line after it.
 # ff_target owns proving the base exists and passes its resolved commit in, so
 # there is exactly one place that reports a missing base.
+#
+# owns_shared_ref decides who may move a default ref that is NOT private to this
+# checkout. A linked worktree shares one ref store with its main worktree, so its
+# refs/heads/<default> is the whole repository's branch - the primary's. Only the
+# primary sync path passes yes; a secondmate convergence sweep reports that ref
+# as skipped rather than moving the primary's branch under it. A standalone clone
+# owns its own default ref outright, so it is unaffected either way.
 ff_default_ref_while_off_branch() {
-  local dir=$1 label=$2 default=$3 base=$4 cur=$5 base_rev=$6
+  local dir=$1 label=$2 default=$3 base=$4 cur=$5 base_rev=$6 owns_shared_ref=${7:-no}
   local default_ref holder holder_rc local_rev before after out shared refname
   default_ref="refs/heads/$default"
   refname="$default ref"
   if shared=$(shared_ref_repo "$dir"); then
+    if [ "$owns_shared_ref" != yes ]; then
+      echo "$label: skipped: on $cur, expected $default; $default ref belongs to $shared and moves only with that primary checkout, checkout not advanced"
+      return 0
+    fi
     refname="$default ref (shared with $shared)"
   fi
 
@@ -409,7 +431,7 @@ ff_default_ref_while_off_branch() {
     return 0
   }
   if [ "$local_rev" = "$base_rev" ]; then
-    FF_STATUS="current"
+    FF_STATUS="ref-current"
     echo "$label: skipped: on $cur, expected $default; $refname already current, checkout not advanced"
     echo "$label: $refname already current; checkout stayed on $cur"
     return 0
@@ -432,6 +454,7 @@ ff_default_ref_while_off_branch() {
 
 ff_target() {
   local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
+  local owns_shared_ref=${6:-no}
   FF_STATUS="skipped"
   FF_INSTR=""
 
@@ -476,7 +499,8 @@ ff_target() {
     return 0
   fi
   if [ -n "$cur" ] && [ "$cur" != "$default" ]; then
-    ff_default_ref_while_off_branch "$dir" "$label" "$default" "$base" "$cur" "$base_rev"
+    ff_default_ref_while_off_branch "$dir" "$label" "$default" "$base" "$cur" "$base_rev" \
+      "$owns_shared_ref"
     return 0
   fi
 
@@ -535,6 +559,9 @@ FF_SEEN_HOMES=""
 # whose only change was non-instruction tracked files, is left undisturbed. The
 # firstmate repo itself (FM_ROOT) is never processed as its own secondmate, and
 # each resolved home is processed at most once.
+# This is secondmate convergence, so it never claims ownership of a shared
+# default ref: a linked-worktree home off its default branch reports the ref as
+# skipped instead of moving the primary repository's branch under it.
 process_secondmate() {
   local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
   [ -n "$id" ] || return 0

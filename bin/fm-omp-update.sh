@@ -11,6 +11,15 @@
 # sweep, in either the home collection or the record classification.
 # --check performs omp's detect-only update check and does not need that
 # guarantee because it cannot replace the executable.
+#
+# Two entry points, and only one of them may install:
+#   - the LIVE update path, step 4 of the /updatefirstmate skill
+#     (.agents/skills/updatefirstmate/SKILL.md), runs this with no arguments so
+#     the recurring refresh actually swaps omp once the gate says the fleet is
+#     stopped. That skill owns the operator-facing contract.
+#   - the unattended overnight omp-firstmate-leverage cron runs it as `--check`
+#     only. It is deliberately detect-only: with nobody present to read a
+#     refusal, it reports what is available and never installs.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,9 +88,11 @@ meta_endpoint_class() {
 #
 # A place this sweep cannot reach is unproven, exactly like an endpoint that
 # cannot be classified, so it is recorded in SWEEP_UNREACHABLE and reported as
-# an unconfirmed blocker instead of being silently counted as empty. A state
-# directory that simply does not exist yet is different: a home with no records
-# genuinely has nothing running, so it is not a blocker.
+# an unconfirmed blocker instead of being silently counted as empty. "Has no
+# records yet" and "cannot be reached" are therefore separated at the HOME, not
+# at the state dir: a home that resolves proves the sweep got there, so its
+# absent state dir really is an empty home, while a home that does not resolve -
+# missing, not a directory, or unsearchable - proves nothing and is reported.
 SWEEP_DIRS=""
 SWEEP_SEEN=" "
 SWEEP_UNREACHABLE=""
@@ -105,8 +116,8 @@ add_sweep_state() {  # <state-dir> <owner-label>
 "
 }
 
-add_sweep_home() {  # <home> <owner-label>
-  local home=$1 owner=$2
+add_sweep_home() {  # <home> <owner-label> [state-dir]
+  local home=$1 owner=$2 state=${3:-} resolved
   case "$home" in
     /*) ;;
     *)
@@ -114,7 +125,12 @@ add_sweep_home() {  # <home> <owner-label>
       return 0
       ;;
   esac
-  add_sweep_state "$home/state" "$owner"
+  resolved=$(cd "$home" 2>/dev/null && pwd -P) || {
+    note_unreachable "${owner:-this home}" \
+      "its recorded location $home is missing or cannot be read, so its records could not be swept"
+    return 0
+  }
+  add_sweep_state "${state:-$resolved/state}" "$owner"
 }
 
 collect_sweep_dirs() {
@@ -122,7 +138,7 @@ collect_sweep_dirs() {
   SWEEP_DIRS=""
   SWEEP_SEEN=" "
   SWEEP_UNREACHABLE=""
-  add_sweep_state "$STATE" ""
+  add_sweep_home "$FM_HOME" "" "$STATE"
   if [ -d "$STATE" ]; then
     for meta in "$STATE"/*.meta; do
       [ -f "$meta" ] || continue

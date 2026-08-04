@@ -527,6 +527,10 @@ test_omp_update_names_a_second_mate_correctly() {
   make_dead_endpoint_tmux "$case_dir/fakebin"
   make_alive_endpoint_tmux "$case_dir/alivebin"
   printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  # The home exists and simply holds no records yet - a reachable, genuinely
+  # empty home, which is what lets the second half below prove that a stopped
+  # second mate does not wedge the update.
+  mkdir -p "$case_dir/sm"
   {
     printf 'kind=secondmate\n'
     printf 'home=%s/sm\n' "$case_dir"
@@ -691,6 +695,24 @@ test_omp_update_reports_places_it_cannot_reach() {
     "a home the sweep cannot reach is named, not silently dropped"
   [ ! -f "$case_dir/install-marker" ] || fail "unreachable home still attempted an install"
 
+  # An absolute home that is simply not on disk is the same unproven gap. It
+  # must NOT collapse into "that home has no records": the sweep never got
+  # there, so it saw nothing rather than proving nothing is running.
+  {
+    printf 'kind=secondmate\n'
+    printf 'window=main:fm-sm1\n'
+    printf 'home=%s/absent-sm\n' "$case_dir"
+  } > "$home/state/sm1.meta"
+  if out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "a registered home that is missing from disk was treated as an empty fleet"
+  fi
+  assert_contains "$out" "second mate sm1's home: its recorded location $case_dir/absent-sm is missing or cannot be read" \
+    "a missing registered home is reported as unknown, not counted as empty"
+  [ ! -f "$case_dir/install-marker" ] || fail "missing registered home still attempted an install"
+
   # A registry that is not a plain file is the same kind of unproven gap: the
   # whole registered-home backstop went unread.
   rm -f "$home/state/sm1.meta"
@@ -748,10 +770,12 @@ test_omp_check_is_detect_only_with_live_fleet() {
 
 
 # A linked-worktree secondmate home shares its ref store with the whole repo, so
-# an off-branch ref advance there moves the PRIMARY's default branch, not
-# anything private to that home. Reachable whenever the primary itself holds no
-# default-branch checkout, so the report must name the repository it moved.
-test_off_branch_ref_advance_names_the_shared_repo() {
+# an off-branch ref advance there would move the PRIMARY's default branch, not
+# anything private to that home. Shared default-ref movement belongs to the
+# primary sync path alone, so the secondmate sweep must report the ref and leave
+# it exactly where it is - even when the ref is provably free and the move would
+# be a strict fast-forward - while still surfacing the off-branch repair.
+test_secondmate_never_moves_the_shared_default_ref() {
   local w out before_main shared
   w=$(new_world t14)
   git -C "$w/main" worktree add -q -b sm/wip "$w/sm1" main
@@ -761,6 +785,8 @@ test_off_branch_ref_advance_names_the_shared_repo() {
     printf 'kind=secondmate\n'
     printf 'home=%s/sm1\n' "$w"
   } > "$w/home/state/sm1.meta"
+  # The primary detaches, so refs/heads/main is free and nothing but ownership
+  # can be what stops the advance.
   git -C "$w/main" checkout -q --detach HEAD
   before_main=$(git -C "$w/main" rev-parse main)
   bump_origin "$w" instr
@@ -770,13 +796,44 @@ test_off_branch_ref_advance_names_the_shared_repo() {
 
   assert_contains "$out" "secondmate sm1: skipped: on sm/wip, expected main" \
     "the off-branch home stays visible as a repair"
+  assert_contains "$out" "main ref belongs to $shared and moves only with that primary checkout" \
+    "the refusal names the repository whose branch the sweep declined to move"
+  assert_not_contains "$out" "secondmate sm1: advanced" \
+    "a secondmate sweep never reports moving a shared default ref"
+  [ "$(git -C "$w/main" rev-parse main)" = "$before_main" ] \
+    || fail "a secondmate sweep moved the primary repository's default ref"
+  [ "$(git -C "$w/sm1" rev-parse --abbrev-ref HEAD)" = "sm/wip" ] \
+    || fail "the off-branch home's checkout moved"
+  pass "T14 a secondmate sweep never moves the primary repository's default ref"
+}
+
+# The other side of that ownership: when the PRIMARY checkout is itself a linked
+# worktree sitting on a feature branch, the free default ref is its own to
+# advance - and because the move is not private to that checkout, the report has
+# to name the repository whose branch actually moved.
+test_primary_advances_the_shared_default_ref_and_names_it() {
+  local w out before_main before_head shared
+  w=$(new_world t14b)
+  git -C "$w/main" worktree add -q -b feature/wip "$w/pri" main
+  git -C "$w/main" checkout -q --detach HEAD
+  before_main=$(git -C "$w/main" rev-parse main)
+  before_head=$(git -C "$w/pri" rev-parse HEAD)
+  bump_origin "$w" instr
+  shared=$(cd "$w/main" && pwd -P)
+
+  out=$(FM_ROOT_OVERRIDE="$w/pri" FM_HOME="$w/home" "$UPDATE" 2>/dev/null)
+
+  assert_contains "$out" "firstmate: skipped: on feature/wip, expected main" \
+    "the primary's own off-branch checkout still reports the repair"
   assert_contains "$out" "advanced main ref (shared with $shared)" \
     "the ref advance names the repository whose branch actually moved"
   [ "$(git -C "$w/main" rev-parse main)" != "$before_main" ] \
-    || fail "the free shared default ref did not advance"
-  [ "$(git -C "$w/sm1" rev-parse --abbrev-ref HEAD)" = "sm/wip" ] \
-    || fail "the off-branch home's checkout moved"
-  pass "T14 a shared default ref advance names the repository it moved"
+    || fail "the primary did not advance its own free shared default ref"
+  [ "$(git -C "$w/pri" rev-parse HEAD)" = "$before_head" ] \
+    || fail "the off-branch primary's HEAD moved"
+  [ "$(git -C "$w/pri" rev-parse --abbrev-ref HEAD)" = "feature/wip" ] \
+    || fail "the off-branch primary left its own branch"
+  pass "T14b the primary advances a shared default ref and names the repository"
 }
 
 # The registry sweep reads data/secondmates.md on stdin, and ssh forwards stdin
@@ -864,7 +921,8 @@ test_firstmate_wrong_branch_ref_update
 test_firstmate_off_branch_diverged_default_ref_skipped
 test_firstmate_off_branch_default_ref_in_other_worktree_skipped
 test_firstmate_off_branch_default_ref_held_by_rebase_skipped
-test_off_branch_ref_advance_names_the_shared_repo
+test_secondmate_never_moves_the_shared_default_ref
+test_primary_advances_the_shared_default_ref_and_names_it
 test_remote_secondmate_does_not_consume_the_registry
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update

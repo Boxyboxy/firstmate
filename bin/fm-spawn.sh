@@ -1161,8 +1161,9 @@ if [ "$KIND" = secondmate ]; then
   # spawn section). Purely local - no fetch: the home is a worktree of this same
   # repo and already holds the commit. ff-only and guarded; a dirty or diverged
   # home is left untouched and launches as-is, and a home on another named branch
-  # keeps that checkout while only its free default-branch ref may advance. The
-  # agent re-reads AGENTS.md fresh on launch, so no nudge is needed here.
+  # keeps that checkout while only a free default-branch ref its own repository
+  # owns may advance - a ref shared with the primary repository is reported and
+  # left alone. The agent re-reads AGENTS.md fresh on launch, so no nudge here.
   if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
     sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
     case "$sm_ff_out" in

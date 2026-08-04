@@ -6,6 +6,9 @@
 # default-branch ref when the running checkout is on another named branch.
 # The latter leaves HEAD, the index, and the working tree untouched and refuses
 # to move the ref when another worktree has the default branch checked out.
+# That default-ref movement belongs to this primary path alone: a secondmate
+# home off its own default branch reports the condition but never moves a ref
+# shared with the primary repository.
 # Then fast-forwards every registered secondmate home. Local homes are treehouse
 # worktrees or standalone clones; remote routes update their configured code root
 # on that host and then fast-forward the persistent home to that root.
@@ -60,7 +63,11 @@ fi
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
-ff_target "$FM_ROOT" "firstmate" origin no no
+# The running firstmate checkout is the primary, and the primary is the one
+# caller that owns a default ref shared with the wider repository - so it is the
+# only ff_target call that passes owns_shared_ref=yes. Every secondmate sweep
+# below leaves that ref alone.
+ff_target "$FM_ROOT" "firstmate" origin no no yes
 if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
   reread_firstmate="yes"
 fi

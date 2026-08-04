@@ -212,6 +212,10 @@ test_ff_diverged() {
 # --- T5: in-flight - a home on a feature branch is skipped, work preserved ----
 # A secondmate home carrying its own in-flight work sits on a named feature
 # branch, not a detached default-branch HEAD; the ff helper refuses to move it.
+# The home is a linked worktree, so its refs/heads/main is the PRIMARY
+# repository's branch rather than anything private to the home. Secondmate
+# convergence never moves that ref - only the primary sync path does - so the
+# skip reports the ownership, and the home's own work is untouched either way.
 test_ff_inflight_feature_branch() {
   local w c1 base before
   w=$(new_world ff-inflight)
@@ -227,10 +231,12 @@ test_ff_inflight_feature_branch() {
   run_ff "$w/sm" "$base"
 
   [ "$FF_STATUS" = skipped ] || fail "FF_STATUS: expected skipped, got '$FF_STATUS'"
-  assert_contains "$FF_OUT" "secondmate sm: skipped: main is checked out in another worktree" \
-    "a home on a feature branch cannot move the default ref held by the primary worktree"
-  assert_contains "$FF_OUT" "checkout stayed on feature/wip" \
-    "the skip names the home's own branch, not just the worktree holding the ref"
+  assert_contains "$FF_OUT" "secondmate sm: skipped: on feature/wip, expected main" \
+    "the skip names the home's own branch"
+  assert_contains "$FF_OUT" "main ref belongs to" \
+    "a linked-worktree home never moves the default ref its primary repository owns"
+  assert_contains "$FF_OUT" "moves only with that primary checkout" \
+    "the skip says who owns the shared ref, not merely that git refused"
   [ "$(head_of "$w/sm")" = "$before" ] || fail "in-flight home HEAD moved (work at risk)"
   pass "T5 in-flight: a home on a feature branch is skipped, its work preserved"
 }
