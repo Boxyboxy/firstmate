@@ -311,8 +311,14 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 
 `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
-The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
+The update is fast-forward only: dirty, diverged, and offline targets are reported and left untouched.
+A target sitting on another named branch keeps that checkout untouched, and its default branch still catches up when the branch is free and the move is a strict fast-forward; a default branch held by another worktree, or one that has diverged, is reported and left alone.
+Either way the off-default condition itself is still reported, because the checkout keeps running whatever its own branch holds.
+Moving a default branch that a secondmate home shares with the wider firstmate repository belongs to the primary checkout alone; a secondmate sweep reports that ref and leaves it where it is, so convergence never moves the primary's branch under it.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
+The same live update path also refreshes the `omp` harness executable through `bin/fm-omp-update.sh`.
+Because `omp` is a single machine-wide executable, that swap happens only once every worker recorded in this home and in every registered local secondmate home is confirmed stopped; a live worker, an endpoint that cannot be classified, or a home or registry the sweep cannot read is a refusal rather than a reason to proceed, and workers on a remote secondmate's own machine never block the local channel.
+The unattended overnight run stays detect-only (`--check`) and never installs.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
 ## Restart-proof

@@ -1244,9 +1244,11 @@ if [ "$KIND" = secondmate ]; then
   # PRIMARY checkout's current default-branch commit, so a freshly spawned or
   # recovery-respawned secondmate always runs the primary's version (AGENTS.md
   # spawn section). Purely local - no fetch: the home is a worktree of this same
-  # repo and already holds the commit. ff-only and guarded; a dirty, diverged, or
-  # wrong-branch home is left untouched and launches as-is. The agent re-reads
-  # AGENTS.md fresh on launch, so no nudge is needed here.
+  # repo and already holds the commit. ff-only and guarded; a dirty or diverged
+  # home is left untouched and launches as-is, and a home on another named branch
+  # keeps that checkout while only a free default-branch ref its own repository
+  # owns may advance - a ref shared with the primary repository is reported and
+  # left alone. The agent re-reads AGENTS.md fresh on launch, so no nudge here.
   if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
     sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
     case "$sm_ff_out" in
@@ -2229,7 +2231,13 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta" || exit 1  # explicit exit: macOS bash 3.2 skips errexit on a compound redirection failure
+} > "$STATE/$ID.meta" || exit 1
+# `set -e` does NOT abort on a redirection failure attached to a compound command
+# (only on a simple one), so without that explicit `|| exit 1` an unwritable
+# state/<id>.meta would print its shell diagnostic and then let the spawn report
+# success with no durable record - and, on Orca, disarm the abort cleanup below
+# and leak the worktree and terminal it just created.
+# macOS bash 3.2 skips errexit on a compound redirection failure.
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

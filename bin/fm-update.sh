@@ -2,19 +2,27 @@
 # Self-update a running firstmate and its secondmates to the latest origin.
 #
 # Mechanical half of the /updatefirstmate skill. Fast-forwards the running
-# firstmate repo's default branch from origin, then fast-forwards every
-# registered secondmate home. Local homes are treehouse worktrees or standalone
-# clones; remote routes update their configured code root on that host and then
-# fast-forward the persistent home to that root. FAST-FORWARD ONLY, exactly like
-# fm-fleet-sync.sh: never force, never create a merge commit, never stash;
-# advance a target only when it is a clean fast-forward, otherwise skip and
-# report. A tracked-files fast-forward never touches the gitignored operational
-# dirs (data/, state/, config/, projects/, .no-mistakes/), so a secondmate's
-# in-flight work is never disrupted. Worktrees of this repo share one object
-# store, so a single fetch refreshes them all; standalone-clone homes are
-# fetched on their own. Secondmate homes are leased at a detached HEAD on the
-# default branch, so a fast-forward there advances HEAD only and never touches
-# any other worktree's checkout or the shared `main` branch.
+# firstmate repo's default branch from origin, or advances only that free
+# default-branch ref when the running checkout is on another named branch.
+# The latter leaves HEAD, the index, and the working tree untouched and refuses
+# to move the ref when another worktree has the default branch checked out.
+# That default-ref movement belongs to this primary path alone: a secondmate
+# home off its own default branch reports the condition but never moves a ref
+# shared with the primary repository.
+# Then fast-forwards every registered secondmate home. Local homes are treehouse
+# worktrees or standalone clones; remote routes update their configured code root
+# on that host and then fast-forward the persistent home to that root.
+# The shared path is FAST-FORWARD ONLY: never force, create a merge commit, or
+# stash; advance a target only when it is a clean fast-forward, otherwise skip
+# and report. Project refresh in fm-fleet-sync.sh has separate STUCK reporting.
+# A tracked-files fast-forward never touches the gitignored operational dirs
+# (data/, state/, config/, projects/, .no-mistakes/), so a secondmate's
+# in-flight work is never disrupted.
+# Worktrees of this repo share one object store, so a single fetch refreshes
+# them all; standalone-clone homes are fetched on their own. Secondmate homes
+# are leased at a detached HEAD on the default branch, so a fast-forward there
+# advances HEAD only and never touches any other worktree's checkout or the
+# shared `main` branch.
 #
 # The fast-forward mechanics live in bin/fm-ff-lib.sh (base_mode "origin" here);
 # the same library drives the local-HEAD secondmate sync used by fm-spawn.sh and
@@ -23,7 +31,11 @@
 # It does NOT re-read AGENTS.md or nudge secondmates itself - those are LLM /
 # tmux actions the skill performs. The script's job is the safe git mechanics
 # plus a parseable summary telling the caller what to do next:
-#   - one status line per target (updated/already current/skipped)
+#   - one status line per target (updated/advanced <default> ref/already
+#     current/skipped); an off-default target always reports a `skipped:` line
+#     naming the branch to repair, plus a second ref-outcome line when that ref
+#     was already current or advanced - every other ref obstacle is carried in
+#     the skip line alone
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
 #
@@ -51,7 +63,11 @@ fi
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
-ff_target "$FM_ROOT" "firstmate" origin no no
+# The running firstmate checkout is the primary, and the primary is the one
+# caller that owns a default ref shared with the wider repository - so it is the
+# only ff_target call that passes owns_shared_ref=yes. Every secondmate sweep
+# below leaves that ref alone.
+ff_target "$FM_ROOT" "firstmate" origin no no yes
 if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
   reread_firstmate="yes"
 fi

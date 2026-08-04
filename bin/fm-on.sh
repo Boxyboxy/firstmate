@@ -12,10 +12,14 @@
 #
 # argv is encoded as one NUL-delimited stream and passed through the fixed
 # fm-remote-entrypoint.sh. stdin remains the caller's stdin, stdout and stderr
-# remain separate, and ssh's exit status is returned unchanged. OpenSSH never
-# receives an auto-retry instruction here. Exit 255 therefore means unavailable
-# transport or unknown remote completion and must be reconciled by the semantic
-# caller, never blindly repeated by this layer.
+# remain separate, and ssh's exit status is returned unchanged. Because ssh
+# forwards stdin to the remote command, each CALLER owns its own stdin: a call
+# that sends no payload must redirect `< /dev/null`, or ssh drains whatever the
+# caller was reading, and a `while read` sweep over a registry or a record set
+# then stops silently after its first remote target. OpenSSH never receives an
+# auto-retry instruction here. Exit 255 therefore means unavailable transport or
+# unknown remote completion and must be reconciled by the semantic caller, never
+# blindly repeated by this layer.
 #
 # The SSH alias keeps normal public-key and strict host-key policy in ~/.ssh.
 # This command explicitly disables agent forwarding, forwarding setup, and
@@ -34,7 +38,7 @@ PROTOCOL=1
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 encode_base64() {
   base64 | tr -d '\n'
