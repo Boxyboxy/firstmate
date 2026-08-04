@@ -672,7 +672,7 @@ test_omp_update_ignores_a_remote_second_mate_record() {
 # home or registry it cannot reach must not be counted as proof of an empty
 # fleet either.
 test_omp_update_reports_places_it_cannot_reach() {
-  local case_dir="$TMP_ROOT/omp-unreachable" fixture home channel_a out
+  local case_dir="$TMP_ROOT/omp-unreachable" fixture home channel_a out corrupt_home
   fixture=$(make_fake_omp "$case_dir")
   home=${fixture%%|*}
   channel_a=${fixture#*|}
@@ -712,6 +712,29 @@ test_omp_update_reports_places_it_cannot_reach() {
   assert_contains "$out" "second mate sm1's home: its recorded location $case_dir/absent-sm is missing or cannot be read" \
     "a missing registered home is reported as unknown, not counted as empty"
   [ ! -f "$case_dir/install-marker" ] || fail "missing registered home still attempted an install"
+
+  # A home that IS there but whose state path is not a readable directory is the
+  # narrowest version of the same gap: the sweep reached the home, found
+  # something where the records belong, and still read none of them.
+  mkdir -p "$case_dir/corrupt-sm"
+  : > "$case_dir/corrupt-sm/state"
+  # The sweep resolves a reachable home before reading its records, so the
+  # report names the resolved path.
+  corrupt_home=$(cd "$case_dir/corrupt-sm" && pwd -P)
+  {
+    printf 'kind=secondmate\n'
+    printf 'window=main:fm-sm1\n'
+    printf 'home=%s/corrupt-sm\n' "$case_dir"
+  } > "$home/state/sm1.meta"
+  if out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "a home whose state path is not a directory was treated as an empty fleet"
+  fi
+  assert_contains "$out" "second mate sm1's home: its local records at $corrupt_home/state are not a readable directory" \
+    "a state path that is not a readable directory is reported as unknown"
+  [ ! -f "$case_dir/install-marker" ] || fail "an unreadable state path still attempted an install"
 
   # A registry that is not a plain file is the same kind of unproven gap: the
   # whole registered-home backstop went unread.

@@ -93,6 +93,9 @@ meta_endpoint_class() {
 # at the state dir: a home that resolves proves the sweep got there, so its
 # absent state dir really is an empty home, while a home that does not resolve -
 # missing, not a directory, or unsearchable - proves nothing and is reported.
+# A state path that EXISTS but is not a readable directory - a regular file, a
+# dangling symlink, an unsearchable one - is the same unproven case: the sweep
+# reached something and still read no records, so it never counts as empty.
 SWEEP_DIRS=""
 SWEEP_SEEN=" "
 SWEEP_UNREACHABLE=""
@@ -105,7 +108,13 @@ note_unreachable() {  # <what> <reason>
 add_sweep_state() {  # <state-dir> <owner-label>
   local dir=$1 owner=$2 resolved
   [ -n "$dir" ] || return 0
-  [ -d "$dir" ] || return 0
+  if [ ! -d "$dir" ]; then
+    if [ -e "$dir" ] || [ -L "$dir" ]; then
+      note_unreachable "${owner:-this home}" \
+        "its local records at $dir are not a readable directory"
+    fi
+    return 0
+  fi
   resolved=$(cd "$dir" 2>/dev/null && pwd -P) || {
     note_unreachable "${owner:-this home}" "its local records at $dir cannot be read"
     return 0
