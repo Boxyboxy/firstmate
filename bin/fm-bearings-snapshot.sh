@@ -23,6 +23,12 @@
 # backlog roles, unresolved blockers, and captain actionability. It never infers
 # decisions from report or visual-review prose or reimplements snapshot semantics.
 #
+# Every open decision carries age_days, the whole days since the hold was filed,
+# from the date tasks-axi records on the row. A hold is an observation made on one
+# day, not a standing fact, so its age travels with it and an aged one is read as a
+# hypothesis to re-verify. It is null when the filing date is missing or unparseable
+# and is never guessed at from adjacent evidence.
+#
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).
 # Bearings never invents Underway rows from backlog-only ids; it discloses those
@@ -104,7 +110,7 @@ Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
 
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
-  decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
+  decisions_open{id,key,verb,summary,age_days,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
@@ -304,6 +310,17 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  # Whole days between the date a hold was filed (tasks-axi `since`) and now, so an
+  # aged decision reads as a hypothesis rather than a fact. Whole dates only: both
+  # sides are floored to their UTC day, so the count never wobbles with the hour a
+  # snapshot is taken. A missing or unparseable date stays null rather than being
+  # guessed at, which is why the filing date is never inferred from anything else.
+  def age_days($since; $now):
+    if ($since | type) != "string" then null
+    else (try ((($now | split("T")[0] | strptime("%Y-%m-%d") | mktime)
+                - ($since | strptime("%Y-%m-%d") | mktime)) / 86400 | floor)
+          catch null)
+    end;
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -385,11 +402,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",
-            summary:((.title + ": " + .hold_reason) | trunc(90)),owner:"(main)"} ]
+            summary:((.title + ": " + .hold_reason) | trunc(90)),
+            age_days:age_days(.since; $now),owner:"(main)"} ]
      + [ (.secondmate_current.records // [])[] as $m | $m.decisions_open[]?
          | select(.source == "backlog" and .verb == "captain-hold")
          | {id:($m.id + "/" + .id),key,verb,
-            summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(90)),owner:$m.id} ]) as $decisions_all
+            summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(90)),
+            age_days:age_days(.since; $now),owner:$m.id} ]) as $decisions_all
   | ((if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",
           title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),

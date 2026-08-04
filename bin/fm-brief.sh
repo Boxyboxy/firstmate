@@ -40,11 +40,31 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
-# Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Ship briefs begin with a worktree-isolation assertion before the branch step, then require dependency installation before tooling or tests so fresh worktrees have usable language servers and test environments.
+# Generated ship rules require work-in-progress commits at natural boundaries so an unexpected stop cannot destroy a large uncommitted tree.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
+# Ship and scout scaffolds state the ABSOLUTE firstmate path for any report or
+# evidence output, because a relative data/ path resolves inside the disposable
+# worktree and is destroyed with it at cleanup. The ship scaffold keeps worktree
+# isolation as its default and permits that one write only when the # Task
+# section explicitly asks for a report or evidence file, and only as
+# data/<id>/report.md or an evidence file that section names beside it - never
+# data/<id>/brief.md, which is the crewmate's own instructions and the channel
+# firstmate amends to hand it a decision, so a permitted evidence write must not
+# be able to destroy it. The scout scaffold's deliverable is always that report.
+# Every firstmate path a scaffold bakes in - the firstmate root whose skills and
+# helpers the crewmate is told to read and run, the report or evidence dir, and
+# the status file alike - is resolved to a real absolute path first, and a
+# relative root, data, or state dir that cannot be resolved is refused rather
+# than asserted absolute.
+# Every ship and scout scaffold carries a premise check: before building on the
+# task text, the crewmate re-verifies its central factual claims against current
+# code and reports rather than implements when one no longer holds. It belongs to
+# the scaffold contract, not to firstmate's memory, because the task text is
+# written from an observation made before dispatch and decays with the code.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -77,30 +97,41 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
-resolve_directory_input() {
-  local name=$1 path=$2 resolved
+# Every firstmate path a scaffold bakes in - the firstmate root whose skills and
+# helpers the crewmate is told to read and run, the report or evidence dir, and
+# the status file alike - is resolved by the crewmate from inside its own
+# disposable worktree, so each has to be genuinely absolute rather than merely
+# called absolute: a relative path resolves inside that worktree, where a helper
+# is simply not there and a write is destroyed at cleanup. Resolve them here,
+# and refuse rather than bake in a path the crewmate cannot reach.
+# The variables that can actually clear a refusal differ per dir: FM_ROOT is
+# resolved before FM_HOME is derived from it, so naming FM_HOME there would send
+# an operator back to the identical refusal.
+resolve_home_dir() {  # <name> <label> <path> <settable-vars>
+  local name=$1 label=$2 path=$3 settable=$4 resolved
+  if [ -d "$path" ]; then
+    # An inherited CDPATH would otherwise resolve a relative dir against a
+    # directory the caller never named, so ignore it here.
+    resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd) || {
+      echo "error: $name directory cannot be resolved: $path - the firstmate $label dir could not be resolved to an absolute path" >&2
+      return 1
+    }
+    path=$resolved
+  fi
   case "$path" in
-    /*) printf '%s\n' "$path"; return 0 ;;
+    /*) ;;
+    *)
+      echo "error: $name directory cannot be resolved: $path - the firstmate $label dir is relative and does not exist, so a brief cannot name a path the crewmate can reach from its own worktree; set $settable to an absolute path" >&2
+      return 1
+      ;;
   esac
-  resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || {
-    echo "error: $name directory cannot be resolved: $path" >&2
-    return 1
-  }
-  printf '%s\n' "$resolved"
+  printf '%s\n' "$path"
 }
 
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME=$(resolve_directory_input FM_HOME "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}") || exit 1
-if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
-  DATA=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
-else
-  DATA="$FM_HOME/data"
-fi
-if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
-  STATE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || exit 1
-else
-  STATE="$FM_HOME/state"
-fi
+FM_ROOT=$(resolve_home_dir FM_ROOT_OVERRIDE root "${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}" FM_ROOT_OVERRIDE) || exit 1
+FM_HOME=$(resolve_home_dir FM_HOME home "${FM_HOME:-$FM_ROOT}" FM_HOME) || exit 1
+DATA=$(resolve_home_dir FM_DATA_OVERRIDE data "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "FM_HOME or FM_DATA_OVERRIDE") || exit 1
+STATE=$(resolve_home_dir FM_STATE_OVERRIDE state "${FM_STATE_OVERRIDE:-$FM_HOME/state}" "FM_HOME or FM_STATE_OVERRIDE") || exit 1
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -297,12 +328,27 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# Standing premise check, carried by every ship and scout scaffold. The task text
+# is written from an observation made before dispatch, and code moves between the
+# observation and the worker reading it, so the worker - not the scaffold, which
+# cannot inspect {TASK} - is the only party positioned to re-verify it.
+IFS= read -r -d '' PREMISE_SECTION <<'EOF' || true
+# Verify the premise before you build on it
+The `# Task` section above was written from an earlier reading of the code, and code moves.
+Before you implement or investigate, confirm its central factual claims against the code as it is now: that the behavior, symptom, gap, or file it names is still real and still unfixed.
+If a central premise no longer holds - the work already shipped, the code moved on, or the described problem cannot be reproduced - stop and report that instead of building on it: append `blocked: {the premise that no longer holds}`, or `needs-decision: {options}` when the dead premise leaves a real choice.
+Report it the same way when the premise holds only in part, and say which part failed; do not quietly re-scope the task around it.
+EOF
+PREMISE_SECTION=${PREMISE_SECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
 {TASK}
+
+$PREMISE_SECTION
 
 $HERDR_SECTION
 
@@ -335,7 +381,8 @@ The report is the only thing that survives, so anything worth keeping must be in
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 # Definition of done
-Write your findings to \`$DATA/$ID/report.md\`.
+Write your findings to the absolute path \`$DATA/$ID/report.md\`.
+Use that absolute path, never a relative \`data/...\` one: a relative path lands inside this worktree, and the worktree is destroyed at cleanup.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
@@ -377,7 +424,7 @@ EOF
     ;;
   *)  # no-mistakes
     SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+3. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
@@ -413,6 +460,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Task
 {TASK}
 
+$PREMISE_SECTION
+
 $HERDR_SECTION
 
 # Setup
@@ -422,11 +471,14 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b fm/$ID\`
+2. Install this worktree's dependencies before any tooling or tests: it was freshly cut and has no .venv/node_modules, so language servers and test runs are degraded until you do. Detect the stack and run the project's setup - Python (pyproject.toml/requirements*.txt): create a .venv and install (prefer \`uv sync\`, else \`pip install -r requirements*.txt\` plus any requirements-dev.txt); Node/TypeScript (package.json): \`npm ci\` (or the project's package manager). Prefer any setup command the README/AGENTS.md documents. Skip only if there's no dependency manifest.$SETUP2
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+2. Stay inside this worktree; the status file below is the only file you write outside it.
+   The single exception: if the \`# Task\` section above explicitly asks you for a report or evidence file, write it at the absolute path \`$DATA/$ID/report.md\`, or at the absolute path of an evidence file that section names in that same directory - never \`$DATA/$ID/brief.md\`, which is these instructions and may be amended with a decision you must read - and nowhere else outside this worktree.
+   Never use a relative \`data/...\` path for it: a relative path lands inside this worktree, and the worktree is destroyed at cleanup.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -448,6 +500,7 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Commit work in progress at natural boundaries so an unexpected stop cannot destroy uncommitted work.
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

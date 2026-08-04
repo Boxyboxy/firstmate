@@ -70,6 +70,7 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
+    child.stdin.on("error", () => {});
     child.on("error", () => resolveResult({ code: 0, stderr: "" }));
     child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
     child.stdin.end('{"stop_hook_active":false}');

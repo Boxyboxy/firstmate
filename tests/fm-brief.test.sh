@@ -174,6 +174,8 @@ test_help_includes_entire_header() {
   local help
   help=$("$ROOT/bin/fm-brief.sh" --help)
   assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
+  assert_contains "$help" "work-in-progress commits at natural boundaries" \
+    "fm-brief.sh --help omitted the ship checkpoint contract"
   pass "fm-brief.sh: --help renders the complete header"
 }
 
@@ -212,9 +214,41 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep "Commit work in progress at natural boundaries so an unexpected stop cannot destroy uncommitted work." "$brief" \
+      "$id: ship brief missing the natural-boundary checkpoint instruction"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+}
+
+test_ship_dependency_setup_renders_all_modes() {
+  local home id proj mode brief dependency_step
+  home="$TMP_ROOT/dependency-setup-home"
+  write_registry "$home"
+  IFS= read -r dependency_step <<'EOF'
+2. Install this worktree's dependencies before any tooling or tests: it was freshly cut and has no .venv/node_modules, so language servers and test runs are degraded until you do. Detect the stack and run the project's setup - Python (pyproject.toml/requirements*.txt): create a .venv and install (prefer `uv sync`, else `pip install -r requirements*.txt` plus any requirements-dev.txt); Node/TypeScript (package.json): `npm ci` (or the project's package manager). Prefer any setup command the README/AGENTS.md documents. Skip only if there's no dependency manifest.
+EOF
+
+  for id_proj in "brief-deps-nomistakes:no-registry-proj" "brief-deps-direct:direct-proj" "brief-deps-local:local-proj"; do
+    id=${id_proj%%:*}
+    proj=${id_proj##*:}
+    case "$id" in
+      *nomistakes) mode=no-mistakes ;;
+      *direct) mode=direct-PR ;;
+      *local) mode=local-only ;;
+    esac
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "$dependency_step" "$brief" \
+      "$id: ship brief missing the shared dependency-install step"
+  done
+
+  brief="$home/data/brief-deps-nomistakes/brief.md"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_grep '3. Run `no-mistakes doctor`' "$brief" \
+    "no-mistakes brief did not renumber its doctor step to 3"
+
+  pass "fm-brief.sh: dependency setup renders for every ship mode"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -669,6 +703,62 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+# The premise check has to come from the scaffold, not from firstmate remembering
+# to append it: the whole failure it closes is a task text written from an earlier
+# reading of the code reaching a worker that implements against it after the code
+# moved. So it is asserted on plain generated output, with no extra flags, for
+# every ship delivery mode and for scouts.
+test_premise_check_is_structural_in_every_task_scaffold() {
+  local home id proj brief premise_line setup_line
+  home="$TMP_ROOT/premise-home"
+  write_registry "$home"
+  for id_proj in "brief-premise-nm-e1:no-registry-proj" "brief-premise-dpr-e2:direct-proj" \
+                 "brief-premise-lo-e3:local-proj" "brief-premise-scout-e4:no-registry-proj"; do
+    id=${id_proj%%:*}
+    proj=${id_proj##*:}
+    case "$id" in
+      *-scout-*) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --scout >/dev/null 2>&1 ;;
+      *-nm-*) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --mode no-mistakes >/dev/null 2>&1 ;;
+      *-dpr-*) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --mode direct-PR >/dev/null 2>&1 ;;
+      *-lo-*) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --mode local-only >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_grep "# Verify the premise before you build on it" "$brief" \
+      "$id: brief lost the standing premise check"
+    assert_grep "confirm its central factual claims against the code as it is now" "$brief" \
+      "$id: premise check must send the worker to current code, not to the task text"
+    assert_grep "stop and report that instead of building on it" "$brief" \
+      "$id: premise check must require reporting a dead premise, not implementing against it"
+    assert_grep "do not quietly re-scope the task around it" "$brief" \
+      "$id: premise check must forbid silently re-scoping around a partly dead premise"
+    # It must be read before the work starts, so it precedes the setup steps.
+    premise_line=$(grep -n "^# Verify the premise before you build on it$" "$brief" | head -1 | cut -d: -f1)
+    setup_line=$(grep -n "^# Setup$" "$brief" | head -1 | cut -d: -f1)
+    [ -n "$premise_line" ] && [ -n "$setup_line" ] \
+      || fail "$id: brief is missing the premise or setup heading"
+    [ "$premise_line" -lt "$setup_line" ] \
+      || fail "$id: premise check must appear before the setup steps"
+  done
+  pass "fm-brief.sh: every ship and scout scaffold carries the premise check before setup"
+}
+
+# A secondmate charter is a standing role rather than a task written from a dated
+# observation, so the premise check stays out of it.
+test_premise_check_is_absent_from_secondmate_charter() {
+  local home charter
+  home="$TMP_ROOT/premise-charter-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    "$ROOT/bin/fm-brief.sh" premise-mate-e5 --secondmate alpha >/dev/null 2>&1 \
+    || fail "secondmate charter scaffold exited non-zero"
+  charter="$home/data/premise-mate-e5/brief.md"
+  assert_present "$charter" "secondmate charter was not scaffolded"
+  assert_no_grep "# Verify the premise before you build on it" "$charter" \
+    "secondmate charter must not carry the task-scoped premise check"
+  pass "fm-brief.sh: the premise check is scoped to task briefs, not standing charters"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -688,6 +778,145 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# A bare relative `data/<id>/...` path in a generated definition of done is a
+# defect: three crewmates wrote evidence to one, the file landed inside the
+# disposable worktree, and it was lost when the worktree was returned. Both
+# scaffolds must name the absolute firstmate path and say why.
+test_evidence_paths_are_absolute() {
+  local home id brief
+  home="$TMP_ROOT/evidence-path-home"
+  mkdir -p "$home/data"
+  # Compare against the resolved home, because the scaffold resolves the data
+  # dir to a real absolute path before baking it in rather than asserting one.
+  home=$(cd "$home" && pwd)
+
+  id="brief-evidence-ship"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "ship brief was not scaffolded"
+  assert_grep "$home/data/$id/report.md" "$brief" \
+    "ship brief did not name the absolute firstmate path for report or evidence output"
+  assert_grep "the worktree is destroyed at cleanup" "$brief" \
+    "ship brief did not say a worktree path does not survive cleanup"
+  assert_no_grep '`data/'"$id"'/report.md`' "$brief" \
+    "ship brief still offers a bare relative evidence path"
+  # Worktree isolation stays the default: the status file is the only
+  # unconditional write outside the worktree, and an evidence write is
+  # permitted only when the # Task section asks for one, only under data/<id>/.
+  assert_grep "the status file below is the only file you write outside it" "$brief" \
+    "ship brief no longer keeps worktree isolation as its default"
+  assert_grep "if the \`# Task\` section above explicitly asks you for a report or evidence file" "$brief" \
+    "ship brief did not condition its outside write on the # Task section asking for one"
+  assert_grep "and nowhere else outside this worktree" "$brief" \
+    "ship brief did not confine the permitted outside write to data/<id>/"
+  assert_no_grep 'any report or evidence this task asks for' "$brief" \
+    "ship brief still grants an open-ended write outside the worktree"
+  # brief.md lives in that same directory and is the channel firstmate amends to
+  # hand the crewmate a decision, so a permitted evidence write must name the
+  # files it may create rather than the directory that holds them.
+  assert_grep "never \`$home/data/$id/brief.md\`" "$brief" \
+    "ship brief let a permitted evidence write overwrite the instructions it is reading"
+  assert_no_grep 'or a named file beside it in that directory' "$brief" \
+    "ship brief still permits any file in the directory that holds its own instructions"
+
+  id="brief-evidence-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_grep "Write your findings to the absolute path \`$home/data/$id/report.md\`" "$brief" \
+    "scout brief did not require the absolute report path"
+  assert_grep "the worktree is destroyed at cleanup" "$brief" \
+    "scout brief did not say a worktree path does not survive cleanup"
+  assert_no_grep '`data/'"$id"'/report.md`' "$brief" \
+    "scout brief still offers a bare relative report path"
+  pass "fm-brief.sh: ship and scout scaffolds bake in the absolute evidence path"
+}
+
+# The scaffold calls that path absolute, so it must be one in fact. A relative
+# home would otherwise emit `./data/<id>/report.md` under the word "absolute",
+# which resolves inside the crewmate's worktree - the exact loss this wording
+# exists to prevent, with reassuring prose on top.
+test_relative_home_is_resolved_or_refused() {
+  local home abs id brief out rc
+  home="$TMP_ROOT/relative-home"
+  mkdir -p "$home/data" "$home/state"
+  abs=$(cd "$home" && pwd)
+
+  id="brief-relative-resolved"
+  ( cd "$home" && FM_HOME=. "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes ) >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "a relative but resolvable home should still scaffold"
+  assert_grep "$abs/data/$id/report.md" "$brief" \
+    "a relative home was baked into the brief instead of being resolved to an absolute path"
+  # The status file is the other firstmate path the scaffold bakes in, and a
+  # relative one lands inside the disposable worktree exactly like a relative
+  # report path does - costing every wake firstmate supervises the task by.
+  assert_grep "$abs/state/$id.status" "$brief" \
+    "the status file was baked into the brief as a relative path"
+  # These are the literal strings a brief scaffolded from an unresolved relative
+  # home carries, so they must be written as the fixed strings assert_no_grep
+  # actually matches: a regex-shaped pattern here would pass whether or not the
+  # defect is present.
+  assert_no_grep '`./data/' "$brief" \
+    "the brief called a relative path absolute"
+  assert_no_grep "'./state/" "$brief" \
+    "the brief named a relative status file under the claim that it is written outside the worktree"
+
+  # The firstmate root is the third path a scaffold bakes in, and the crewmate
+  # resolves it from inside its worktree just like the other two: a relative one
+  # names a skill or helper that is simply not there.
+  id="brief-relative-root-resolved"
+  ( cd "$ROOT" && FM_ROOT_OVERRIDE=. FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes ) >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "a relative but resolvable firstmate root should still scaffold"
+  assert_grep "$ROOT/bin/fm-ensure-agents-md.sh" "$brief" \
+    "the firstmate root was baked into the brief instead of being resolved to an absolute path"
+  assert_no_grep '`./bin/fm-ensure-agents-md.sh' "$brief" \
+    "the brief pointed the crewmate at a relative helper path that resolves inside its worktree"
+
+  set +e
+  out=$( cd "$home" && FM_ROOT_OVERRIDE=no-such-root FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" brief-relative-root-refused some-proj 2>&1 )
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "an unresolvable relative firstmate root should be refused, not asserted absolute"
+  assert_contains "$out" "is relative and does not exist" \
+    "the refusal did not explain why the firstmate root cannot be named in a brief"
+  # FM_HOME is derived FROM the root, so it cannot clear a root refusal: naming
+  # it here would send the operator back to this identical message.
+  assert_contains "$out" "set FM_ROOT_OVERRIDE to an absolute path" \
+    "the root refusal did not name the variable that can actually clear it"
+  assert_not_contains "$out" "set FM_HOME" \
+    "the root refusal told the operator to set a variable that is derived from the root"
+  assert_absent "$home/data/brief-relative-root-refused/brief.md" \
+    "a brief was scaffolded naming skills and helpers the crewmate cannot reach"
+
+  set +e
+  out=$( cd "$home" && FM_DATA_OVERRIDE=no-such-data FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" brief-relative-refused some-proj 2>&1 )
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "an unresolvable relative data dir should be refused, not asserted absolute"
+  assert_contains "$out" "is relative and does not exist" \
+    "the refusal did not explain why the data dir cannot be named in a brief"
+  assert_contains "$out" "set FM_HOME or FM_DATA_OVERRIDE to an absolute path" \
+    "the data refusal did not name both variables that can clear it"
+  assert_absent "$home/no-such-data/brief-relative-refused/brief.md" \
+    "a brief was scaffolded under an unresolvable relative data dir"
+
+  set +e
+  out=$( cd "$home" && FM_STATE_OVERRIDE=no-such-state FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" brief-relative-state-refused some-proj 2>&1 )
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "an unresolvable relative state dir should be refused, not asserted absolute"
+  assert_contains "$out" "is relative and does not exist" \
+    "the refusal did not explain why the state dir cannot be named in a brief"
+  assert_absent "$home/data/brief-relative-state-refused/brief.md" \
+    "a brief was scaffolded naming a status file the crewmate cannot reach"
+  pass "fm-brief.sh: every firstmate path a brief bakes in is resolved absolute or refused"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -703,7 +932,7 @@ test_scout_and_secondmate_scaffold() {
     || fail "fm-brief.sh secondmate scaffold exited non-zero"
   brief="$BRIEF_HOME/data/brief-sm-q6/brief.md"
   assert_present "$brief" "secondmate charter was not scaffolded"
-  assert_grep "persistent second mate" "$brief" \
+  assert_grep "persistent second mate managed by the main firstmate" "$brief" \
     "secondmate charter must declare its role"
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
@@ -712,6 +941,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_ship_dependency_setup_renders_all_modes
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
@@ -726,5 +956,9 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
+test_premise_check_is_structural_in_every_task_scaffold
+test_premise_check_is_absent_from_secondmate_charter
 test_scout_and_secondmate_load_decision_hold_policy
+test_evidence_paths_are_absolute
+test_relative_home_is_resolved_or_refused
 test_scout_and_secondmate_scaffold

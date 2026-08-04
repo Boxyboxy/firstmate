@@ -91,7 +91,7 @@ state/               volatile runtime signals; gitignored
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown
-  <id>.meta          written by fm-spawn: window=, endpoint_task_id=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; an optional traceparent= only when trace context is enabled (docs/configuration.md "Trace context propagation"); kind=secondmate also records home= and projects=, plus remote_host=/remote_root=/remote_backend=/remote_herdr_session=/remote_target= for a remote route; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and the forge's pr_head= when available (GitHub pull requests and GitLab merge requests; docs/gitlab-merge-watch.md); fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
+  <id>.meta          written by fm-spawn: window=, endpoint_task_id=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; an optional traceparent= only when trace context is enabled (docs/configuration.md "Trace context propagation"); kind=secondmate also records home= and projects=, plus remote_host=/remote_root=/remote_backend=/remote_herdr_session=/remote_target= for a remote route; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and the forge's pr_head= when available (GitHub pull requests and GitLab merge requests; docs/gitlab-merge-watch.md); fm-pr-merge records merge_checks_override= when a captain-authorized override merged a PR whose check state was not green; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Optional presentation spaces"
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified X shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
@@ -164,7 +164,7 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 ## 4. Harness and runtime dispatch
 
 Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
-The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `kimi`; never dispatch on an unverified adapter.
+The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, and `omp`; never dispatch on an unverified adapter.
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.
@@ -225,6 +225,9 @@ Route durable knowledge to its most specific owner:
 - Task-scoped notes belong with the backlog item, and investigation findings belong in the scout report.
 - Knowledge useful to almost every contributor to one project belongs in that project's committed `AGENTS.md`.
 - Knowledge general to every firstmate user belongs in this repo's shared tracked surface.
+
+An initiative whose plan the captain maintains outside firstmate, in their own planning documents, outranks every firstmate-derived record of that initiative; `data/captain.md` records where this home's planning sources live and which initiatives they cover.
+A backlog hold, task note, or report is a derived observation from one moment, so a hold that contradicts its initiative's planning source is stale by definition: re-verify a hold against that source before presenting it to the captain or briefing work from it, and correct or close the hold rather than the source.
 
 Firstmate never writes a project's `AGENTS.md` directly.
 A crewmate creates or updates it lazily through the project's selected delivery path, using `bin/fm-ensure-agents-md.sh` and preferring pointers to authoritative sources over copied detail.
@@ -303,6 +306,7 @@ Before deciding any ask-user finding, load `ask-user-authority`; the implementat
 Never merge a red PR.
 Without a current explicit captain instruction that states the concrete merge, that default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
+`fm-pr-merge` enforces the red-PR rule itself and also refuses a check state it cannot read; its override needs the captain's explicit word, is never covered by standing `yolo` authority, and is recorded durably in the task's metadata.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
 ### Validate
@@ -320,7 +324,10 @@ Apart from that single supported abort, do not hand-edit, commit, restart, or st
 Once ownership is settled, validate exactly once against that final head so no obsolete or intermediate head is ever treated as authoritative.
 
 An ask-user finding returns as `needs-decision`; firstmate decides only when the configured authority permits, otherwise escalates to the captain.
-Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command.
+Append the one exact decision to the worker's `data/<id>/brief.md` instead of typing it into the steer, still naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command.
+Then send one short steer carrying only a pointer to it, giving that brief's ABSOLUTE path and telling the worker to READ it, never to find or look for it.
+`data/` is gitignored, so a worker searching from its own worktree structurally cannot find the file; the absolute path is what makes the pointer usable.
+A steer long enough to carry the decision body is refused by `bin/fm-send.sh` and is lost by a busy pane rather than landing.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
 Resume fleet supervision immediately after the decision lands.
 
@@ -494,6 +501,8 @@ Moving a default branch shared with the wider repository belongs to the primary 
 The same run also refreshes the machine-wide `omp` executable through the channel `which omp` already resolves, reporting that channel plus the before and after versions.
 That swap is the one part of `/updatefirstmate` that reaches beyond this repo, so it installs only when every worker recorded here and in every registered local secondmate home is confirmed stopped; a live worker, an endpoint it cannot classify, or a home or registry it cannot read is a refusal to relay, never a reason to proceed, and workers on a remote secondmate's own machine never block it.
 The unattended overnight run stays detect-only (`--check`) and can never install.
+When the captain invokes `/omp-firstmate-leverage`, asks to update omp and firstmate together, asks whether firstmate is leveraging omp, or when that recurring sweep comes due, load the `omp-firstmate-leverage` skill.
+It owns the omp update, the fast-forward, the merge into the local omp adapter branch, and the audit of which omp capabilities firstmate never uses.
 
 ## 13. Agent-only reference skills
 

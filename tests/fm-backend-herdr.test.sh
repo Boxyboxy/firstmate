@@ -2789,6 +2789,108 @@ test_composer_state_pi_separator_requires_safe_native_identity() {
   pass "fm_backend_herdr_composer_state: Pi separators never authorize working, non-Pi, unreadable, or over-tall targets"
 }
 
+# --- composer_state: omp's rounded composer pair ------------------------------
+# The fixtures under tests/fixtures/omp-herdr-composer/ are RAW styled captures
+# recorded 2026-07-31 from live omp 17.2.2 panes under herdr 0.7.5 (protocol 17),
+# exactly as fm_backend_herdr_capture_ansi receives them. They are fed in
+# verbatim on purpose: content extraction runs through fm_composer_strip_ghost,
+# which reads the SGR styling, so a de-styled or hand-typed copy would exercise
+# bytes real omp never emits.
+#
+# omp draws its composer as a bottom-anchored rounded PAIR - a status row
+# `╭── π > … ▶───╮` with the input row `╰─ <typed text> ─╯` directly below it.
+# Neither row starts AND ends with the same side-border glyph, so before the
+# rounded shape existed the bordered test could not read either one and an
+# unrelated row higher up the capture won instead. On an idle omp pane holding
+# unsubmitted captain text that produced `empty`, which is precisely the
+# go-signal bin/fm-supervise-daemon.sh types on top of before submitting.
+OMP_COMPOSER_FIXTURES="$ROOT/tests/fixtures/omp-herdr-composer"
+
+# omp_composer_verdict: classify <fixture> with a canned `agent get` identity of
+# <agent>/<status>, and echo the verdict.
+omp_composer_verdict() {  # <case-id> <fixture-file> <agent> <status>
+  local dir log resp fb
+  dir="$TMP_ROOT/composer-omp-$1"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  cp "$2" "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"%s","agent_status":"%s"}}}\n' "$3" "$4" > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT"
+}
+
+test_composer_state_omp_rounded_pair_reads_real_captures() {
+  local out
+  [ -d "$OMP_COMPOSER_FIXTURES" ] || fail "missing omp composer fixtures at $OMP_COMPOSER_FIXTURES"
+
+  # THE DEFECT. An idle omp pane with unsubmitted text in its composer used to
+  # resolve to a blank interior row of omp's startup splash box and read empty,
+  # so away mode would type an escalation on top of the captain's half-typed
+  # sentence and submit the concatenation.
+  out=$(omp_composer_verdict text-in-composer "$OMP_COMPOSER_FIXTURES/omp-idle-text-in-composer.ansi" omp idle)
+  [ "$out" = pending ] || fail "an idle omp pane holding unsubmitted composer text must read pending, got '$out'"
+
+  # The empty-composer guard. This one already read empty, but for the wrong
+  # reason (the same unrelated splash row), which is what made the defect look
+  # like working behavior - it must still read empty once the real row is read.
+  out=$(omp_composer_verdict empty-composer "$OMP_COMPOSER_FIXTURES/omp-idle-empty-composer.ansi" omp idle)
+  [ "$out" = empty ] || fail "an idle omp pane with an empty composer must read empty, got '$out'"
+
+  # A settled omp pane after several turns has no bordered row left in view at
+  # all, so it used to fall through to unknown and never accept an escalation.
+  out=$(omp_composer_verdict after-turns "$OMP_COMPOSER_FIXTURES/omp-idle-after-turns.ansi" omp idle)
+  [ "$out" = empty ] || fail "an idle omp pane after several turns must read empty, got '$out'"
+
+  pass "fm_backend_herdr_composer_state: real idle omp captures classify from the composer's own row"
+}
+
+test_composer_state_omp_rounded_pair_requires_safe_native_identity() {
+  local out
+
+  # A working omp used to resolve to an ordinary transcript row carrying shell
+  # text. The arc pair is present and bottom-anchored either way, so only the
+  # native identity conjunction keeps a busy pane out of the injector.
+  out=$(omp_composer_verdict working "$OMP_COMPOSER_FIXTURES/omp-working.ansi" omp working)
+  [ "$out" = unknown ] || fail "a working omp pane must remain unknown, got '$out'"
+
+  # Structure alone is never sufficient: omp closes ordinary transcript boxes
+  # with the same ╰────╯ glyph, so an unreadable or non-omp identity over the
+  # very same capture must refuse rather than inherit a green light.
+  out=$(omp_composer_verdict non-omp "$OMP_COMPOSER_FIXTURES/omp-idle-empty-composer.ansi" shell idle)
+  [ "$out" != pending ] || fail "a non-omp identity must not classify from omp's rounded shape, got '$out'"
+  out=$(omp_composer_verdict unreadable "$OMP_COMPOSER_FIXTURES/omp-idle-text-in-composer.ansi" '' '')
+  [ "$out" = unknown ] || fail "an unreadable identity over an omp capture must remain unknown, got '$out'"
+
+  pass "fm_backend_herdr_composer_state: omp's rounded shape never authorizes a working, non-omp, or unreadable target"
+}
+
+test_composer_state_omp_orphan_arc_closer_is_not_a_composer() {
+  local dir log resp fb out
+
+  # A leftover transcript-box closer with no matching open row directly above
+  # it is not a composer container. Accepting the ╰────╯ shape on its own would
+  # reintroduce exactly the dead-shell-vs-composer hazard the shared composer
+  # library exists to prevent.
+  dir="$TMP_ROOT/composer-omp-orphan-closer"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'stale transcript body\n╰──────────────────────────────╯\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "an orphan arc closer must not classify as a composer, got '$out'"
+
+  # A non-adjacent pair is an ordinary transcript box spanning its content, not
+  # omp's back-to-back composer pair.
+  dir="$TMP_ROOT/composer-omp-spanning-box"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '╭──────────────────────────────╮\nstale transcript body\n╰──────────────────────────────╯\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"omp","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "a content-spanning transcript box must not classify as a composer, got '$out'"
+
+  pass "fm_backend_herdr_composer_state: a leftover or spanning rounded box is never mistaken for omp's composer"
+}
+
 # --- composer_state: unbordered (bare) composer rows -------------------------
 # Regression coverage for the away-mode redelivery-loop incident
 # (docs/herdr-backend.md "Incident (2026-07-07)"): real claude and codex
@@ -3967,6 +4069,9 @@ test_composer_state_pi_separator_idle_is_empty
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
+test_composer_state_omp_rounded_pair_reads_real_captures
+test_composer_state_omp_rounded_pair_requires_safe_native_identity
+test_composer_state_omp_orphan_arc_closer_is_not_a_composer
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins

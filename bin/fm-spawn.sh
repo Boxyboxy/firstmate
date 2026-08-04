@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--allow-project-omp-extensions]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--allow-project-omp-extensions]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -22,6 +22,11 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   omp crewmates default to `--max-time=3h`. config/omp-max-time may override
+#   that per-home default: its first non-empty, non-comment line must be `off`,
+#   a positive integer number of seconds, or a positive integer suffixed with
+#   `m` for minutes or `h` for hours. `off` restores an unbounded omp launch.
+#   Other harnesses and raw launch commands omit this omp-only axis.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -42,6 +47,11 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   --allow-project-omp-extensions bypasses omp's fail-closed check for tracked
+#   project `.omp/extensions` code. Use it only after explicit captain approval:
+#   omp auto-executes those files before the model reasons about the task, and
+#   firstmate launches omp with --auto-approve. An exact copy of firstmate's own
+#   sole tracked primary guard is allowlisted for firstmate-on-itself tasks.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
 #   pane rather than from a workspace label (herdr enforces no label uniqueness,
@@ -83,7 +93,8 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi)
+#   /updatefirstmate, restart). A bare adapter name
+#   (claude|codex|opencode|pi|pi-signed|grok|kimi|omp)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -127,7 +138,10 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (omp turn-end
+#                  extension, written by this script; outside the worktree, loaded via -e)
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+#     __OMPMAXTIME__ omp-only `--max-time=<duration>` fragment from config/omp-max-time
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -229,6 +243,7 @@ HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+ALLOW_PROJECT_OMP_EXTENSIONS=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
@@ -263,6 +278,7 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --allow-project-omp-extensions) ALLOW_PROJECT_OMP_EXTENSIONS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
@@ -747,6 +763,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 0 ] || shared_args+=(--allow-project-omp-extensions)
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
   # spanning several modes is two invocations rather than a silent mixed dispatch.
@@ -783,7 +800,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|omp)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -804,6 +821,45 @@ else
   ARG3=${POS[2]:-}
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
+
+# Print the verified omp-only runtime-bound fragment from config/omp-max-time.
+# The first non-empty, non-comment line is authoritative, matching the existing
+# per-home text config pattern. Every healthy task observed on 2026-08-02
+# finished in 20-60 minutes, while one converge ran 9h24m until manual
+# intervention. The 3h default is roughly three times the longest healthy task,
+# and remains an operator-controlled backstop through an override or `off`.
+omp_max_time_flag() {
+  local config_file="$CONFIG/omp-max-time" line value=3h amount
+  if [ -e "$config_file" ]; then
+    [ -f "$config_file" ] || {
+      echo "error: config/omp-max-time must be a regular file containing off or a positive duration such as 3600, 10m, or 1h" >&2
+      return 1
+    }
+    value=
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      [ -n "$line" ] || continue
+      case "$line" in
+        '#'*) continue ;;
+      esac
+      value=$line
+      break
+    done < "$config_file"
+  fi
+  [ "$value" != off ] || return 0
+  case "$value" in
+    *m|*h) amount=${value%?} ;;
+    *) amount=$value ;;
+  esac
+  case "$amount" in
+    ''|0*|*[!0-9]*)
+      echo "error: config/omp-max-time must contain off or a positive integer number of seconds, minutes (10m), or hours (1h)" >&2
+      return 1
+      ;;
+  esac
+  printf -- '--max-time=%s ' "$value"
+}
 
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
@@ -844,6 +900,23 @@ launch_template() {
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    omp)
+      # omp (Oh My Pi): positional prompt starts the supervised interactive session.
+      # --auto-approve forces approvalMode=yolo for unattended runs (omp, unlike pi,
+      # HAS an approval system). Crewmate/scout load a turn-end SIGNAL extension via -e
+      # (written outside the worktree, like pi). Secondmate needs neither: its primary
+      # guard auto-discovers from the home's tracked .omp/extensions/, watcher is native.
+      # Intentionally leave --smol, --slow, --plan, --prewalk, and --no-prewalk unset.
+      # omp applies the captain's global modelRoles map to positional launches even when
+      # --model and --thinking select the parent model, and omitting both prewalk switches
+      # preserves the captain's global prewalk.enabled setting. __OMPMAXTIME__
+      # carries the 3h default or the home's override, and is empty only for `off`.
+      if [ "$kind" = secondmate ]; then
+        printf '%s' 'omp --auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      else
+        printf '%s' 'omp --auto-approve __OMPMAXTIME____MODELFLAG____EFFORTFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      fi
+      ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -887,6 +960,11 @@ case "$ARG3" in
     HARNESS=$ARG3
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
+esac
+
+OMPMAXTIME=
+case "$LAUNCH" in
+  *__OMPMAXTIME__*) OMPMAXTIME=$(omp_max_time_flag) || exit 1 ;;
 esac
 
 case "$HARNESS" in
@@ -961,7 +1039,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|omp)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -996,6 +1074,13 @@ effort_flag_for_harness() {
     pi|pi-signed)
       # Pi 0.80.6 accepts the full shared effort vocabulary, including max, through
       # its --thinking flag.
+      case "$effort" in
+        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    omp)
+      # omp accepts --thinking off|minimal|low|medium|high|xhigh|max|auto.
+      # Firstmate's full shared effort axis maps directly on omp 16.4.8.
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
@@ -1245,6 +1330,31 @@ fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
+
+omp_project_extension_preflight() {
+  local project=$1 tracked trusted
+  [ "$HARNESS" = omp ] || return 0
+  [ "$KIND" != secondmate ] || return 0
+  tracked=$(git -C "$project" ls-tree -r --name-only HEAD -- .omp/extensions 2>/dev/null || true)
+  [ -n "$tracked" ] || return 0
+  if [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 1 ]; then
+    echo "warning: launching omp with explicitly approved tracked project extensions:" >&2
+    printf '%s\n' "$tracked" | sed 's/^/  /' >&2
+    return 0
+  fi
+  trusted="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+  if [ "$tracked" = ".omp/extensions/fm-primary-turnend-guard.ts" ] \
+    && [ -f "$trusted" ] \
+    && git -C "$project" show HEAD:.omp/extensions/fm-primary-turnend-guard.ts 2>/dev/null | cmp -s - "$trusted"; then
+    return 0
+  fi
+  echo "error: refusing omp launch because the project tracks auto-executed .omp/extensions code:" >&2
+  printf '%s\n' "$tracked" | sed 's/^/  /' >&2
+  echo "omp runs tracked extensions before the model reasons about the task and firstmate passes --auto-approve. Select another verified harness, or pass --allow-project-omp-extensions only after explicit captain approval." >&2
+  return 1
+}
+
+omp_project_extension_preflight "$PROJ_ABS" || exit 1
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -1785,7 +1895,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|omp*)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -1906,6 +2016,52 @@ export default function (pi: any) {
   pi.on("agent_settled", (_event: any, ctx: any) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
     return busyEvent("idle", "agent-settled");
+  });
+  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+}
+EOF
+      ;;
+    omp*)
+      # omp is Pi-derived and takes the same explicit -e extension loader, so it
+      # carries the same semantic busy-state contract through its own event set.
+      # Written OUTSIDE the worktree for pi's trust-gate reason and so omp's
+      # per-task signal never pollutes the project; teardown cleans both suffixes.
+      cat > "$STATE/$ID.omp-ext.ts" <<EOF
+// Firstmate semantic busy-state events + turn-end notification; written by
+// fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+// Semantic state: "agent_start" -> busy when a run begins, exactly as on Pi.
+// omp DIVERGES from Pi's "agent_settled" arm on purpose. Verified live on omp
+// 17.2.1 (--print and a real interactive pane, two full turns): omp accepts an
+// "agent_settled" registration but NEVER emits it, so Pi's body copied verbatim
+// would latch this task busy forever. omp's observed per-turn sequence is
+// agent_start -> turn_end -> session_stop -> agent_end, so "agent_end", the
+// outermost run-completion event, is the idle edge here. "turn_end" is not:
+// it fires at every inner turn boundary and stays a wake NOTIFICATION touch for
+// the watcher, never current-state truth. Do not "fix" this back to
+// agent_settled without re-verifying that omp emits it.
+// ctx.isIdle() exists on omp but has not settled when agent_end fires - it
+// reads false at the instant of turn_end/session_stop/agent_end and flips true
+// within 250ms after. The idle write is therefore deferred (750ms for margin)
+// and still GUARDED by the same isIdle() check Pi uses, so an auto-retry,
+// auto-compaction retry, tool loop, or queued continuation that started in the
+// meantime keeps the state busy instead of writing a false idle. If omp exits
+// before the deferred check runs, the record stays busy and the gone endpoint
+// is reported dead by fm_busy_classify_live - no idle is ever invented.
+import { execFile } from "node:child_process";
+const busyEvent = (state: string, event: string) =>
+  new Promise<void>((resolve) => {
+    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+      "apply", "$STATE_REAL", "$ID", state,
+      "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
+    ], () => resolve());
+  });
+export default function (pi: any) {
+  pi.on("agent_start", () => busyEvent("busy", "agent-start"));
+  pi.on("agent_end", (_event: any, ctx: any) => {
+    setTimeout(() => {
+      if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+      void busyEvent("idle", "agent-end");
+    }, 750);
   });
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
@@ -2081,6 +2237,7 @@ META_WINDOW=$T
 # state/<id>.meta would print its shell diagnostic and then let the spawn report
 # success with no durable record - and, on Orca, disarm the abort cleanup below
 # and leak the worktree and terminal it just created.
+# macOS bash 3.2 skips errexit on a compound redirection failure.
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
@@ -2088,9 +2245,11 @@ sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
+sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+LAUNCH=${LAUNCH//__OMPMAXTIME__/$OMPMAXTIME}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
@@ -2098,6 +2257,7 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls

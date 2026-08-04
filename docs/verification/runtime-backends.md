@@ -28,6 +28,7 @@ zsh
 ```
 
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
+OMP 16.4.8 was observed in a pane under the exact process name `omp` on 2026-07-13, and 17.2.2 still reports that exact process name on 2026-07-31 (`ps -o comm=` against a live `omp` process).
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
 ### Agent liveness name sources

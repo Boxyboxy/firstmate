@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
 # Send one line of literal text to a crewmate endpoint, then Enter.
-# Usage: fm-send.sh <target> <text...>
+# Usage: fm-send.sh <target> [--allow-long] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
 # Special keys instead of text: fm-send.sh <target> --key Enter
+#
+# Length refusal: text longer than the MAX_TEXT_BYTES constant below is refused
+# before any send or pending-reply record is created, because a steer that long
+# does not survive a busy pane. Put the content in the task's brief and send a
+# short pointer to it instead; AGENTS.md section 7 states that contract for gate
+# decisions. --allow-long, given immediately after the target, sends the long
+# text anyway for the rare deliberate case, and is the only opt-out: the cap is
+# a local constant on purpose, not an FM_SEND_* environment tunable. The refusal
+# is text-only: --key sends, key sequences, and submit verification are untouched.
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
@@ -60,6 +69,7 @@ if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
 fi
 
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 if [ ! -d "$FM_HOME" ]; then
   echo "error: FM_HOME '$FM_HOME' is not a directory; fm-send cannot resolve this home's state" >&2
   exit 1
@@ -259,6 +269,16 @@ fi
 # send implementation. A failed backend send is still surfaced below as a hard
 # error with the attempted resolution attached.
 
+# Longest steer fm-send will type without an explicit opt-out. Two ~1,400-byte
+# steers to one busy pane both reported an unconfirmed send and genuinely never
+# arrived, while a ~230-byte pointer to the same pane landed first try.
+# AGENTS.md section 7 already says to put long instructions in a file; this is
+# what makes that enforceable instead of a rule the fleet keeps rediscovering.
+# Deliberately a plain local constant, not an FM_SEND_* environment tunable like
+# FM_SEND_RETRIES/SLEEP/SETTLE: raising the cap is not the sanctioned escape
+# from a lost steer, so the opt-out is the explicit per-call --allow-long flag.
+MAX_TEXT_BYTES=400
+
 if [ "${1:-}" = "--key" ]; then
   if [ "$TARGET_BACKEND" = remote ]; then
     if ! "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$2" < /dev/null; then
@@ -271,7 +291,24 @@ if [ "${1:-}" = "--key" ]; then
   fi
   fm_send_record_interrupt "$2" || exit 1
 else
+  ALLOW_LONG=0
+  if [ "${1:-}" = "--allow-long" ]; then
+    ALLOW_LONG=1
+    shift
+  fi
   MESSAGE=$*
+  if [ "$ALLOW_LONG" = 0 ]; then
+    MESSAGE_BYTES=$(printf '%s' "$MESSAGE" | wc -c | tr -d ' ')
+    if [ "$MESSAGE_BYTES" -gt "$MAX_TEXT_BYTES" ]; then
+      if [ -n "$TARGET_META" ]; then
+        BRIEF_HINT="$DATA/$(fm_send_id_from_meta "$TARGET_META")/brief.md"
+      else
+        BRIEF_HINT="$DATA/<id>/brief.md"
+      fi
+      echo "error: message is $MESSAGE_BYTES bytes, over the $MAX_TEXT_BYTES-byte limit; a steer this long is lost by a busy pane instead of landing. Append the content to $BRIEF_HINT, then send a short pointer such as 'READ $BRIEF_HINT, section X amended' - the absolute path, because a worker cannot find a gitignored brief by searching from its own worktree. Pass --allow-long right after the target for a deliberate long send." >&2
+      exit 1
+    fi
+  fi
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never

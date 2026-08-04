@@ -13,6 +13,7 @@ set -u
 
 CHECK="$ROOT/bin/fm-arm-pretool-check.sh"
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
+TMP_ROOT=$(fm_test_tmproot fm-arm-pretool-check)
 
 # --- full cross-harness acceptance matrix ----------------------------------
 
@@ -438,6 +439,59 @@ test_allow_is_silent_both_modes() {
 }
 
 # --- harness wiring: each adapter invokes the shared checker -----------------
+#
+# The hook-config harnesses (claude, codex, grok) are covered by the stdin schema
+# cases above, which drive the exact payload their hook forwards. The in-process
+# harnesses (opencode, pi, pi-signed, omp) refuse a tool call from inside the
+# harness instead - opencode by throwing from tool.execute.before, the Pi-derived
+# adapters by returning {block: true} from tool_call. omp is driven here against
+# the real checker so its transport is pinned: bash-only scoping, command
+# extraction, exit-2-only blocking, and the surfaced deny reason.
+
+test_omp_extension_tool_call_seatbelt() {
+  local repo ext out status=0
+  repo="$TMP_ROOT/omp-tool-call"
+  ext="$repo/.omp/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.omp/extensions" "$repo/bin"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$CHECK" "$POLICY" "$repo/bin/"
+  chmod +x "$repo/bin/fm-arm-pretool-check.sh"
+  out=$(PLUGIN="$ext" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const pi = { on(event, handler) { handlers.set(event, handler); } };
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+
+const toolCall = handlers.get("tool_call");
+if (!toolCall) throw new Error("omp extension did not register a tool_call handler");
+const call = (input, toolName = "bash") => toolCall({ type: "tool_call", toolName, input }, {});
+
+// A backgrounded arm command is the hazard the seatbelt exists for.
+const denied = await call({ command: "bin/fm-watch-arm.sh &" });
+if (denied?.block !== true) throw new Error(`backgrounded arm was not blocked: ${JSON.stringify(denied)}`);
+if (!denied.reason) throw new Error("block carried no reason for the harness to show");
+
+// Exit 2 is the only blocking code: an allowed command must pass through.
+const allowed = await call({ command: "exec bin/fm-watch-arm.sh" });
+if (allowed?.block) throw new Error(`allowed arm command was blocked: ${JSON.stringify(allowed)}`);
+const unrelated = await call({ command: "ls -la" });
+if (unrelated?.block) throw new Error(`unrelated command was blocked: ${JSON.stringify(unrelated)}`);
+
+// Scoped to bash, and inert without a usable command string.
+const otherTool = await call({ command: "bin/fm-watch-arm.sh &" }, "read");
+if (otherTool?.block) throw new Error("seatbelt escaped its bash tool scope");
+for (const input of [{}, { command: "" }, { command: null }, undefined]) {
+  const empty = await call(input);
+  if (empty?.block) throw new Error(`missing command blocked the call: ${JSON.stringify(input)}`);
+}
+EOF
+  ) || status=$?
+  expect_code 0 "$status" "omp tool_call seatbelt"
+  [ -z "$out" ] || fail "omp tool_call seatbelt test printed output: $out"
+  pass ".omp primary extension: tool_call blocks a denied bash command and passes everything else through"
+}
 
 # --- shellcheck (belt-and-suspenders; CI/CONTRIBUTING.md also runs this) -----
 
@@ -464,4 +518,5 @@ test_failopen_missing_node
 test_claude_mode_stdout_empty_on_deny
 test_default_mode_stdout_has_grok_json_on_deny
 test_allow_is_silent_both_modes
+test_omp_extension_tool_call_seatbelt
 test_shellcheck_clean

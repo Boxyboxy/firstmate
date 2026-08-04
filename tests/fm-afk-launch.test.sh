@@ -286,25 +286,29 @@ unit_lock_initialization_grace() {
 }
 
 unit_signal_exits_with_lock_cleanup() {
-  local st marker child
+  local st marker ready child
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-signal.XXXXXX")
   marker="$st/resumed"
+  ready="$st/ready"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
-    fm_afk_launch_start() { sleep 30; }
+    ready=$3
+    fm_afk_launch_start() { : > "$ready"; sleep 30; }
     fm_afk_launch_main start
     : > "$2"
-  ' _ "$LAUNCH" "$marker" &
+  ' _ "$LAUNCH" "$marker" "$ready" &
   child=$!
-  # Signal only once the lifecycle actually holds its lock. Killing before the
-  # lock exists tests nothing, and on a loaded machine it used to race: the
-  # lock could be created just after the kill and outlive the process.
+  # Signal only once the lifecycle actually holds its lock AND has entered its
+  # start step. Killing before the lock exists tests nothing, and on a loaded
+  # machine it used to race: the lock could be created just after the kill and
+  # outlive the process. The readiness marker pins the second half - the
+  # lifecycle is inside the step the signal is supposed to interrupt.
   local locked=0 _
   for _ in $(seq 1 100); do
-    if [ -d "$st/state/.afk-launch.lock" ]; then locked=1; break; fi
+    if [ -d "$st/state/.afk-launch.lock" ] && [ -e "$ready" ]; then locked=1; break; fi
     sleep 0.05
   done
-  [ "$locked" = 1 ] || fail "launcher signal: lifecycle never acquired its lock to interrupt"
+  [ "$locked" = 1 ] || fail "launcher signal: lifecycle never reached its locked start step to interrupt"
   kill -TERM "$child" 2>/dev/null || true
   wait "$child" 2>/dev/null || true
   # The signal handler releases the lock as it exits; give that removal a

@@ -940,6 +940,52 @@ test_open_decision_surfaces_end_to_end() {
   pass "an authoritative captain hold surfaces end-to-end"
 }
 
+# A hold records what one worker observed on one day, not a standing fact, so the
+# surface that enumerates decisions for the captain must carry how old each one is.
+# The failure this closes is an aged observation being presented with the
+# confidence it had the day it was filed. Ages are whole days from the filing date
+# tasks-axi records, and an undated hold stays null rather than being guessed at.
+test_open_decisions_carry_hold_age() {
+  local home mate fakebin json toon
+  home=$(make_home decision-age); write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  # Two main-home captain holds: one filed ten days before the fixture's now, one
+  # with no filing date at all.
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] ship-task - Ship the thing (repo: firstmate) (kind: ship) (since 2026-07-11)
+- [ ] scout-x - Investigate the thing data/scout-x/report.md (repo: firstmate) (kind: scout) (since 2026-07-11)
+
+## Queued
+- [ ] aged-call - Choose the export format (repo: firstmate) (kind: captain) (hold: captain decision pending) (hold-kind: captain) (since 2026-07-01)
+- [ ] undated-call - Choose the retry budget (repo: firstmate) (kind: captain) (hold: captain decision pending) (hold-kind: captain)
+
+## Done
+EOF
+  # The cross-home path carries the age the same way, from the secondmate's own home.
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] mate - Decide subscription order (repo: firstmate) (kind: ship) (since 2026-07-11)
+
+## Queued
+- [ ] mate-decision-race - Choose subscription order (repo: firstmate) (kind: captain) (hold: captain choice pending) (hold-kind: captain) (since 2026-06-11)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .id == "aged-call" and .age_days == 10))
+    and (.decisions_open | any(.[]; .id == "undated-call" and .age_days == null))
+    and (.decisions_open | any(.[]; .id == "mate/mate-decision-race" and .age_days == 30))
+  ' >/dev/null || fail "every open decision must carry whole-day hold age, null when undated: $json"
+  # The captain-facing default rendering must show it, not just the JSON parity form.
+  toon=$(run "$home" "$fakebin")
+  printf '%s' "$toon" | grep -qE '^decisions_open\[[0-9]+\]\{[^}]*age_days' \
+    || fail "the default rendering must carry age_days for decisions: $toon"
+  pass "open decisions carry their hold age, and an undated hold stays unknown"
+}
+
 test_report_pointers_surface() {
   local home fakebin json
   home=$(make_home reports); write_fixture "$home"
@@ -1921,6 +1967,7 @@ test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
+test_open_decisions_carry_hold_age
 test_report_pointers_surface
 test_superseded_queued_item_dropped_by_default
 test_include_prs_is_the_only_fetch_path
