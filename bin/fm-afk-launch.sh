@@ -6,12 +6,15 @@
 # Why this exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
 # terminal it is already in. Harnesses with a native in-pane tracked-background
-# tool (claude, grok) run it there directly and it is fine. A harness with NO
-# native background mechanism (pi) has to manufacture a terminal, and doing that
-# by SPLITTING the captain's active pane visibly shrinks it - the regression this
-# script fixes. Instead this creates a non-visible tracked terminal (a herdr tab/
-# workspace with --no-focus, or a detached tmux session) that never touches the
-# captain's active tab, and NEVER uses shell `&` (which herdr/codex can reap).
+# tool (claude, grok, omp) run it there directly and it is fine - on omp that
+# background job needs the bash tool's `timeout` set to 0, since the daemon
+# parks indefinitely and omp's default command deadline would otherwise kill it.
+# A harness with NO native background mechanism (pi) has to manufacture a
+# terminal, and doing that by SPLITTING the captain's active pane visibly
+# shrinks it - the regression this script fixes. Instead this creates a
+# non-visible tracked terminal (a herdr tab/workspace with --no-focus, or a
+# detached tmux session) that never touches the captain's active tab, and NEVER
+# uses shell `&` (which herdr/codex can reap).
 #
 # Correct supervisor targeting: the daemon finds the captain pane to inject into
 # from its OWN inherited env (discover_supervisor_target). Running it in a

@@ -509,6 +509,56 @@ test_omp_busy_signature_behavioral() {
   pass "fm_pane_is_busy classifies omp's ⟦esc⟧ footer busy, ignores idle, and does not leak across harnesses"
 }
 
+# --- remote secondmate surfaces ---------------------------------------------
+# A verified adapter is only reachable where every gate on the route names it.
+# Both gates below run before any host contact, so each case is driven to the
+# NEXT refusal (the herdr-only backend rule) to prove the harness itself was
+# accepted, and compared against an unverified name over the same fixture.
+
+seed_remote_control_home() {  # <dir> <id> -> <home>
+  local home=$1/home id=$2
+  mkdir -p "$home/bin" "$home/data" "$home/state"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  printf '%s\n' "$home"
+}
+
+test_omp_remote_secondmate_control_accepts_omp() {
+  local home out
+  home=$(seed_remote_control_home "$TMP_ROOT/remote-control" sm-omp)
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-remote-secondmate-control.sh" \
+    launch sm-omp omp - high tmux 2>&1) && fail "the remote control surface accepted a non-herdr backend"
+  assert_contains "$out" 'runs only on the herdr backend' \
+    "omp was refused at the remote secondmate harness gate instead of reaching the backend rule: $out"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-remote-secondmate-control.sh" \
+    launch sm-omp not-a-harness - high tmux 2>&1) && fail "the remote control surface accepted an unverified harness"
+  assert_contains "$out" 'unverified remote secondmate harness: not-a-harness' \
+    "the remote control surface stopped refusing unverified harnesses: $out"
+  pass "fm-remote-secondmate-control.sh launch accepts omp and still refuses an unverified harness"
+}
+
+test_omp_remote_spawn_accepts_omp() {
+  local dir home out
+  dir="$TMP_ROOT/remote-spawn"
+  home="$dir/parent"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf '%s\n' '- sm-omp - remote fixture (host: fixture-host; root: /remote/root; home: /remote/home; scope: fixture; projects: none; added 2026-08-05)' \
+    > "$home/data/secondmates.md"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    "$SPAWN" --secondmate sm-omp omp --backend tmux 2>&1) && fail "the remote spawn gate accepted a non-herdr backend"
+  assert_contains "$out" 'runs only on the herdr backend' \
+    "omp was refused at the remote spawn harness gate instead of reaching the backend rule: $out"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    "$SPAWN" --secondmate sm-omp 'omp --raw' --backend tmux 2>&1) && fail "the remote spawn gate accepted a raw launch command"
+  assert_contains "$out" 'requires a verified harness adapter' \
+    "the remote spawn gate stopped refusing a raw launch command: $out"
+  pass "fm-spawn.sh remote secondmate spawn accepts omp and still refuses a raw launch command"
+}
+
 test_omp_detection_ompcode_beats_claudecode
 test_omp_detection_ompcode_alone
 test_omp_detection_layer2_ancestry
@@ -523,5 +573,7 @@ test_omp_threads_max_effort
 test_omp_meta_records_harness
 test_omp_busy_token_defaults
 test_omp_busy_signature_behavioral
+test_omp_remote_secondmate_control_accepts_omp
+test_omp_remote_spawn_accepts_omp
 
 echo "# all fm-omp-harness tests passed"

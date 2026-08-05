@@ -55,7 +55,8 @@ case "\${1:-}:\${2:-}" in
 esac
 SH
 cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
-  "$ROOT/bin/fm-backend.sh" "$REMOTE_ROOT/bin/"
+  "$ROOT/bin/fm-backend.sh" "$ROOT/bin/fm-composer-lib.sh" \
+  "$ROOT/bin/fm-transition-lib.sh" "$REMOTE_ROOT/bin/"
 mkdir -p "$REMOTE_ROOT/bin/backends"
 cp "$ROOT/bin/backends/herdr.sh" "$REMOTE_ROOT/bin/backends/herdr.sh"
 cat > "$REMOTE_ROOT/bin/fm-mutate.sh" <<'SH'
@@ -352,6 +353,22 @@ assert_contains "$out" "required harness=claude:$DOCTOR_BIN/claude" "the remote 
 assert_not_contains "$out" 'required tools do not resolve' "a resolved required tool was still reported missing"
 pass "the remote doctor reports its required runtime tool set and optional tools"
 
+# Every verified adapter that may run a remote second mate must satisfy the
+# at-least-one harness requirement on its own, or a host that carries only that
+# harness is reported unready while the launch path would have accepted it.
+rm -f "$DOCTOR_BIN/claude"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/omp"
+chmod +x "$DOCTOR_BIN/omp"
+set +e
+out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
+set -e
+assert_contains "$out" "required harness=omp:$DOCTOR_BIN/omp" "the remote doctor did not accept omp as a verified harness"
+assert_not_contains "$out" 'required harness=MISSING' "an omp-only host was reported as having no verified harness"
+pass "the remote doctor accepts an omp-only host as satisfying the harness requirement"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/claude"
+chmod +x "$DOCTOR_BIN/claude"
+rm -f "$DOCTOR_BIN/omp"
+
 out=$(fm_on ios fm-probe-two.sh)
 assert_contains "$out" "home=$REMOTE_HOME" "first dynamic command stopped resolving"
 ARGV_TWO="$REMOTE_HOME/argv-two.bin"
@@ -431,6 +448,16 @@ assert_contains "$out" 'doctor does not match the trusted bootstrap identity' \
 cp "$ROOT/bin/fm-remote-doctor.sh" "$REMOTE_ROOT/bin/fm-remote-doctor.sh"
 chmod +x "$REMOTE_ROOT/bin/fm-remote-doctor.sh"
 pass "doctor bootstrap remains authenticated when git is unavailable"
+
+# The pin is the only authorization the git-less bootstrap has, so it must be
+# re-taken in the SAME change that edits the doctor. Assert it directly rather
+# than leaving the drift to surface as the confusing refusal above.
+PINNED_DOCTOR_SHA=$(sed -n 's/^DOCTOR_SHA256=//p' "$ROOT/bin/fm-remote-entrypoint.sh")
+ACTUAL_DOCTOR_SHA=$( (shasum -a 256 "$ROOT/bin/fm-remote-doctor.sh" || sha256sum "$ROOT/bin/fm-remote-doctor.sh") 2>/dev/null | awk '{print $1}')
+[ -n "$PINNED_DOCTOR_SHA" ] || fail "bin/fm-remote-entrypoint.sh no longer pins a doctor digest"
+[ "$PINNED_DOCTOR_SHA" = "$ACTUAL_DOCTOR_SHA" ] \
+  || fail "bin/fm-remote-entrypoint.sh pins $PINNED_DOCTOR_SHA but bin/fm-remote-doctor.sh hashes to $ACTUAL_DOCTOR_SHA; re-pin it in this change"
+pass "the entrypoint's pinned doctor digest matches the doctor it authorizes"
 
 if FM_HOME="$LOCAL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_SSH_BIN="$FAKEBIN/fake-ssh" \
   "$ROOT/bin/fm-on.sh" '-oProxyCommand=bad' fm-probe-two.sh >/dev/null 2>&1; then

@@ -24,9 +24,9 @@
       [0m[38;2;156;163;176m-> etc[0m
 
  [0m[38;2;107;114;128mMCP finished with failures. Connected:              [0m
- [0m[38;2;107;114;128mcompound-engineering:context7, node_repl. Failed:   [0m
- [0m[38;2;107;114;128mcomputer-use: ENOENT: no such file or directory,    [0m
- [0m[38;2;107;114;128mposix_spawn '~/.codex/Codex Computer Use.app…[0m       
+ [0m[38;2;107;114;128mdocs-server, repl-server. Failed:                   [0m
+ [0m[38;2;107;114;128mdemo-tool: ENOENT: no such file or directory,       [0m
+ [0m[38;2;107;114;128mposix_spawn '~/.local/share/demo-tool.app…[0m          
 
 [0m[38;2;74;80;88m╭──[0m[48;2;15;18;22m [0m[38;2;0;180;255m[48;2;15;18;22mπ [0m[48;2;15;18;22m [0m[38;2;42;48;56m[48;2;15;18;22m>[0m[48;2;15;18;22m [0m[38;2;0;180;255m[48;2;15;18;22m⬢ Haiku 4.5[0m[38;2;0;255;136m[48;2;15;18;22m++[0m[48;2;15;18;22m [0m[38;2;42;48;56m[48;2;15;18;22m>[0m[48;2;15;18;22m [0m[38;2;232;236;244m[48;2;15;18;22m🗑 …r/tmp[0m[48;2;15;18;22m [0m[38;2;15;18;22m▶[0m[38;2;74;80;88m─────────────────╮[0m
 [0m[38;2;74;80;88m╰─ [0mCAPTAIN HALF TYPED SENTENCE                    [0m[38;2;74;80;88m ─╯[0m

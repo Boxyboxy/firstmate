@@ -46,6 +46,8 @@ If the captain asks for a new harness, propose verifying it first: spawn a trivi
 - `bin/fm-session-start.sh`: the primary turn-end load-health check, when the harness loads its guard through an extension or hook.
 - The primary PreToolUse-equivalent hook, `docs/arm-pretool-check.md`, and `docs/cd-guard.md`: wire both shared seatbelts when the harness exposes a blocking pre-tool callback.
 - `bin/fm-teardown.sh`: cleanup of any per-task turn-end extension or hook files, at both the primary and secondmate-child sites.
+- The remote-secondmate surfaces, when the adapter may run a secondmate on a remote host: the verified-harness cases in `bin/fm-spawn.sh` (remote spawn) and `bin/fm-remote-secondmate-control.sh` (`cmd_launch`), plus `HARNESS_TOOLS` in `bin/fm-remote-doctor.sh` so readiness can discover the tool.
+  Editing the doctor also means re-taking `DOCTOR_SHA256` in `bin/fm-remote-entrypoint.sh`, which is the git-less bootstrap's only authorization.
 - `bin/fm-turnend-guard.sh`: the header classification comment (direct-blocking vs passive vs return-value).
 - `bin/fm-supervision-instructions.sh`: the `SNIPPET` case and the `repair_line()` per-harness arm.
 - `docs/supervision-protocols/<harness>.md` and `docs/turnend-guard.md`: the watcher-wake protocol and the turn-end guard entry.

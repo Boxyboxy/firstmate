@@ -3194,6 +3194,12 @@ test_composer_state_pi_separator_requires_safe_native_identity() {
 # which reads the SGR styling, so a de-styled or hand-typed copy would exercise
 # bytes real omp never emits.
 #
+# Only operator-identifying VALUES were redacted afterwards (paths, spend,
+# context percentage, PR and task text, MCP server names). The escape-sequence
+# stream is byte-identical to the recording and every redacted row keeps its
+# original display width, so the styled runs the classifier reads are the real
+# ones.
+#
 # omp draws its composer as a bottom-anchored rounded PAIR - a status row
 # `╭── π > … ▶───╮` with the input row `╰─ <typed text> ─╯` directly below it.
 # Neither row starts AND ends with the same side-border glyph, so before the
@@ -3286,6 +3292,65 @@ test_composer_state_omp_orphan_arc_closer_is_not_a_composer() {
   [ "$out" = unknown ] || fail "a content-spanning transcript box must not classify as a composer, got '$out'"
 
   pass "fm_backend_herdr_composer_state: a leftover or spanning rounded box is never mistaken for omp's composer"
+}
+
+# THE PRECEDENCE DEFECT. Pi's shape is any row of 8+ `─` and nothing else, which
+# an omp transcript produces on its own (a rendered markdown thematic break, an
+# agent-printed divider). When such a row sat below the last generic match, the
+# Pi arms of the shared classifier claimed the verdict FIRST and omp's own arc
+# pair below them was never consulted: a complete pair kept the stale generic
+# reading (an idle omp pane holding unsubmitted captain text read `empty`, the
+# exact away-mode overwrite this adapter exists to prevent) and a single
+# unmatched row returned `unknown` forever, so escalations were never delivered.
+# The winner is now the candidate LOWEST on screen, whichever harness owns it.
+omp_composer_verdict_capture() {  # <case-id> <capture> <agent> <status>
+  local dir log resp fb
+  dir="$TMP_ROOT/composer-omp-$1"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s' "$2" > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"%s","agent_status":"%s"}}}\n' "$3" "$4" > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT"
+}
+
+omp_capture_rows() { printf '%s\n' "$@"; }
+
+test_composer_state_omp_arc_pair_outranks_higher_pi_separators() {
+  # Each stale generic row carries the OPPOSITE content to the live composer
+  # below it, so every assertion below fails loudly on the stale reading rather
+  # than agreeing with it by coincidence.
+  local stale_blank=' │                              │'
+  local stale_text=' │ stale bordered transcript row │'
+  local sep='──────────────────────────'
+  local open='╭── π  > ⬢ model ▶─────────────╮'
+  local typed='╰─ captain half typed        ─╯'
+  local blank='╰─                           ─╯'
+  local out
+
+  # A COMPLETE Pi separator pair between the stale generic row and omp's live
+  # composer: the arc pair is lower, so it decides. The stale row is empty and
+  # the composer holds unsubmitted text - the exact away-mode overwrite shape.
+  out=$(omp_composer_verdict_capture pair-above \
+    "$(omp_capture_rows "$stale_blank" "$sep" 'divider content' "$sep" "$open" "$typed")" omp idle)
+  [ "$out" = pending ] || fail "unsubmitted omp composer text below a complete Pi separator pair must read pending, got '$out'"
+  out=$(omp_composer_verdict_capture pair-above-empty \
+    "$(omp_capture_rows "$stale_text" "$sep" 'divider content' "$sep" "$open" "$blank")" omp idle)
+  [ "$out" = empty ] || fail "an empty omp composer below a complete Pi separator pair must read empty, got '$out'"
+
+  # A SINGLE unmatched separator row above the live composer, which used to pin
+  # the pane at unknown for as long as the divider stayed in view.
+  out=$(omp_composer_verdict_capture orphan-above \
+    "$(omp_capture_rows "$stale_blank" "$sep" "$open" "$typed")" omp idle)
+  [ "$out" = pending ] || fail "unsubmitted omp composer text below a lone Pi separator must read pending, got '$out'"
+
+  # The refusal side of the same rule: when a Pi-shaped candidate is the LOWEST
+  # shape on screen, omp's arc pair above it is not the live composer, so the
+  # stale generic row above it must not be inherited either.
+  out=$(omp_composer_verdict_capture pair-below \
+    "$(omp_capture_rows "$stale_text" "$open" "$typed" "$sep" 'divider content' "$sep")" omp idle)
+  [ "$out" = unknown ] || fail "an omp pane whose lowest shape is a Pi separator pair must refuse, got '$out'"
+
+  pass "fm_backend_herdr_composer_state: omp's arc pair is decided by screen position, never shadowed by Pi separator rows"
 }
 
 # --- composer_state: unbordered (bare) composer rows -------------------------
@@ -4482,6 +4547,7 @@ test_composer_state_pi_separator_requires_safe_native_identity
 test_composer_state_omp_rounded_pair_reads_real_captures
 test_composer_state_omp_rounded_pair_requires_safe_native_identity
 test_composer_state_omp_orphan_arc_closer_is_not_a_composer
+test_composer_state_omp_arc_pair_outranks_higher_pi_separators
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins

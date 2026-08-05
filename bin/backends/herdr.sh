@@ -2826,6 +2826,7 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
   local identity agent agent_status row=0 generic_line=0
+  local pi_claim="" pi_line=0 omp_line=0 resolved=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
@@ -2858,15 +2859,57 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
         ;;
     esac
   done < <(printf '%s\n' "$cap")
-  # Pi has no prompt glyph or side border. Compare its bottom-most complete
-  # separator pair with the last generic match so an earlier bordered transcript
-  # row can never suppress the live Pi composer. Identity is consulted only when
-  # a lower separator pair could change the verdict.
+  # Neither Pi (bare rows between horizontal separators) nor omp (an adjacent
+  # rounded-arc pair) carries a prompt glyph or a side border, so each is
+  # compared against the last generic match AND against the other by SCREEN
+  # POSITION: the lowest candidate on screen is the live composer. Position, not
+  # branch order, decides - a fixed order would let a Pi-shaped row that happens
+  # to sit above omp's arc pair claim the verdict on an omp pane and hand back a
+  # stale generic reading. Identity is consulted only when a lower candidate
+  # could change the verdict.
   fm_backend_herdr_pi_composer_find "$cap"
   fm_backend_herdr_omp_composer_find "$cap"
+  local pi_claim="" pi_line=0 omp_line=0 resolved=0
   if [ "$FM_BACKEND_HERDR_PI_PAIR_FOUND" -eq 1 ] \
      && [ "$FM_BACKEND_HERDR_PI_PAIR_LINE" -gt "$generic_line" ] \
      && [ "$generic_line" -lt "$FM_BACKEND_HERDR_PI_PAIR_OPEN_LINE" ]; then
+    pi_claim=pair
+    pi_line=$FM_BACKEND_HERDR_PI_PAIR_LINE
+  elif [ "$FM_BACKEND_HERDR_PI_PAIR_FOUND" -eq 0 ] \
+       && [ "$FM_BACKEND_HERDR_PI_LAST_SEPARATOR_LINE" -gt "$generic_line" ]; then
+    pi_claim=orphan
+    pi_line=$FM_BACKEND_HERDR_PI_LAST_SEPARATOR_LINE
+  fi
+  if [ "$FM_BACKEND_HERDR_OMP_PAIR_FOUND" -eq 1 ] \
+     && [ "$FM_BACKEND_HERDR_OMP_PAIR_LINE" -gt "$generic_line" ] \
+     && [ "$generic_line" -lt "$FM_BACKEND_HERDR_OMP_PAIR_OPEN_LINE" ]; then
+    omp_line=$FM_BACKEND_HERDR_OMP_PAIR_LINE
+  fi
+  if [ "$omp_line" -gt "$pi_line" ]; then
+    # omp's rounded composer pair is the bottom-most candidate, so a bordered
+    # transcript row, a splash row, or a Pi-shaped separator above it is not the
+    # live composer.
+    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    case "$agent:$agent_status" in
+      omp:idle|omp:done|omp:blocked)
+        shape=rounded
+        raw_match=$FM_BACKEND_HERDR_OMP_CONTENT
+        found=1
+        resolved=1
+        ;;
+      omp:*|:*)
+        # A working omp or an unreadable identity cannot authorize injection,
+        # and the lower arc pair proves any generic row above it is stale.
+        found=0
+        resolved=1
+        ;;
+      *) : ;; # A known non-omp agent falls through to the Pi rules below.
+    esac
+  fi
+  if [ "$resolved" -eq 0 ] && [ "$pi_claim" = pair ]; then
     identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
     IFS=$'\t' read -r agent agent_status <<EOF
 $identity
@@ -2881,42 +2924,19 @@ EOF
           found=0
         fi
         ;;
-      pi:*|:*)
+      pi:*|omp:*|:*)
         # A working Pi or unreadable identity cannot authorize injection, and
         # the lower separator pair proves any generic row above is not current.
+        # An omp pane reaches this arm only when its own arc pair is absent or
+        # sits higher, which proves the same thing about the generic row.
         found=0
         ;;
       *) : ;; # A known non-Pi agent keeps its established generic verdict.
     esac
-  elif [ "$FM_BACKEND_HERDR_PI_PAIR_FOUND" -eq 0 ] \
-       && [ "$FM_BACKEND_HERDR_PI_LAST_SEPARATOR_LINE" -gt "$generic_line" ]; then
+  elif [ "$resolved" -eq 0 ] && [ "$pi_claim" = orphan ]; then
     # A lower unmatched separator proves the generic row is stale, but does
     # not provide the complete Pi composer structure required for injection.
     found=0
-  elif [ "$FM_BACKEND_HERDR_OMP_PAIR_FOUND" -eq 1 ] \
-       && [ "$FM_BACKEND_HERDR_OMP_PAIR_LINE" -gt "$generic_line" ] \
-       && [ "$generic_line" -lt "$FM_BACKEND_HERDR_OMP_PAIR_OPEN_LINE" ]; then
-    # omp's rounded composer pair sits below the last generic match, so a
-    # bordered transcript or splash row above it is not the live composer.
-    # Deliberately the LAST branch of this chain: every Pi refusal above keeps
-    # precedence, so this can only ADD a recognized shape, never weaken one.
-    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
-    IFS=$'\t' read -r agent agent_status <<EOF
-$identity
-EOF
-    case "$agent:$agent_status" in
-      omp:idle|omp:done|omp:blocked)
-        shape=rounded
-        raw_match=$FM_BACKEND_HERDR_OMP_CONTENT
-        found=1
-        ;;
-      omp:*|:*)
-        # A working omp or an unreadable identity cannot authorize injection,
-        # and the lower arc pair proves any generic row above it is stale.
-        found=0
-        ;;
-      *) : ;; # A known non-omp agent keeps its established generic verdict.
-    esac
   fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   # Content: extract the real typed text from the raw row with the shared,

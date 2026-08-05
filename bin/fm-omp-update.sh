@@ -25,7 +25,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_HOME="${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-SECONDMATES_MD="$FM_HOME/data/secondmates.md"
+SECONDMATES_MD="${FM_DATA_OVERRIDE:-$FM_HOME/data}/secondmates.md"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh

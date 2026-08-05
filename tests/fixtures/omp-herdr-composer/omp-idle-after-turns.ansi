@@ -24,9 +24,9 @@
       [0m[38;2;156;163;176m-> etc[0m
 
  [0m[38;2;107;114;128mMCP finished with failures. Connected:              [0m
- [0m[38;2;107;114;128mcompound-engineering:context7, node_repl. Failed:   [0m
- [0m[38;2;107;114;128mcomputer-use: ENOENT: no such file or directory,    [0m
- [0m[38;2;107;114;128mposix_spawn '~/.codex/Codex Computer Use.app…[0m       
+ [0m[38;2;107;114;128mdocs-server, repl-server. Failed:                   [0m
+ [0m[38;2;107;114;128mdemo-tool: ENOENT: no such file or directory,       [0m
+ [0m[38;2;107;114;128mposix_spawn '~/.local/share/demo-tool.app…[0m          
 
 [0m[48;2;15;18;22m                                                     [0m
 [0m[48;2;15;18;22m CAPTAIN HALF TYPED SENTENCE                         [0m
