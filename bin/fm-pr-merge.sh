@@ -66,6 +66,9 @@
 # already landed must not be merged a second time: a retry after a merge whose
 # report was lost records the metadata and reports the landing rather than
 # failing, which is the wrapper's idempotence kept rather than lost with it.
+# That answer is reached before the classification below, not after it, because
+# a landed PR has no merge decision left to classify - including the retry after
+# an authorized merge over checks that are still red.
 # --allow-red-checks is the captain-authorized exception. It merges anyway and
 # records merge_checks_override=<reason> in the task's meta before the merge, so
 # the decision stays durable. The record is written above the canonical pr= line
@@ -127,6 +130,9 @@ caller_has_merge_method() {
 
 # The repository comes only from the URL and the head commit comes only from the
 # check state this merge classified, so neither may be supplied by the caller.
+# Every arm matches the flag's attached-value spelling too, because gh's parser
+# accepts --flag=value for all of these - including the boolean --admin - and a
+# refusal that only knows one spelling of a flag is not a refusal.
 # --admin joins them because "never merge a red PR" leans on the forge's own
 # required-check and review gates as its backstop, and administrator merge is
 # exactly the flag that lands a PR past them. The classification above already
@@ -144,7 +150,7 @@ reject_derived_overrides() {
         echo "error: extra merge arguments must not override the head commit; it comes only from the check state this merge classified" >&2
         return 1
         ;;
-      --admin)
+      --admin|--admin=*)
         echo "error: extra merge arguments must not include --admin; merging past the forge's own required checks and reviews is not something this guarded path does" >&2
         return 1
         ;;
@@ -424,6 +430,18 @@ record_checks_override() {  # <reason>  (empty clears any prior record)
   [ "$FM_PR_META_URL" = "$URL" ]
 }
 
+# Record the canonical pr= reference (and any pr_head=) teardown verifies landed
+# work against, and confirm it landed in the file. Every path that stops here
+# stops the whole run, so a task whose PR reference could not be recorded never
+# reaches a merge or reports a landing.
+record_pr_metadata() {
+  "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL" || exit $?
+  grep -qxF "pr=$URL" "$META" || {
+    echo "error: PR metadata recording failed" >&2
+    exit 1
+  }
+}
+
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ] || [ -L "$META" ]; then
@@ -464,6 +482,22 @@ else
   [ -z "$CHECK_READ_DETAIL" ] || UNREADABLE="$UNREADABLE: $CHECK_READ_DETAIL"
 fi
 
+# A PR that already landed has no merge decision left to classify, so this comes
+# before the refusals rather than after them. This path is re-run exactly when a
+# merge succeeded but its report did not survive, and on that retry the rollup
+# still reads however it read when the merge was authorized - red included.
+# Refusing there would report "refusing to merge" about a PR with nothing left to
+# merge, and would withhold the pr= reference teardown needs to verify the work
+# that did land. Recording that reference is the whole remaining job. Any
+# override record stays untouched: the authorized merge it describes may be the
+# one that landed, and reconciling it away here would erase a true record of how
+# this PR reached the base branch.
+if [ "$PR_STATE" = MERGED ]; then
+  record_pr_metadata
+  echo "note: PR $URL is already merged; recorded its metadata and left the merge alone" >&2
+  exit 0
+fi
+
 if [ -n "$UNREADABLE" ]; then
   # A partly-read rollup can be unreadable AND already red. Both facts are
   # reported, because "retry once gh can reach the PR" is the wrong action when
@@ -496,22 +530,7 @@ elif [ "$CHECK_FAIL" -gt 0 ]; then
   OVERRIDE_REASON="failing checks: $(failing_summary)"
 fi
 
-"$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
-grep -qxF "pr=$URL" "$META" || {
-  echo "error: PR metadata recording failed" >&2
-  exit 1
-}
-
-# A PR that already landed has nothing left to merge, and this path is re-run
-# exactly when a merge succeeded but its report did not survive. Recording the
-# metadata is still the job, so that happens above and the merge itself is left
-# alone. Any override record stays untouched: the authorized merge it describes
-# may be the one that landed, and reconciling it away here would erase a true
-# record of how this PR reached the base branch.
-if [ "$PR_STATE" = MERGED ]; then
-  echo "note: PR $URL is already merged; recorded its metadata and left the merge alone" >&2
-  exit 0
-fi
+record_pr_metadata
 
 # Durably record the authorized exception before merging, so the decision
 # survives even if the merge itself is interrupted. A merge that needs no

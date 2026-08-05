@@ -43,9 +43,11 @@
 #       short-form method counts as an explicit choice, and a value that is not a
 #       merge method is refused rather than becoming a flag
 #   (v) --admin is refused, because this path does not merge past the forge's own
-#       required checks and reviews
-#   (w) a PR that already landed records its metadata and stops, keeping any
-#       override record of the authorized merge that landed
+#       required checks and reviews, and every rejected flag is refused in its
+#       attached-value spelling too
+#   (w) a PR that already landed records its metadata and stops - before any
+#       classification, so a landed PR whose checks still read red is reported
+#       rather than refused - keeping the override record of the merge that landed
 #   (s) the script's own rollup filter, not a mock's copy of what it emits, reads
 #       recorded forge payloads: a failing check run, a failing commit status, a
 #       declared-but-unreported required status, an all-skipped rollup, and a
@@ -575,6 +577,38 @@ test_admin_merge_args_refuse_before_recording() {
   pass "fm-pr-merge refuses an administrator merge before recording state"
 }
 
+# gh's parser accepts --flag=value for every one of these, booleans included, so
+# a refusal that only knows the bare spelling is not a refusal. Each rejected
+# flag is checked in the form that would otherwise slip past it.
+test_attached_value_override_args_refuse() {
+  local case_dir rc spelling n=80
+  for spelling in --repo=wrong/repo \
+    --match-head-commit=0000000000000000000000000000000000000000 \
+    --admin=true; do
+    case_dir=$(make_case "attached-value-${spelling%%=*}")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" 9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a
+    : > "$case_dir/merge.log"
+    : > "$case_dir/gh-axi.log"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "https://github.com/example/repo/pull/$n" -- "$spelling" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "attached-value: $spelling should be refused like its bare spelling"
+    assert_grep 'extra merge arguments must not' "$case_dir/stderr" \
+      "attached-value: refusal did not explain why $spelling is not the caller's to set"
+    assert_no_grep "pr=https://github.com/example/repo/pull/$n" "$case_dir/state/task-x1.meta" \
+      "attached-value: $spelling was recorded before the refusal"
+    assert_no_grep 'pr merge' "$case_dir/merge.log" \
+      "attached-value: $spelling reached gh pr merge"
+    n=$((n + 1))
+  done
+  pass "fm-pr-merge refuses a derived override in its attached-value spelling too"
+}
+
 # This path is re-run exactly when a merge landed but its report did not survive.
 # The PR has nothing left to merge, so recording its metadata is the whole job -
 # and a second merge attempt would fail on a PR that is already closed.
@@ -626,14 +660,23 @@ test_already_merged_pr_keeps_its_override_record() {
   assert_grep 'merge_checks_override=failing checks:' "$meta" \
     "already-merged-override: the authorized attempt did not record its override"
 
-  # The merge in fact landed; only its report was lost.
+  # The merge in fact landed; only its report was lost. The retry carries no
+  # flag, because the operator is not asking for anything to be merged - and the
+  # rollup still reads red, exactly as it did when the merge was authorized, so
+  # a classification that ran here would refuse a PR with nothing left to merge.
   add_gh_mocks "$case_dir" 8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f
   : > "$case_dir/merge.log"
   FM_TEST_PR_STATE=MERGED FM_TEST_ROLLUP="$ROLLUP_RED" \
-    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/28 --allow-red-checks \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/28 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" \
-    || fail "already-merged-override: re-running against a landed PR should succeed"
+    || fail "already-merged-override: re-running against a landed red PR should succeed without the flag"
 
+  assert_no_grep 'refusing to merge' "$case_dir/stderr" \
+    "already-merged-override: a landed PR was refused over checks it had already merged past"
+  assert_grep 'already merged' "$case_dir/stderr" \
+    "already-merged-override: the retry did not report that the PR had already landed"
+  assert_grep 'pr=https://github.com/example/repo/pull/28' "$meta" \
+    "already-merged-override: the retry withheld the PR reference teardown needs"
   assert_grep 'merge_checks_override=failing checks:' "$meta" \
     "already-merged-override: the record of the authorized merge that landed was erased"
   assert_no_grep 'pr merge' "$case_dir/merge.log" \
@@ -1366,6 +1409,7 @@ test_method_equals_merge_method_not_overridden
 test_method_with_separate_value_is_translated
 test_short_form_merge_method_not_overridden
 test_admin_merge_args_refuse_before_recording
+test_attached_value_override_args_refuse
 test_already_merged_pr_is_idempotent
 test_already_merged_pr_keeps_its_override_record
 test_parses_pr_url_for_gh_axi
