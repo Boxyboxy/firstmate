@@ -1598,6 +1598,139 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
   pass "fm-turnend-guard --claude: secondmate home re-blocks unclaimed and allows auto-arm-claimed stops"
 }
 
+# omp is the third turn-end blocking class: not an exit-2 Stop hook process
+# (claude, codex) and not a passive lifecycle callback that injects a bounded
+# follow-up (opencode, pi, pi-signed), but a return-value block - the
+# session_stop handler returns {continue: true, additionalContext} when the
+# shared guard exits 2. These two cases drive the real tracked extension.
+make_omp_extension_repo() {
+  local repo=$1 ext
+  ext="$repo/.omp/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.omp/extensions" "$repo/bin"
+  # omp only auto-discovers COMMITTED .omp/extensions/*.ts, so the guard MUST be
+  # git-tracked or it silently never loads and the primary turns blind.
+  git -C "$ROOT" ls-files --error-unmatch .omp/extensions/fm-primary-turnend-guard.ts >/dev/null 2>&1 \
+    || fail "omp primary extension must be git-tracked so omp auto-discovers it"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'guard\n' >> "${FM_GUARD_LOG:?}"
+[ -e "${FM_GUARD_ALLOW:?}" ] && exit 0
+printf 'omp session_stop guard fired\n' >&2
+exit 2
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh"
+  printf '%s\n' "$ext"
+}
+
+test_omp_extension_forces_continuation() {
+  local repo home ext log allow out status runs
+  repo="$TMP_ROOT/omp-session-stop-root"
+  home="$TMP_ROOT/omp-session-stop-home"
+  log="$TMP_ROOT/omp-session-stop-guard.log"
+  allow="$TMP_ROOT/omp-session-stop-allow"
+  mkdir -p "$home/state"
+  ext=$(make_omp_extension_repo "$repo")
+  : > "$log"
+  out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" FM_GUARD_ALLOW="$allow" \
+    node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let messages = 0;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  sendUserMessage() {
+    messages += 1;
+  },
+  sendMessage() {
+    messages += 1;
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+
+// omp blocks at session_stop. It does also emit turn_end every turn, but for
+// omp that is a wake notification only - turning it into a continuation or a
+// message injection would be a lazy copy of the pi extension, whose transport
+// omp does not support. So turn_end must stay inert here whether or not the
+// guard binds it at all.
+// (No apostrophes in this heredoc: bash 3.2 mis-parses one inside $(...).)
+if (!handlers.has("session_stop")) throw new Error("session_stop handler was not registered");
+const turnEnd = handlers.get("turn_end");
+if (turnEnd) {
+  const spurious = await turnEnd({ type: "turn_end", turnIndex: 0 }, {});
+  if (spurious) throw new Error(`turn_end produced a turn decision: ${JSON.stringify(spurious)}`);
+  if (messages !== 0) throw new Error("turn_end injected a message instead of staying a wake notification");
+}
+const stop = handlers.get("session_stop");
+
+const blind = await stop({ type: "session_stop" }, {});
+if (blind?.continue !== true) throw new Error(`blind stop did not force a continuation: ${JSON.stringify(blind)}`);
+const context = blind.additionalContext ?? "";
+if (!context.includes("TURN WOULD END BLIND")) throw new Error(`continuation lost the blind-turn banner: ${context}`);
+if (!context.includes("session-start operating block")) throw new Error(`continuation lost the harness-neutral repair wording: ${context}`);
+if (!context.includes("omp session_stop guard fired")) throw new Error(`continuation did not carry the guard reason: ${context}`);
+if (messages !== 0) throw new Error("omp forced its continuation through a message instead of the return value");
+
+// One-shot per-episode loop guard: the stop that the forced continuation itself
+// produces must pass through, and must not even re-run the guard.
+const suppressed = await stop({ type: "session_stop" }, {});
+if (suppressed) throw new Error(`per-episode loop guard did not release the follow-on stop: ${JSON.stringify(suppressed)}`);
+
+const reengaged = await stop({ type: "session_stop" }, {});
+if (reengaged?.continue !== true) throw new Error("guard did not re-engage on the next unhealthy stop");
+await stop({ type: "session_stop" }, {});
+
+// A healthy guard (exit 0) must never force a continuation.
+writeFileSync(process.env.FM_GUARD_ALLOW, "");
+const healthy = await stop({ type: "session_stop" }, {});
+if (healthy) throw new Error(`a healthy stop forced a continuation: ${JSON.stringify(healthy)}`);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "omp session_stop must block by returning continue+additionalContext"
+  [ -z "$out" ] || fail "omp session_stop guard test printed output: $out"
+  runs=$(grep -c guard "$log")
+  [ "$runs" = 3 ] || fail "loop-guard-suppressed stops must not re-run the guard: $runs guard runs for 5 stops"
+  assert_present "$home/state/.omp-turnend-extension-loaded" \
+    "omp extension must write its own loaded marker for session-start diagnostics"
+  assert_absent "$home/state/.pi-turnend-extension-loaded" \
+    "omp extension must write the omp marker, not pi's"
+  pass ".omp primary extension: session_stop forces one continuation per episode through the shared guard"
+}
+
+test_omp_extension_marker_respects_session_lock() {
+  local repo home ext pid out status
+  repo="$TMP_ROOT/omp-marker-lock-root"
+  home="$TMP_ROOT/omp-marker-lock-home"
+  mkdir -p "$home/state"
+  ext=$(make_omp_extension_repo "$repo")
+  sleep 30 &
+  pid=$!
+  printf '%s\n' "$pid" > "$home/state/.lock"
+  out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$TMP_ROOT/omp-marker-lock.log" \
+    FM_GUARD_ALLOW="$TMP_ROOT/omp-marker-lock-allow" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+await import(pathToFileURL(process.env.PLUGIN).href);
+EOF
+  )
+  status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "omp extension must load cleanly in a home another session holds"
+  [ -z "$out" ] || fail "omp marker lock test printed output: $out"
+  assert_absent "$home/state/.omp-turnend-extension-loaded" \
+    "omp extension must not stamp its loaded marker over a live foreign session lock"
+  pass ".omp primary extension: the loaded marker respects a live foreign session lock"
+}
+
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -1644,6 +1777,8 @@ test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
+test_omp_extension_forces_continuation
+test_omp_extension_marker_respects_session_lock
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive

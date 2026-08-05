@@ -228,8 +228,8 @@ A human-blocked permission dialog has no busy banner and still surfaces.
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.
-The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked.
-A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
+The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked, or an omp rounded-arc pair admitted on the same conjunction with identity exactly omp.
+A working Pi or omp, pending middle row, missing identity, incomplete separator pair, non-adjacent arc pair, or over-tall candidate remains pending or unknown.
 
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.

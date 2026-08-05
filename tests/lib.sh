@@ -34,6 +34,15 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Hermetic harness detection: firstmate resolves its own harness from env markers
+# (bin/fm-harness.sh checks OMPCODE, CLAUDECODE, PI_CODING_AGENT, GROK_AGENT). A dev
+# box running one of those harnesses (e.g. omp exports OMPCODE=1) would otherwise leak
+# its marker into detection and make harness-pinned tests non-deterministic. Clear them
+# so every test starts from a clean baseline; a test that needs a specific harness sets
+# the marker inline (e.g. `CLAUDECODE=1 some-cmd`). These markers only affect fm-harness
+# detection, nothing else in bin/.
+unset OMPCODE CLAUDECODE PI_CODING_AGENT GROK_AGENT
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

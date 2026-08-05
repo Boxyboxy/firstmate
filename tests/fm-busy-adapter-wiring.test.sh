@@ -108,6 +108,70 @@ if (process.env.MODE === "turn-end") {
 EOF
 }
 
+# Load the omp per-task extension in a bare Node host and fire one lifecycle
+# handler. omp's idle edge is agent_end plus a DEFERRED ctx.isIdle() re-check
+# (omp never emits agent_settled, and isIdle() has not settled when agent_end
+# fires - see the comment in bin/fm-spawn.sh's omp arm), so the end-* modes
+# must outlive that timer before the host exits or the idle write is lost.
+# Modes: agent-start, end-idle, end-continuing, turn-end.
+drive_omp_ext() {
+  EXT_PATH="$1" MODE="$2" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
+const handlers = {};
+mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+const ctx = { isIdle: () => process.env.MODE !== "end-continuing" };
+switch (process.env.MODE) {
+  case "agent-start": await handlers["agent_start"]({}, ctx); break;
+  case "end-idle": await handlers["agent_end"]({}, ctx); break;
+  case "end-continuing": await handlers["agent_end"]({}, ctx); break;
+  case "turn-end": await handlers["turn_end"]({}, ctx); break;
+  default: throw new Error("unknown mode " + process.env.MODE);
+}
+// The omp arm defers its guarded idle write by 750ms; wait past it.
+const settle = process.env.MODE === "turn-end" ? 200 : 1400;
+await new Promise((resolve) => setTimeout(resolve, settle));
+EOF
+}
+
+# omp carries the same semantic contract as Pi through its own event set: busy on
+# agent_start, idle only at agent_end when the deferred ctx.isIdle() re-check
+# still says the run settled, and turn_end stays a wake notification.
+test_omp_extension_semantic_lifecycle() {
+  local rec id=busy-omp-1 out state ext
+  rec=$(make_spawn_case omp-lifecycle omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  assert_present "$ext" "omp spawn did not write the per-task extension"
+
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_omp_ext "$ext" turn-end) || fail "turn_end drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "turn_end no longer touches the notification marker"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "turn_end must stay a notification, not a state edge, got '$out'"
+
+  out=$(drive_omp_ext "$ext" agent-start) || fail "agent_start drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "agent_start must classify 'busy omp-ext', got '$out'"
+
+  # The guard must survive the deferral: a run that is still going at the
+  # re-check writes nothing, exactly as Pi's synchronous isIdle() guard does.
+  out=$(drive_omp_ext "$ext" end-continuing) || fail "continuing agent_end drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "an agent_end while another run continues must stay busy, got '$out'"
+
+  out=$(drive_omp_ext "$ext" end-idle) || fail "settled agent_end drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "a settled agent_end must classify 'idle omp-ext', got '$out'"
+  pass "omp extension reports agent_start busy, settles idle only via the deferred ctx.isIdle() re-check at agent_end, and keeps turn_end a notification"
+}
+
 test_pi_extension_semantic_lifecycle() {
   local rec id=busy-pi-1 out state ext
   rec=$(make_spawn_case pi-lifecycle pi "$id")
@@ -345,6 +409,7 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
+test_omp_extension_semantic_lifecycle
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle

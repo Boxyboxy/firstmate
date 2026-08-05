@@ -175,7 +175,7 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 ## 4. Harness and runtime dispatch
 
 Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
-The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `kimi`, plus `muse` for crewmates and scouts only; never dispatch on an unverified adapter.
+The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, and `omp`, plus `muse` for crewmates and scouts only; never dispatch on an unverified adapter.
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.
@@ -503,6 +503,11 @@ Firstmate's shared instruction surface reaches running homes only after it lands
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are loaded by a running firstmate; public `skills/` is an installer-facing surface.
 When the captain invokes `/updatefirstmate` or asks to update firstmate, load the `/updatefirstmate` skill.
 It performs guarded fast-forward updates of firstmate and registered secondmate homes, refreshes instructions, and never touches anything under `projects/`.
+The same run also refreshes the machine-wide `omp` executable through the channel `which omp` already resolves, reporting that channel plus the before and after versions.
+That swap is the one part of `/updatefirstmate` that reaches beyond this repo, so it installs only when every worker recorded here and in every registered local secondmate home is confirmed stopped; a live worker, an endpoint it cannot classify, or a home or registry it cannot read is a refusal to relay, never a reason to proceed, and workers on a remote secondmate's own machine never block it.
+The unattended overnight run stays detect-only (`--check`) and can never install.
+When the captain invokes `/omp-firstmate-leverage`, asks to update omp and firstmate together, asks whether firstmate is leveraging omp, or when that recurring sweep comes due, load the `omp-firstmate-leverage` skill.
+It owns the omp update, the fast-forward, the merge into the local omp adapter branch, and the audit of which omp capabilities firstmate never uses.
 
 ## 13. Agent-only reference skills
 
