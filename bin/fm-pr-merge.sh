@@ -12,7 +12,7 @@
 #
 # Red-PR refusal: AGENTS.md states "Never merge a red PR" as an absolute rule,
 # so this path reads the PR's check rollup as structured data through
-# `gh pr view --json statusCheckRollup` - the same JSON-and-filter idiom
+# `gh pr view --json statusCheckRollup,headRefOid` - the same JSON-and-filter idiom
 # bin/fm-pr-check.sh uses for its head reference - and classifies every entry
 # here instead of consuming another tool's rendered pass/fail/pending summary.
 # That rendering mapped a failing commit status, the shape external CI posts
@@ -49,6 +49,15 @@
 # therefore part of the check state: a view that reports no usable head is
 # unreadable like any other incomplete rollup, and the head the caller may not
 # override, exactly as the repository comes only from the URL.
+# A pin is only a pin if the forge evaluates it, so the merge is issued through
+# `gh pr merge --match-head-commit`, which sends the head as a precondition
+# GitHub itself enforces. The ergonomic gh-axi wrapper builds its gh argv from a
+# fixed flag allowlist and passes nothing else through, so a pin handed to it
+# would be dropped without a word and every guarantee below would be theatre.
+# gh is already this path's hard dependency for the rollup read above, so the
+# merge uses the one CLI that can enforce what was classified. gh spells the
+# merge method as a shorthand flag and has no --method, so a caller that names
+# one is translated rather than silently losing its choice.
 # --allow-red-checks is the captain-authorized exception. It merges anyway and
 # records merge_checks_override=<reason> in the task's meta before the merge, so
 # the decision stays durable. The record is written above the canonical pr= line
@@ -57,7 +66,7 @@
 # left by an earlier authorized attempt, so the metadata describes the merge that
 # actually happened rather than an override that no longer applies.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--allow-red-checks]
-#                       [-- <extra gh-axi pr merge args>]
+#                       [-- <extra gh pr merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -124,6 +133,47 @@ reject_derived_overrides() {
 
 reject_derived_overrides "$@" || exit 1
 
+# Rewrite a caller's --method <m> into the shorthand flag gh understands. The
+# value is checked against the three methods that exist, because an unchecked one
+# would become an arbitrary flag on the merge command line - including the very
+# flags rejected just above.
+normalize_merge_method() {
+  local method
+  MERGE_ARGV=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --method|--method=*)
+        if [ "$1" = --method ]; then
+          [ "$#" -ge 2 ] || {
+            echo "error: --method requires one of merge, squash, or rebase" >&2
+            return 1
+          }
+          method=$2
+          shift 2
+        else
+          method=${1#--method=}
+          shift
+        fi
+        case "$method" in
+          merge|squash|rebase) ;;
+          *)
+            echo "error: --method must be one of merge, squash, or rebase" >&2
+            return 1
+            ;;
+        esac
+        MERGE_ARGV+=("--$method")
+        ;;
+      *)
+        MERGE_ARGV+=("$1")
+        shift
+        ;;
+    esac
+  done
+}
+
+normalize_merge_method "$@" || exit 1
+set -- "${MERGE_ARGV[@]+"${MERGE_ARGV[@]}"}"
+
 # An interrupt between mktemp and mv must not leave a private temp file behind,
 # the same reason bin/fm-pr-check.sh traps its own meta temp.
 MERGE_META_TMP=
@@ -174,7 +224,7 @@ read_check_state() {
     return 1
   }
   out=$(gh pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
-    --json statusCheckRollup -q "$CHECK_ROLLUP_FILTER" 2>"$GH_ERR_FILE") || {
+    --json statusCheckRollup,headRefOid -q "$CHECK_ROLLUP_FILTER" 2>"$GH_ERR_FILE") || {
     CHECK_READ_DETAIL=$(gh_error_detail)
     [ -n "$CHECK_READ_DETAIL" ] || CHECK_READ_DETAIL="the CLI failed without reporting a reason"
     return 1
@@ -458,4 +508,4 @@ if ! caller_has_merge_method "$@"; then
   merge_args+=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
