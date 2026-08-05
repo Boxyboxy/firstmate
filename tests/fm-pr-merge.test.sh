@@ -32,6 +32,12 @@
 #       differs per cause
 #   (r) recording an authorized override preserves every unrelated meta field
 #       and leaves no private temp file behind
+#   (r2) a clean retry after an authorized attempt whose merge failed clears the
+#       stale override, so the record describes the merge that happened
+#   (t) the merge is pinned to the head whose checks were classified: a commit
+#       pushed into the window between the check read and the merge does not
+#       land, an unmoved head still merges, a rollup with no head is unreadable,
+#       and the caller may not supply the pin
 #   (s) the script's own rollup filter, not a mock's copy of what it emits, reads
 #       recorded forge payloads: a failing check run, a failing commit status, a
 #       declared-but-unreported required status, an all-skipped rollup, and a
@@ -65,16 +71,20 @@ make_case() {
 }
 
 # The check gate reads the rollup as structured data through
-# `gh pr view --json statusCheckRollup -q <filter>`, so the mock answers what
-# that filter emits: a "rollup|<count>" header followed by one
+# `gh pr view --json statusCheckRollup,headRefOid -q <filter>`, so the mock
+# answers what that filter emits: a "head|<sha>" header naming the commit the
+# rollup describes, a "rollup|<count>" header, then one
 # "<conclusion>|<state>|<name>" row per entry, where a check run carries a
 # conclusion and a commit status carries a state. Rows come from FM_TEST_ROLLUP
 # (the ROLLUP_EMPTY sentinel means a rollup with no entries at all),
 # FM_TEST_ROLLUP_COUNT can disagree with the rows on purpose, and
 # FM_TEST_ROLLUP_RC makes the query itself fail the way a filter error does.
+# The head comes from the case's head file, which is what a case that moves the
+# PR's head mid-run rewrites; the HEAD_ABSENT sentinel reports none at all.
 ROLLUP_GREEN='SUCCESS||Lint shell scripts
 SUCCESS||Test coverage guard'
 ROLLUP_EMPTY='__no_checks__'
+HEAD_ABSENT='__no_head__'
 
 # FM_TEST_ROLLUP_FIXTURE switches the mock from emitting those rows to replaying
 # a recorded payload through the script's own -q filter, which is the only way
@@ -98,6 +108,11 @@ GH_ROLLUP_MOCK_BODY='
           [ -z "${FM_TEST_ROLLUP_ERR:-}" ] || printf "%s\n" "$FM_TEST_ROLLUP_ERR" >&2
           exit "${FM_TEST_ROLLUP_RC}"
         fi
+        head=
+        if [ "${FM_TEST_ROLLUP_HEAD:-}" != "__no_head__" ] && [ -f "$FM_TEST_HEAD_FILE" ]; then
+          head=$(cat "$FM_TEST_HEAD_FILE")
+        fi
+        printf "head|%s\n" "$head"
         rows=$FM_TEST_ROLLUP
         [ "$rows" = "__no_checks__" ] && rows=
         count=${FM_TEST_ROLLUP_COUNT:-}
@@ -112,9 +127,12 @@ GH_ROLLUP_MOCK_BODY='
 
 # gh-axi mock recording every invocation to a log file, and gh mock answering
 # both headRefOid for fm-pr-check.sh's pr_head lookup and the check rollup for
-# the red-PR gate. Args: case_dir head_sha
+# the red-PR gate. The PR's head lives in a file rather than baked into the mock,
+# because it is a property of the PR that a case may move mid-run rather than a
+# constant. Args: case_dir head_sha
 add_gh_mocks() {
   local case_dir=$1 head=$2
+  printf '%s\n' "$head" > "$case_dir/head"
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
@@ -126,7 +144,7 @@ case "\${1:-} \${2:-}" in
   "pr view")
 $GH_ROLLUP_MOCK_BODY
     case " \$* " in
-      *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *headRefOid*) cat "\$FM_TEST_HEAD_FILE" ; exit 0 ;;
     esac
     ;;
 esac
@@ -136,9 +154,11 @@ SH
 }
 
 # gh-axi mock that fails the merge call but succeeds everything else, so a
-# real merge failure is distinguishable from the recording step.
+# real merge failure is distinguishable from the recording step. Args: case_dir
+# head_sha
 add_gh_mocks_merge_fails() {
-  local case_dir=$1
+  local case_dir=$1 head=$2
+  printf '%s\n' "$head" > "$case_dir/head"
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
@@ -152,6 +172,58 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
 $GH_ROLLUP_MOCK_BODY
+    case " \$* " in
+      *headRefOid*) cat "\$FM_TEST_HEAD_FILE" ; exit 0 ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# The forge's own head-pin enforcement, plus a PR whose head moves between the
+# check read and the merge. The rollup read answers the head that was classified;
+# fm-pr-check.sh's later headRefOid lookup rewrites the head file, standing in
+# for a commit pushed to the PR branch inside that window; and gh-axi then
+# refuses any merge whose --match-head-commit is not the head current at merge
+# time, which is what `gh pr merge --match-head-commit` does against the real
+# forge. Args: case_dir classified_head pushed_head
+add_gh_mocks_head_moves() {
+  local case_dir=$1 classified=$2 pushed=$3
+  printf '%s\n' "$classified" > "$case_dir/head"
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "pr merge")
+    want=
+    prev=
+    for arg in "$@"; do
+      [ "$prev" = "--match-head-commit" ] && want=$arg
+      prev=$arg
+    done
+    current=$(cat "$FM_TEST_HEAD_FILE")
+    if [ -n "$want" ] && [ "$want" != "$current" ]; then
+      echo "error: Head branch was modified. Review and try the merge again." >&2
+      exit 1
+    fi
+    printf 'merged %s\n' "$current" >> "$FM_TEST_MERGED_LOG"
+    ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+$GH_ROLLUP_MOCK_BODY
+    case " \$* " in
+      *headRefOid*)
+        printf '%s\n' '$pushed' > "\$FM_TEST_HEAD_FILE"
+        printf '%s\n' '$pushed'
+        exit 0 ;;
+    esac
     ;;
 esac
 exit 0
@@ -164,10 +236,13 @@ run_pr_merge() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_MERGED_LOG="$case_dir/merged.log" \
+  FM_TEST_HEAD_FILE="$case_dir/head" \
   FM_TEST_ROLLUP="${FM_TEST_ROLLUP:-$ROLLUP_GREEN}" \
   FM_TEST_ROLLUP_COUNT="${FM_TEST_ROLLUP_COUNT:-}" \
   FM_TEST_ROLLUP_RC="${FM_TEST_ROLLUP_RC:-0}" \
   FM_TEST_ROLLUP_ERR="${FM_TEST_ROLLUP_ERR:-}" \
+  FM_TEST_ROLLUP_HEAD="${FM_TEST_ROLLUP_HEAD:-}" \
   FM_TEST_ROLLUP_FIXTURE="${FM_TEST_ROLLUP_FIXTURE:-}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
@@ -197,7 +272,7 @@ test_records_pr_and_head_before_merging() {
     "records-before-merge: pr= was not recorded"
   assert_grep 'pr_head=deadbeefcafefeed0000000000000000deadbeef' "$case_dir/state/task-x1.meta" \
     "records-before-merge: pr_head= was not recorded"
-  grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 9 --repo example/repo --match-head-commit deadbeefcafefeed0000000000000000deadbeef --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
   pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
 }
@@ -206,7 +281,7 @@ test_merge_failure_propagates_after_recording() {
   local case_dir rc
   case_dir=$(make_case merge-fails)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks_merge_fails "$case_dir"
+  add_gh_mocks_merge_fails "$case_dir" 1313131313131313131313131313131313131313
   : > "$case_dir/gh-axi.log"
 
   set +e
@@ -231,7 +306,7 @@ test_extra_merge_args_forwarded() {
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/15 -- --squash --delete-branch \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "extra-args: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 15 --repo example/repo --squash --delete-branch' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 15 --repo example/repo --match-head-commit 2222222222222222222222222222222222222222 --squash --delete-branch' "$case_dir/gh-axi.log" \
     || fail "extra-args: extra gh-axi pr merge flags were not forwarded"
   pass "fm-pr-merge forwards extra flags to gh-axi pr merge after the -- separator"
 }
@@ -346,7 +421,7 @@ test_explicit_merge_method_not_overridden() {
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/22 -- --merge \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "explicit-merge-method: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 22 --repo example/repo --merge' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 22 --repo example/repo --match-head-commit 5555555555555555555555555555555555555555 --merge' "$case_dir/gh-axi.log" \
     || fail "explicit-merge-method: caller --merge was not forwarded without an extra default --squash"
   pass "fm-pr-merge does not add default --squash when the caller passes an explicit merge method"
 }
@@ -361,7 +436,7 @@ test_method_equals_merge_method_not_overridden() {
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/23 -- --method=merge \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "method-equals-merge-method: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 23 --repo example/repo --method=merge' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 23 --repo example/repo --match-head-commit 7777777777777777777777777777777777777777 --method=merge' "$case_dir/gh-axi.log" \
     || fail "method-equals-merge-method: caller --method=merge was not forwarded without an extra default --squash"
   pass "fm-pr-merge respects --method=<value> as an explicit merge method"
 }
@@ -376,7 +451,7 @@ test_parses_pr_url_for_gh_axi() {
   run_pr_merge "$case_dir" task-x1 https://github.com/my-org/my-repo/pull/126 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "url-parsing: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 126 --repo my-org/my-repo --squash' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 126 --repo my-org/my-repo --match-head-commit 6666666666666666666666666666666666666666 --squash' "$case_dir/gh-axi.log" \
     || fail "url-parsing: gh-axi pr merge was not invoked as number + --repo + default --squash"
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
@@ -431,7 +506,7 @@ test_no_configured_checks_are_not_red() {
     > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "no-checks-configured: fm-pr-merge should merge a PR with no checks configured"
 
-  grep -qxF 'pr merge 32 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 32 --repo example/repo --match-head-commit bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb --squash' "$case_dir/gh-axi.log" \
     || fail "no-checks-configured: a repo with no required checks was blocked from merging"
   assert_no_grep 'merge_checks_override=' "$case_dir/state/task-x1.meta" \
     "no-checks-configured: an unused override was recorded"
@@ -454,7 +529,7 @@ test_pending_checks_do_not_block() {
     > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "pending-checks: fm-pr-merge should not refuse a PR whose checks are only pending"
 
-  grep -qxF 'pr merge 33 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 33 --repo example/repo --match-head-commit cccccccccccccccccccccccccccccccccccccccc --squash' "$case_dir/gh-axi.log" \
     || fail "pending-checks: pending checks blocked the merge"
   assert_grep '2 check(s)' "$case_dir/stderr" \
     "pending-checks: merging over pending checks was silent"
@@ -482,7 +557,7 @@ NEUTRAL||Build' \
     > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "all-skipped-checks: fm-pr-merge should not refuse a rollup that is only skipped"
 
-  grep -qxF 'pr merge 34 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 34 --repo example/repo --match-head-commit dddddddddddddddddddddddddddddddddddddddd --squash' "$case_dir/gh-axi.log" \
     || fail "all-skipped-checks: an all-skipped rollup blocked the merge"
   assert_grep 'all 5 check(s)' "$case_dir/stderr" \
     "all-skipped-checks: merging an all-skipped rollup was silent"
@@ -526,7 +601,7 @@ test_allow_red_checks_merges_and_records_override() {
     || fail "allow-red-checks: an authorized exception should still merge"
 
   meta="$case_dir/state/task-x1.meta"
-  grep -qxF 'pr merge 35 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 35 --repo example/repo --match-head-commit eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee --squash' "$case_dir/gh-axi.log" \
     || fail "allow-red-checks: the authorized merge did not reach gh-axi"
   assert_grep 'merge_checks_override=failing checks:' "$meta" \
     "allow-red-checks: the authorized override was not recorded durably"
@@ -694,7 +769,7 @@ test_expected_status_is_pending() {
     > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "expected-status: a declared-but-unreported required status is not red"
 
-  grep -qxF 'pr merge 52 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 52 --repo example/repo --match-head-commit 3030303030303030303030303030303030303030 --squash' "$case_dir/gh-axi.log" \
     || fail "expected-status: an EXPECTED required status blocked the merge"
   assert_grep '1 check(s)' "$case_dir/stderr" \
     "expected-status: merging over a declared-but-unreported status was silent"
@@ -761,23 +836,188 @@ test_override_record_preserves_every_meta_field() {
   pass "fm-pr-merge preserves every unrelated meta field when recording an override"
 }
 
+# A durable record that outlives the state it describes is worse than none: it
+# asserts a captain authorization for a merge that never needed one. An
+# authorized attempt whose merge then fails leaves exactly that behind, and the
+# clean retry that follows - CI fixed, no flag - has to reconcile it.
+test_clean_retry_clears_a_stale_override() {
+  local case_dir meta field rc
+  case_dir=$(make_case stale-override-cleared)
+  mkdir -p "$case_dir/wt"
+  meta="$case_dir/state/task-x1.meta"
+  add_gh_mocks_merge_fails "$case_dir" 4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_ROLLUP="$ROLLUP_RED" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/73 --allow-red-checks \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "stale-override-cleared: the first attempt should propagate the merge failure"
+  assert_grep 'merge_checks_override=failing checks:' "$meta" \
+    "stale-override-cleared: the authorized attempt did not record its override"
+
+  # The operator fixes CI and retries with no flag: the checks are green now, so
+  # the meta must not keep claiming this merge was authorized over a red state.
+  add_gh_mocks "$case_dir" 4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b
+  : > "$case_dir/gh-axi.log"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/73 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "stale-override-cleared: the clean retry should merge"
+
+  grep -qxF 'pr merge 73 --repo example/repo --match-head-commit 4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b --squash' "$case_dir/gh-axi.log" \
+    || fail "stale-override-cleared: the clean retry did not reach gh-axi"
+  assert_no_grep 'merge_checks_override=' "$meta" \
+    "stale-override-cleared: a green merge inherited the earlier attempt's override record"
+  for field in "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes"; do
+    grep -qxF "$field" "$meta" \
+      || fail "stale-override-cleared: clearing the override dropped $field from task meta"
+  done
+  assert_grep 'pr=https://github.com/example/repo/pull/73' "$meta" \
+    "stale-override-cleared: the canonical pr= line did not survive the rewrite"
+  [ -z "$(find "$case_dir/state" -name '.fm-pr-merge-meta.*' -print -quit)" ] \
+    || fail "stale-override-cleared: a private meta temp file was left behind in state/"
+  pass "fm-pr-merge clears a stale override record when a later merge needs none"
+}
+
+# The rollup is read before bin/fm-pr-check.sh runs and the merge happens after
+# it, so the two are seconds to minutes apart. A commit pushed into that window
+# would otherwise land a head whose checks were never classified, which is the
+# state "never merge a red PR" exists to prevent, so the merge is pinned to the
+# head the classified rollup described and the forge refuses it instead.
+test_head_pushed_after_the_check_read_does_not_merge() {
+  local case_dir rc
+  case_dir=$(make_case head-moves-mid-run)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_head_moves "$case_dir" \
+    7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a \
+    9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/merged.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/70 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "head-moves-mid-run: a head pushed after the check read must not merge"
+  grep -qxF 'pr merge 70 --repo example/repo --match-head-commit 7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a --squash' "$case_dir/gh-axi.log" \
+    || fail "head-moves-mid-run: the merge was not pinned to the head whose checks were classified"
+  [ ! -s "$case_dir/merged.log" ] \
+    || fail "head-moves-mid-run: a head whose checks were never classified was merged"
+  pass "fm-pr-merge refuses to land a head pushed after the check state was read"
+}
+
+# The pin must not block the ordinary case it protects: a PR whose head has not
+# moved since the rollup was read still merges, under that same enforcement.
+test_unmoved_head_merges_under_its_pin() {
+  local case_dir
+  case_dir=$(make_case head-unchanged)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_head_moves "$case_dir" \
+    8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c \
+    8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/merged.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "head-unchanged: an unmoved head should still merge"
+
+  grep -qxF 'merged 8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c' "$case_dir/merged.log" \
+    || fail "head-unchanged: the pin blocked a merge whose head never moved"
+  pass "fm-pr-merge merges a PR whose head has not moved since the check read"
+}
+
+# The head is part of the check state: a rollup with no head to attach it to
+# establishes nothing that survives to merge time, so it is unreadable like any
+# other incomplete read - and the authorized exception that merges anyway says
+# out loud that it merged unpinned.
+test_missing_head_is_unreadable() {
+  local case_dir rc
+  case_dir=$(make_case rollup-without-head)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_ROLLUP_HEAD="$HEAD_ABSENT" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/72 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "rollup-without-head: a rollup with no head should refuse"
+  assert_grep 'could not read the check state' "$case_dir/stderr" \
+    "rollup-without-head: a headless rollup was not treated as unreadable"
+  assert_grep 'no usable head commit' "$case_dir/stderr" \
+    "rollup-without-head: the refusal did not name the missing head"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "rollup-without-head: an unpinnable merge reached gh-axi pr merge"
+
+  : > "$case_dir/gh-axi.log"
+  FM_TEST_ROLLUP_HEAD="$HEAD_ABSENT" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/72 --allow-red-checks \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "rollup-without-head: an authorized exception should still merge"
+  grep -qxF 'pr merge 72 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "rollup-without-head: the authorized merge did not reach gh-axi unpinned"
+  assert_grep 'not pinned' "$case_dir/stderr" \
+    "rollup-without-head: an unpinned authorized merge left no evidence that it was unpinned"
+  pass "fm-pr-merge refuses a rollup it cannot pin, and says so when authorized to merge anyway"
+}
+
+# The head comes only from the check state this merge classified, exactly as the
+# repository comes only from the URL, so a caller-supplied pin is refused rather
+# than silently replacing the one guarantee the pin exists to make.
+test_head_override_args_refuse_before_recording() {
+  local case_dir rc
+  case_dir=$(make_case head-override)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/74 \
+    -- --match-head-commit 0000000000000000000000000000000000000000 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "head-override: fm-pr-merge should refuse a caller-supplied head pin"
+  assert_grep 'must not override the head commit' "$case_dir/stderr" \
+    "head-override: refusal did not explain the head override"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/74' "$case_dir/state/task-x1.meta" \
+    "head-override: the PR URL was recorded before rejecting the head override"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "head-override: a head override armed a merge poll"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "head-override: gh-axi pr merge was invoked despite the head override"
+  pass "fm-pr-merge refuses caller-supplied head pins before recording state"
+}
+
 # The rollup filter is the only forge-facing logic in this gate, and every case
 # above mocks below it: the mock emits the "<conclusion>|<state>|<name>" rows the
 # filter would have produced, so the filter itself is never evaluated and a drift
 # between it and the forge's data - the exact defect this gate was rewritten to
 # fix - would go unnoticed. These cases replay recorded
-# `gh pr view --json statusCheckRollup` payloads through the script's own -q
-# filter, so the `.state // ""` arm that sees a failing external commit status,
-# the `.name // .context` fallback that names one, and the error(...) branch that
-# makes a missing rollup unreadable all run.
+# `gh pr view --json statusCheckRollup,headRefOid` payloads through the script's
+# own -q filter, so the `.state // ""` arm that sees a failing external commit
+# status, the `.name // .context` fallback that names one, the headRefOid the
+# merge is pinned to, and the error(...) branch that makes a missing rollup
+# unreadable all run.
 # Caveat: the CLI evaluates -q with its embedded jq, so replaying through system
 # jq gates the filter's semantics rather than byte-identical evaluation. jq is
 # not a firstmate dependency, so these cases skip where it is absent, the same
 # way this suite gates its other optional tooling.
 #
 # The payloads under tests/fixtures/gh-status-check-rollup/ were recorded from
-# `gh pr view <url> --json statusCheckRollup` with gh 2.92.0 (2026-04-28), then
-# had their repository, run, and deployment URLs rewritten to example/repo.
+# `gh pr view <url> --json statusCheckRollup,headRefOid` with gh 2.92.0
+# (2026-04-28), then had their repository, run, and deployment URLs rewritten to
+# example/repo and their headRefOid to a synthetic sha.
 # A CheckRun node carries a `conclusion` and no `state`, while a StatusContext
 # node - how external CI posts through the statuses API - carries a `state` and a
 # `context` rather than a `name`, and reading only the conclusion is what once let
@@ -846,7 +1086,7 @@ test_real_filter_reads_an_expected_required_status() {
   run_fixture_case fixture-expected-status expected-required-status.json 62
   [ "$FIXTURE_RC" -eq 0 ] \
     || fail "fixture-expected-status: a declared-but-unreported required status is not red"
-  grep -qxF 'pr merge 62 --repo example/repo --squash' "$FIXTURE_DIR/gh-axi.log" \
+  grep -qxF 'pr merge 62 --repo example/repo --match-head-commit f27c5b8039ea146d7b0c9f3a25de8471c0693b5e --squash' "$FIXTURE_DIR/gh-axi.log" \
     || fail "fixture-expected-status: a recorded EXPECTED status blocked the merge"
   assert_grep 'still pending' "$FIXTURE_DIR/stderr" \
     "fixture-expected-status: merging over a declared-but-unreported status left no evidence"
@@ -857,7 +1097,7 @@ test_real_filter_reads_an_all_skipped_rollup() {
   run_fixture_case fixture-all-skipped all-skipped.json 63
   [ "$FIXTURE_RC" -eq 0 ] \
     || fail "fixture-all-skipped: a rollup that is only skipped or cancelled is not red"
-  grep -qxF 'pr merge 63 --repo example/repo --squash' "$FIXTURE_DIR/gh-axi.log" \
+  grep -qxF 'pr merge 63 --repo example/repo --match-head-commit a3f1c07d5e9b48126d0a7f4c39be2015d8c6740b --squash' "$FIXTURE_DIR/gh-axi.log" \
     || fail "fixture-all-skipped: a recorded all-skipped rollup blocked the merge"
   assert_grep 'all 4 check(s)' "$FIXTURE_DIR/stderr" \
     "fixture-all-skipped: merging a recorded all-skipped rollup was silent"
@@ -914,4 +1154,9 @@ test_expected_status_is_pending
 test_unreadable_refusal_names_the_cause
 test_allow_red_checks_merges_and_records_override
 test_override_record_preserves_every_meta_field
+test_clean_retry_clears_a_stale_override
+test_head_pushed_after_the_check_read_does_not_merge
+test_unmoved_head_merges_under_its_pin
+test_missing_head_is_unreadable
+test_head_override_args_refuse_before_recording
 test_recorded_rollup_payloads

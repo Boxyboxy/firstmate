@@ -61,15 +61,19 @@ make_case() {
 printf 'guard\n' >> "$FM_TEST_GUARD_LOG"
 SH
   chmod +x "$fake_root/bin/fm-guard.sh"
-  # statusCheckRollup answers one green check run, so the merge wrapper's red-PR
-  # refusal (bin/fm-pr-merge.sh) sees an established, non-failing check state;
-  # these cases exercise URL derivation and poll safety, not the check gate.
+  # statusCheckRollup answers the PR's head and one green check run, so the merge
+  # wrapper's red-PR refusal (bin/fm-pr-merge.sh) sees an established,
+  # non-failing check state that it can pin the merge to; these cases exercise
+  # URL derivation and poll safety, not the check gate.
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
-  *statusCheckRollup*) printf 'rollup|1\nSUCCESS||Lint shell scripts\n' ;;
+  *statusCheckRollup*)
+    printf 'head|%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+    printf 'rollup|1\nSUCCESS||Lint shell scripts\n'
+    ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
@@ -553,8 +557,8 @@ test_valid_recording_and_merge_derivation() {
   : > "$dir/gh-axi.log"
   run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 -- --merge \
     >/dev/null 2>/dev/null || fail "valid merge wrapper failed"
-  grep -qxF 'pr merge 37 --repo my-org/repo_name.with-dots --merge' "$dir/gh-axi.log" \
-    || fail "merge wrapper did not preserve repository derivation and method"
+  grep -qxF 'pr merge 37 --repo my-org/repo_name.with-dots --match-head-commit 0123456789abcdef0123456789abcdef01234567 --merge' "$dir/gh-axi.log" \
+    || fail "merge wrapper did not preserve repository derivation, head pin, and method"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged-watch.out" 2> "$dir/merged-watch.err"
   rc=$?

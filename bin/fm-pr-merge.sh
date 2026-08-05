@@ -6,8 +6,9 @@
 # arguments, never as an interpolated URL.
 #
 # Merge method defaults to --squash when the caller passes none of --squash,
-# --merge, --rebase, or --method after the optional -- separator. Extra args
-# must not include --repo or -R because the repository comes only from the URL.
+# --merge, --rebase, or --method after the optional -- separator. Extra args must
+# not include --repo or -R because the repository comes only from the URL, nor
+# --match-head-commit because the head comes only from the check state below.
 #
 # Red-PR refusal: AGENTS.md states "Never merge a red PR" as an absolute rule,
 # so this path reads the PR's check rollup as structured data through
@@ -39,10 +40,22 @@
 #     already red reports both facts, because "retry the CLI" is the wrong
 #     action for a check that failed and an override recorded as unreadable
 #     alone would lose the evidence that motivated it.
+# The classification is only worth as much as the commit it describes, so the
+# same read that returns the rollup returns the PR's headRefOid, and the merge is
+# pinned to it with --match-head-commit. Reading the rollup and merging are
+# seconds to minutes apart - bin/fm-pr-check.sh runs in between - and without the
+# pin a commit pushed inside that window would land a head whose checks were
+# never classified, which is the state this gate exists to prevent. The head is
+# therefore part of the check state: a view that reports no usable head is
+# unreadable like any other incomplete rollup, and the head the caller may not
+# override, exactly as the repository comes only from the URL.
 # --allow-red-checks is the captain-authorized exception. It merges anyway and
 # records merge_checks_override=<reason> in the task's meta before the merge, so
 # the decision stays durable. The record is written above the canonical pr= line
 # because bin/fm-pr-lib.sh's metadata identity parse rejects unknown keys after it.
+# The record is reconciled, not only written: a later clean merge clears a record
+# left by an earlier authorized attempt, so the metadata describes the merge that
+# actually happened rather than an override that no longer applies.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--allow-red-checks]
 #                       [-- <extra gh-axi pr merge args>]
 set -eu
@@ -91,7 +104,9 @@ caller_has_merge_method() {
   return 1
 }
 
-reject_repo_overrides() {
+# The repository comes only from the URL and the head commit comes only from the
+# check state this merge classified, so neither may be supplied by the caller.
+reject_derived_overrides() {
   local arg
   for arg in "$@"; do
     case "$arg" in
@@ -99,11 +114,15 @@ reject_repo_overrides() {
         echo "error: extra merge arguments must not override the repository" >&2
         return 1
         ;;
+      --match-head-commit|--match-head-commit=*)
+        echo "error: extra merge arguments must not override the head commit; it comes only from the check state this merge classified" >&2
+        return 1
+        ;;
     esac
   done
 }
 
-reject_repo_overrides "$@" || exit 1
+reject_derived_overrides "$@" || exit 1
 
 # An interrupt between mktemp and mv must not leave a private temp file behind,
 # the same reason bin/fm-pr-check.sh traps its own meta temp.
@@ -116,13 +135,15 @@ pr_merge_cleanup() {
 trap pr_merge_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-# The rollup is asked for as data, not prose: a "rollup|<count>" header the forge
-# itself counts, then one "<conclusion>|<state>|<name>" row per entry. The name
-# is last so a name containing the separator still parses, and conclusion and
-# state are forge enums that cannot contain one. A missing or non-array rollup
-# field errors out of the filter, so a read that cannot see the rollup fails
-# instead of looking green and empty.
-CHECK_ROLLUP_FILTER='if (.statusCheckRollup | type) == "array" then (.statusCheckRollup | "rollup|\(length)", (.[] | [(.conclusion // ""), (.state // ""), ((.name // .context // "") | gsub("[\n\r]"; " "))] | join("|"))) else error("statusCheckRollup is missing from the PR view") end'
+# The rollup is asked for as data, not prose: a "head|<sha>" header naming the
+# commit the rollup describes, a "rollup|<count>" header the forge itself counts,
+# then one "<conclusion>|<state>|<name>" row per entry. The name is last so a
+# name containing the separator still parses, and conclusion and state are forge
+# enums that cannot contain one. The head comes from this same read so it is the
+# head the rollup was computed for, not whatever the branch points at by the time
+# the merge runs. A missing or non-array rollup field errors out of the filter,
+# so a read that cannot see the rollup fails instead of looking green and empty.
+CHECK_ROLLUP_FILTER='if (.statusCheckRollup | type) == "array" then ("head|\(.headRefOid // "")", (.statusCheckRollup | "rollup|\(length)", (.[] | [(.conclusion // ""), (.state // ""), ((.name // .context // "") | gsub("[\n\r]"; " "))] | join("|")))) else error("statusCheckRollup is missing from the PR view") end'
 
 # Collapse whatever the CLI wrote to stderr into one bounded line. An expired
 # token, a missing scope, a rate limit, and a filter error each need a different
@@ -137,14 +158,16 @@ gh_error_detail() {
   printf '%s' "$detail"
 }
 
-# Read the PR's check rollup once. Sets CHECK_TOTAL to the count the forge
-# reports and CHECK_ROWS to its rows, and returns 1 when the state could not be
-# established at all (CLI failure, or output that does not carry the header),
-# leaving CHECK_READ_DETAIL naming the cause.
+# Read the PR's check rollup once. Sets CHECK_HEAD to the head commit the rollup
+# describes, CHECK_TOTAL to the count the forge reports and CHECK_ROWS to its
+# rows, and returns 1 when the state could not be established at all (CLI
+# failure, or output that does not carry the headers), leaving CHECK_READ_DETAIL
+# naming the cause.
 read_check_state() {
   local out header
   CHECK_ROWS=
   CHECK_TOTAL=0
+  CHECK_HEAD=
   CHECK_READ_DETAIL=
   GH_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-gh.XXXXXX") || {
     CHECK_READ_DETAIL="the CLI's diagnostics could not be captured"
@@ -156,6 +179,19 @@ read_check_state() {
     [ -n "$CHECK_READ_DETAIL" ] || CHECK_READ_DETAIL="the CLI failed without reporting a reason"
     return 1
   }
+  header=${out%%$'\n'*}
+  case "$header" in
+    "head|"*) CHECK_HEAD=${header#head|} ;;
+    *)
+      CHECK_READ_DETAIL="the rollup query returned no head header"
+      return 1
+      ;;
+  esac
+  [ "$out" != "$header" ] || {
+    CHECK_READ_DETAIL="the rollup query returned no usable header"
+    return 1
+  }
+  out=${out#*$'\n'}
   header=${out%%$'\n'*}
   case "$header" in
     "rollup|"*) CHECK_TOTAL=${header#rollup|} ;;
@@ -252,9 +288,13 @@ failing_summary() {
   fi
 }
 
-# Record a captain-authorized merge over a non-green check state in the task's
-# meta. The override line is written above the canonical pr= block so the
-# metadata identity parse in bin/fm-pr-lib.sh still accepts the file.
+# Reconcile the task's meta with the check state this merge actually acted on: a
+# non-empty reason records the captain-authorized merge over a non-green state,
+# and an empty reason clears whatever an earlier authorized attempt recorded, so
+# a later clean merge does not inherit an override it never used. Any prior
+# record is stripped either way. The override line is written above the canonical
+# pr= block so the metadata identity parse in bin/fm-pr-lib.sh still accepts the
+# file.
 #
 # This is bin/fm-pr-check.sh's meta write, on the identical file, so it is that
 # writer's reconstruction and its whole guard set rather than a lookalike: a
@@ -263,7 +303,7 @@ failing_summary() {
 # harness=, and mode= (which teardown's landed-work check and the watcher read);
 # device parity, so the replace is a rename and not a copy; and validation of
 # the destination after the replace, not only of the temp file before it.
-record_checks_override() {  # <reason>
+record_checks_override() {  # <reason>  (empty clears any prior record)
   local reason=$1 line pr_block='' meta_device state_device
   # A newline in the reason would inject arbitrary keys above the pr= line,
   # where the identity parse does not reject them.
@@ -281,7 +321,8 @@ record_checks_override() {  # <reason>
       *) printf '%s\n' "$line" >> "$MERGE_META_TMP" || return 1 ;;
     esac
   done < "$META" || return 1
-  printf 'merge_checks_override=%s\n' "$reason" >> "$MERGE_META_TMP" || return 1
+  [ -z "$reason" ] \
+    || printf 'merge_checks_override=%s\n' "$reason" >> "$MERGE_META_TMP" || return 1
   printf '%s' "$pr_block" >> "$MERGE_META_TMP" || return 1
   chmod 0600 "$MERGE_META_TMP" || return 1
   fm_pr_private_file_valid "$MERGE_META_TMP" 600 "$state_device" || return 1
@@ -312,6 +353,7 @@ CHECK_SEEN=0
 CHECK_FAIL=0
 CHECK_PENDING=0
 CHECK_SKIP=0
+CHECK_HEAD=
 FAILING=
 UNREADABLE=
 CHECK_READ_DETAIL=
@@ -319,6 +361,16 @@ if read_check_state; then
   tally_check_rows
   if [ "$CHECK_SEEN" -ne "$CHECK_TOTAL" ]; then
     UNREADABLE="the rollup counts $CHECK_TOTAL check(s) but only $CHECK_SEEN row(s) could be read"
+  fi
+  # A rollup with no head to attach it to establishes nothing that survives to
+  # merge time, so it is incomplete in exactly the way a short row list is.
+  if ! fm_pr_head_valid "$CHECK_HEAD"; then
+    CHECK_HEAD=
+    if [ -n "$UNREADABLE" ]; then
+      UNREADABLE="$UNREADABLE, and the PR view reported no usable head commit to pin the merge to"
+    else
+      UNREADABLE="the PR view reported no usable head commit to pin the merge to"
+    fi
   fi
 else
   UNREADABLE="gh could not return the PR's check rollup"
@@ -364,10 +416,17 @@ grep -qxF "pr=$URL" "$META" || {
 }
 
 # Durably record the authorized exception before merging, so the decision
-# survives even if the merge itself is interrupted.
-if [ -n "$OVERRIDE_REASON" ]; then
+# survives even if the merge itself is interrupted. A merge that needs no
+# exception still rewrites the meta when an earlier attempt left one behind: that
+# earlier merge may well have failed after recording, and a record that outlives
+# the state it describes asserts an authorization this merge never used.
+if [ -n "$OVERRIDE_REASON" ] || grep -q '^merge_checks_override=' "$META"; then
   record_checks_override "$OVERRIDE_REASON" || {
-    echo "error: could not record the authorized check-state override in task metadata; refusing to merge" >&2
+    if [ -n "$OVERRIDE_REASON" ]; then
+      echo "error: could not record the authorized check-state override in task metadata; refusing to merge" >&2
+    else
+      echo "error: could not clear a stale check-state override from task metadata; refusing to merge" >&2
+    fi
     exit 1
   }
 fi
@@ -384,9 +443,19 @@ if [ "$CHECK_TOTAL" -gt 0 ] && [ "$CHECK_SKIP" -eq "$CHECK_TOTAL" ]; then
   echo "note: all $CHECK_TOTAL check(s) on $URL are skipped or cancelled, so no check actually passed; skipped is not failing, so the merge proceeds" >&2
 fi
 
+# Pin the merge to the head the rollup above was computed for. bin/fm-pr-check.sh
+# ran in between, so a commit pushed since that read would otherwise land
+# unclassified; the forge refuses the merge instead. The only way to reach here
+# without a head is an authorized exception over a state that could not be read,
+# where there is no classified head to pin to, and that says so out loud.
 merge_args=()
+if [ -n "$CHECK_HEAD" ]; then
+  merge_args+=(--match-head-commit "$CHECK_HEAD")
+else
+  echo "note: no head commit could be read for $URL, so this authorized merge is not pinned to the head whose checks were classified" >&2
+fi
 if ! caller_has_merge_method "$@"; then
-  merge_args=(--squash)
+  merge_args+=(--squash)
 fi
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
