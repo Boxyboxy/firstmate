@@ -506,8 +506,6 @@ It performs guarded fast-forward updates of firstmate and registered secondmate 
 The same run also refreshes the machine-wide `omp` executable through the channel `which omp` already resolves, reporting that channel plus the before and after versions.
 That swap is the one part of `/updatefirstmate` that reaches beyond this repo, so it installs only when every worker recorded here and in every registered local secondmate home is confirmed stopped; a live worker, an endpoint it cannot classify, or a home or registry it cannot read is a refusal to relay, never a reason to proceed, and workers on a remote secondmate's own machine never block it.
 The unattended overnight run stays detect-only (`--check`) and can never install.
-When the captain invokes `/omp-firstmate-leverage`, asks to update omp and firstmate together, asks whether firstmate is leveraging omp, or when that recurring sweep comes due, load the `omp-firstmate-leverage` skill.
-It owns the omp update, the fast-forward, the merge into the local omp adapter branch, and the audit of which omp capabilities firstmate never uses.
 
 ## 13. Agent-only reference skills
 

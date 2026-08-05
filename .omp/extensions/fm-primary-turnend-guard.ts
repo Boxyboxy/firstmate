@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -16,6 +16,12 @@ const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const marker = `${state}/.omp-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
+
+// omp's extension host exposes CLAUDECODE=1 but NOT OMPCODE, while omp's own
+// tool subprocesses receive both. bin/fm-harness.sh checks env markers first
+// and resolves OMPCODE before CLAUDECODE, so every bin/ child spawned from
+// this host carries the same marker omp gives its tool subprocesses.
+const childEnv = { ...process.env, OMPCODE: "1" };
 
 function parentPid(pid: string): string {
   const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
@@ -50,14 +56,13 @@ function lockOwnership(): LockOwnership {
 }
 
 function markLoaded() {
-  if (lockOwnership() === "other") return false;
-  mkdirSync(state, { recursive: true });
+  if (!existsSync(state) || lockOwnership() === "other") return false;
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
   return true;
 }
 
 function runSessionstartNudge(): string {
-  const result = spawnSync(`${root}/bin/fm-sessionstart-nudge.sh`, [], { encoding: "utf8" });
+  const result = spawnSync(`${root}/bin/fm-sessionstart-nudge.sh`, [], { encoding: "utf8", env: childEnv });
   if (result.status !== 0) return "";
   return result.stdout.trim();
 }
@@ -66,6 +71,7 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
   const { promise, resolve: resolveResult } = Promise.withResolvers<{ code: number; stderr: string }>();
   const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
     stdio: ["pipe", "ignore", "pipe"],
+    env: childEnv,
   });
   let stderr = "";
   child.stderr.on("data", (chunk) => {
@@ -86,6 +92,7 @@ function runChecker(script: string, command: string): Promise<{ code: number; st
   const { promise, resolve: resolveResult } = Promise.withResolvers<{ code: number; stderr: string }>();
   const child = spawn(`${root}/bin/${script}`, ["--command", command], {
     stdio: ["ignore", "ignore", "pipe"],
+    env: childEnv,
   });
   let stderr = "";
   child.stderr.on("data", (chunk) => {

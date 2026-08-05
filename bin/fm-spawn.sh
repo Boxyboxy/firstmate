@@ -830,10 +830,12 @@ fi
 
 # Print the verified omp-only runtime-bound fragment from config/omp-max-time.
 # The first non-empty, non-comment line is authoritative, matching the existing
-# per-home text config pattern. Every healthy task observed on 2026-08-02
-# finished in 20-60 minutes, while one converge ran 9h24m until manual
-# intervention. The 3h default is roughly three times the longest healthy task,
-# and remains an operator-controlled backstop through an override or `off`.
+# per-home text config pattern; a file that carries no directive line at all
+# (absent, empty, or comments only) means the default, never an error. Every
+# healthy task observed on 2026-08-02 finished in 20-60 minutes, while one
+# converge ran 9h24m until manual intervention. The 3h default is roughly three
+# times the longest healthy task, and remains an operator-controlled backstop
+# through an override or `off`.
 omp_max_time_flag() {
   local config_file="$CONFIG/omp-max-time" line value=3h amount
   if [ -e "$config_file" ]; then
@@ -841,7 +843,6 @@ omp_max_time_flag() {
       echo "error: config/omp-max-time must be a regular file containing off or a positive duration such as 3600, 10m, or 1h" >&2
       return 1
     }
-    value=
     while IFS= read -r line || [ -n "$line" ]; do
       line="${line#"${line%%[![:space:]]*}"}"
       line="${line%"${line##*[![:space:]]}"}"

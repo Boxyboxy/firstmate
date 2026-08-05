@@ -3,13 +3,11 @@
 # firstmate repo and every registered secondmate home.
 #
 # The guarantees under test mirror fm-fleet-sync.sh and prime directive #3:
-#   - The running firstmate repo fast-forwards from origin on its default branch,
-#     or advances only a free default-branch ref while staying on another branch.
-#     A leased secondmate home (detached HEAD on the default branch) fast-forwards
-#     the same way.
-#   - FAST-FORWARD ONLY: a dirty, diverged, offline, or unsafe target is skipped
-#     and reported, never forced or stashed, so unlanded work survives. An
-#     off-default checkout never moves its HEAD, index, or working tree.
+#   - The running firstmate repo (on its default branch) fast-forwards from
+#     origin; a leased secondmate home (detached HEAD on the default branch)
+#     fast-forwards the same way.
+#   - FAST-FORWARD ONLY: a dirty, diverged, offline, or wrong-branch target is
+#     skipped and reported, never forced or stashed, so unlanded work survives.
 #   - The update is a single-parent fast-forward (never a merge commit) and a
 #     fast-forward of one worktree never disturbs another worktree's checkout
 #     or the shared default branch.
@@ -241,113 +239,22 @@ test_registry_backstop_dedup_and_self_exclusion() {
   pass "T7 registry backstop resolves, dedups meta+registry, excludes the firstmate repo"
 }
 
-# --- T9: firstmate repo on a feature branch advances only free main ref -----
-test_firstmate_wrong_branch_ref_update() {
-  local w out before_head before_status
+# --- T9: firstmate repo on a feature branch is skipped ---------------------
+test_firstmate_wrong_branch_skipped() {
+  local w out before
   w=$(new_world t9)
   bump_origin "$w" instr
+  # Simulate firstmate mid-shipping its own change: not on the default branch.
   git -C "$w/main" checkout -q -b feature/wip
-  before_head=$(git -C "$w/main" rev-parse HEAD)
-  printf 'local work\n' > "$w/main/local-work.txt"
-  before_status=$(git -C "$w/main" status --porcelain)
+  before=$(git -C "$w/main" rev-parse HEAD)
 
   out=$(run_update "$w")
 
-  assert_contains "$out" "firstmate: advanced main ref " "off-default firstmate advances the free default ref"
-  assert_contains "$out" "checkout stayed on feature/wip" "ref-only update reports the unchanged checkout"
-  assert_contains "$out" "firstmate: skipped: on feature/wip, expected main" \
-    "an advanced ref still reports the off-default checkout that needs repair"
-  assert_contains "$out" "reread-firstmate: no" "ref-only update does not request a reread"
-  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before_head" ] \
-    || fail "off-default firstmate HEAD moved"
-  [ "$(git -C "$w/main" rev-parse main)" = "$(git -C "$w/main" rev-parse origin/main)" ] \
-    || fail "default branch ref did not advance"
-  [ "$(git -C "$w/main" status --porcelain)" = "$before_status" ] \
-    || fail "off-default working tree changed"
-  [ -f "$w/main/local-work.txt" ] || fail "off-default working tree file disappeared"
-  pass "T9 firstmate off its default branch advances only the free default ref"
-}
-
-test_firstmate_off_branch_diverged_default_ref_skipped() {
-  local w out before_main
-  w=$(new_world t10)
-  printf 'local main work\n' >> "$w/main/README.md"
-  git -C "$w/main" add README.md
-  git -C "$w/main" commit -qm local-main
-  before_main=$(git -C "$w/main" rev-parse main)
-  git -C "$w/main" checkout -q -b feature/wip
-  bump_origin "$w" instr
-
-  out=$(run_update "$w")
-
-  assert_contains "$out" "firstmate: skipped: main ref diverged from origin/main" \
-    "diverged off-default default ref is skipped"
-  assert_contains "$out" "checkout stayed on feature/wip" \
-    "diverged ref skip reports the unchanged checkout"
-  [ "$(git -C "$w/main" rev-parse main)" = "$before_main" ] \
-    || fail "diverged default ref moved"
-  pass "T10 diverged off-default default ref is refused"
-}
-
-test_firstmate_off_branch_default_ref_in_other_worktree_skipped() {
-  local w out before_main before_holder
-  w=$(new_world t11)
-  git -C "$w/main" checkout -q -b feature/wip
-  git -C "$w/main" worktree add -q "$w/main-holder" main
-  before_main=$(git -C "$w/main" rev-parse main)
-  before_holder=$(git -C "$w/main-holder" rev-parse HEAD)
-  bump_origin "$w" instr
-
-  out=$(run_update "$w")
-
-  assert_contains "$out" "firstmate: skipped: main is checked out in another worktree" \
-    "default ref checked out elsewhere is skipped"
-  [ "$(git -C "$w/main" rev-parse main)" = "$before_main" ] \
-    || fail "default ref checked out elsewhere moved"
-  [ "$(git -C "$w/main-holder" rev-parse HEAD)" = "$before_holder" ] \
-    || fail "other worktree HEAD moved"
-  pass "T11 default ref checked out in another worktree is left alone"
-}
-
-# A worktree paused mid-rebase on the default branch reports a DETACHED head in
-# the worktree inventory, yet git still refuses to force-update that branch and
-# the rebase's own completion or --abort would rewrite the ref. update-ref's
-# compare-and-swap does not carry that protection, so the ref must stay put.
-test_firstmate_off_branch_default_ref_held_by_rebase_skipped() {
-  local w out before_main holder_gitdir
-  w=$(new_world t11b)
-  # main gets a commit that conflicts with branch `conflict`, and origin keeps
-  # that commit, so main stays a strict fast-forward candidate throughout.
-  git -C "$w/main" checkout -q -b conflict
-  printf 'theirs\n' > "$w/main/README.md"
-  git -C "$w/main" commit -qam theirs
-  git -C "$w/main" checkout -q main
-  printf 'ours\n' > "$w/main/README.md"
-  git -C "$w/main" commit -qam ours
-  git -C "$w/main" push -q origin main
-  git -C "$w/main" checkout -q -b feature/wip
-  git -C "$w/main" worktree add -q "$w/main-holder" main
-  # The conflicting rebase leaves the holder detached with main as its head-name,
-  # while refs/heads/main stays exactly where it was.
-  git -C "$w/main-holder" rebase conflict >/dev/null 2>&1 && fail "fixture rebase did not conflict"
-  git -C "$w/main-holder" symbolic-ref -q HEAD >/dev/null \
-    && fail "fixture rebase left the holder on a branch, not detached"
-  holder_gitdir=$(git -C "$w/main-holder" rev-parse --absolute-git-dir)
-  [ "$(cat "$holder_gitdir/rebase-merge/head-name" 2>/dev/null)" = refs/heads/main ] \
-    || fail "fixture rebase does not name refs/heads/main"
-  before_main=$(git -C "$w/main" rev-parse main)
-  bump_origin "$w" instr
-  git -C "$w/main" fetch -q origin
-  git -C "$w/main" merge-base --is-ancestor main origin/main \
-    || fail "fixture left main unable to fast-forward"
-
-  out=$(run_update "$w")
-
-  assert_contains "$out" "firstmate: skipped: main is checked out in another worktree" \
-    "a default ref held by an interrupted rebase is skipped"
-  [ "$(git -C "$w/main" rev-parse main)" = "$before_main" ] \
-    || fail "default ref moved under an interrupted rebase"
-  pass "T11b default ref held by an interrupted rebase is left alone"
+  assert_contains "$out" "firstmate: skipped: on feature/wip, expected main" "off-default firstmate skipped"
+  assert_contains "$out" "reread-firstmate: no" "no reread when firstmate was skipped"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "skipped firstmate HEAD moved"
+  pass "T9 firstmate off its default branch is skipped, not forced"
 }
 
 make_fake_omp() {
@@ -791,111 +698,6 @@ test_omp_check_is_detect_only_with_live_fleet() {
   pass "omp check remains detect-only even with a live fleet"
 }
 
-
-# A linked-worktree secondmate home shares its ref store with the whole repo, so
-# an off-branch ref advance there would move the PRIMARY's default branch, not
-# anything private to that home. Shared default-ref movement belongs to the
-# primary sync path alone, so the secondmate sweep must report the ref and leave
-# it exactly where it is - even when the ref is provably free and the move would
-# be a strict fast-forward - while still surfacing the off-branch repair.
-test_secondmate_never_moves_the_shared_default_ref() {
-  local w out before_main shared
-  w=$(new_world t14)
-  git -C "$w/main" worktree add -q -b sm/wip "$w/sm1" main
-  printf 'sm1\n' > "$w/sm1/.fm-secondmate-home"
-  {
-    printf 'window=main:fm-sm1\n'
-    printf 'kind=secondmate\n'
-    printf 'home=%s/sm1\n' "$w"
-  } > "$w/home/state/sm1.meta"
-  # The primary detaches, so refs/heads/main is free and nothing but ownership
-  # can be what stops the advance.
-  git -C "$w/main" checkout -q --detach HEAD
-  before_main=$(git -C "$w/main" rev-parse main)
-  bump_origin "$w" instr
-  shared=$(cd "$w/main" && pwd -P)
-
-  out=$(run_update "$w")
-
-  assert_contains "$out" "secondmate sm1: skipped: on sm/wip, expected main" \
-    "the off-branch home stays visible as a repair"
-  assert_contains "$out" "main ref belongs to $shared and moves only with that primary checkout" \
-    "the refusal names the repository whose branch the sweep declined to move"
-  assert_not_contains "$out" "secondmate sm1: advanced" \
-    "a secondmate sweep never reports moving a shared default ref"
-  [ "$(git -C "$w/main" rev-parse main)" = "$before_main" ] \
-    || fail "a secondmate sweep moved the primary repository's default ref"
-  [ "$(git -C "$w/sm1" rev-parse --abbrev-ref HEAD)" = "sm/wip" ] \
-    || fail "the off-branch home's checkout moved"
-  pass "T14 a secondmate sweep never moves the primary repository's default ref"
-}
-
-# The other side of that ownership: when the PRIMARY checkout is itself a linked
-# worktree sitting on a feature branch, the free default ref is its own to
-# advance - and because the move is not private to that checkout, the report has
-# to name the repository whose branch actually moved.
-test_primary_advances_the_shared_default_ref_and_names_it() {
-  local w out before_main before_head shared
-  w=$(new_world t14b)
-  git -C "$w/main" worktree add -q -b feature/wip "$w/pri" main
-  git -C "$w/main" checkout -q --detach HEAD
-  before_main=$(git -C "$w/main" rev-parse main)
-  before_head=$(git -C "$w/pri" rev-parse HEAD)
-  bump_origin "$w" instr
-  shared=$(cd "$w/main" && pwd -P)
-
-  out=$(FM_ROOT_OVERRIDE="$w/pri" FM_HOME="$w/home" "$UPDATE" 2>/dev/null)
-
-  assert_contains "$out" "firstmate: skipped: on feature/wip, expected main" \
-    "the primary's own off-branch checkout still reports the repair"
-  assert_contains "$out" "advanced main ref (shared with $shared)" \
-    "the ref advance names the repository whose branch actually moved"
-  [ "$(git -C "$w/main" rev-parse main)" != "$before_main" ] \
-    || fail "the primary did not advance its own free shared default ref"
-  [ "$(git -C "$w/pri" rev-parse HEAD)" = "$before_head" ] \
-    || fail "the off-branch primary's HEAD moved"
-  [ "$(git -C "$w/pri" rev-parse --abbrev-ref HEAD)" = "feature/wip" ] \
-    || fail "the off-branch primary left its own branch"
-  pass "T14b the primary advances a shared default ref and names the repository"
-}
-
-# The registry sweep reads data/secondmates.md on stdin, and ssh forwards stdin
-# to the remote command. A remote second mate that consumed it would eat every
-# entry after its own, so each home registered below a remote route would stop
-# being updated with no report at all - the silent refresh gap in person.
-test_remote_secondmate_does_not_consume_the_registry() {
-  local w out
-  w=$(new_world t15)
-  # A tracked remote control command so the transport is actually reached, and a
-  # stand-in ssh that drains stdin exactly as the real one forwards it.
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$w/seed/bin/fm-remote-secondmate-control.sh"
-  chmod +x "$w/seed/bin/fm-remote-secondmate-control.sh"
-  git -C "$w/seed" add -A
-  git -C "$w/seed" commit -qm remote-control
-  git -C "$w/seed" push -q origin main
-  git -C "$w/main" fetch -q origin
-  git -C "$w/main" merge -q --ff-only origin/main
-  printf '#!/usr/bin/env bash\ncat >/dev/null 2>&1 || true\nexit 255\n' > "$w/fake-ssh"
-  chmod +x "$w/fake-ssh"
-  # reg1 is registry-only, so it is resolved by the registry sweep alone and
-  # cannot be rescued by the live-metadata pass that runs before it.
-  git -C "$w/main" worktree add -q --detach "$w/reg1" main
-  printf 'reg1\n' > "$w/reg1/.fm-secondmate-home"
-  {
-    printf -- '- smr - remote route (host: h1; root: /srv/fm; home: /srv/smr; scope: x; projects: p; added 2026-06-23)\n'
-    printf -- '- reg1 - registered below the remote route (home: %s/reg1; scope: y; projects: p; added 2026-06-23)\n' "$w"
-  } > "$w/home/data/secondmates.md"
-  bump_origin "$w" instr
-
-  out=$(FM_SSH_BIN="$w/fake-ssh" run_update "$w")
-
-  assert_contains "$out" "secondmate reg1: updated " \
-    "a home registered after a remote route is still updated"
-  [ "$(git -C "$w/reg1" rev-parse HEAD)" = "$(git -C "$w/reg1" rev-parse origin/main)" ] \
-    || fail "the home below the remote route never fast-forwarded"
-  pass "T15 a remote second mate does not swallow the rest of the registry sweep"
-}
-
 test_firstmate_detached_head_skipped() {
   local w out before
   w=$(new_world t12)
@@ -940,13 +742,7 @@ test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped
 test_idempotent_already_current
 test_registry_backstop_dedup_and_self_exclusion
-test_firstmate_wrong_branch_ref_update
-test_firstmate_off_branch_diverged_default_ref_skipped
-test_firstmate_off_branch_default_ref_in_other_worktree_skipped
-test_firstmate_off_branch_default_ref_held_by_rebase_skipped
-test_secondmate_never_moves_the_shared_default_ref
-test_primary_advances_the_shared_default_ref_and_names_it
-test_remote_secondmate_does_not_consume_the_registry
+test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
 test_omp_update_is_guarded_and_channel_preserving

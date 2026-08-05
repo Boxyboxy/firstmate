@@ -273,6 +273,20 @@ test_omp_threads_configurable_max_time() {
   assert_contains "$launch" "omp --auto-approve --max-time=3h" \
     "unconfigured omp launch did not receive the three-hour default"
 
+  # A file an operator left holding only a header carries no directive, so it
+  # has to mean the default exactly like an absent file - never a hard refusal
+  # that would stop every omp spawn in the home.
+  id=omp-max-time-comment-only-o6c2
+  rec=$(make_spawn_case omp-max-time-comment-only omp "$id")
+  read_case_record "$rec"
+  printf '# bounded crewmates\n\n   \n' > "$HOME_DIR/config/omp-max-time"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a comment-only config/omp-max-time should not stop the spawn"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "omp --auto-approve --max-time=3h" \
+    "a config/omp-max-time with no directive line did not fall back to the default"
+
   id=omp-max-time-off-o6d
   rec=$(make_spawn_case omp-max-time-off omp "$id")
   read_case_record "$rec"

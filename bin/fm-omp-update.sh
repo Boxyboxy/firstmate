@@ -17,9 +17,9 @@
 #     (.agents/skills/updatefirstmate/SKILL.md), runs this with no arguments so
 #     the recurring refresh actually swaps omp once the gate says the fleet is
 #     stopped. That skill owns the operator-facing contract.
-#   - the unattended overnight omp-firstmate-leverage cron runs it as `--check`
-#     only. It is deliberately detect-only: with nobody present to read a
-#     refusal, it reports what is available and never installs.
+#   - any unattended or scheduled sweep runs it as `--check` only. That mode is
+#     deliberately detect-only: with nobody present to read a refusal, it
+#     reports what is available and never installs.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

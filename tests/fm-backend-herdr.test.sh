@@ -1771,6 +1771,58 @@ test_projection_close_busy_pane_falls_back_to_plain_close() {
   pass "herdr presentation cleanup: a pane with a live foreground process falls back to the plain close"
 }
 
+# The idle-shell proof checks the foreground process's `name` and its `argv0`
+# against the recognized-shell set INDEPENDENTLY, because the two legitimately
+# disagree on real systems: a login shell arrives as `-zsh`, and /bin/sh is a
+# symlink whose argv0 and process name differ. Requiring them to be equal
+# refused those honest idle shells. Independence is only safe because it is not
+# the proof - the OS process table (exactly one row for the shell pid, no
+# child) and the sleeping/idle state are what actually prove the pane is bare.
+# This pins that: a mismatched-but-recognized pair alone still refuses while a
+# live agent runs under the shell, and passes only once nothing else is there.
+idle_shell_sample_state() {  # <dir> <shell-pid> <ps-rows> -> prints the sample verdict
+  local dir=$1 pid=$2 rows=$3 fb
+  mkdir -p "$dir/responses"
+  : > "$dir/log"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"sh","argv0":"-bash"}]}}}\n' \
+    "$pid" "$pid" "$pid" > "$dir/responses/1.out"
+  cat > "$dir/ps" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  "-axo pid=,ppid=") printf '%s' '$rows' ;;
+  "-p $pid -o stat=") printf 'Ss+\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/ps"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
+    FM_HERDR_PS_BIN="$dir/ps" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_idle_shell_sample fmtest w1:p1' \
+    "$ROOT" 2>/dev/null
+}
+
+test_idle_shell_proof_refuses_a_live_agent_under_a_mismatched_shell() {
+  local dir out status
+  dir="$TMP_ROOT/idle-shell-mismatch"; mkdir -p "$dir"
+
+  # A live agent is running as a child of that same shell: the pane is busy,
+  # so the proof must refuse no matter how the shell names itself.
+  out=$(idle_shell_sample_state "$dir/busy" 4242 $'1 0\n4242 1\n4311 4242\n')
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a shell hosting a live agent child was accepted as a bare idle shell (printed '$out')"
+  [ -z "$out" ] || fail "a refused idle-shell sample still printed a shell pid: $out"
+
+  # Same mismatched pair, nothing else in the pane: the honest login/symlink
+  # shell the independent checks exist for is still recognized.
+  out=$(idle_shell_sample_state "$dir/bare" 4242 $'1 0\n4242 1\n')
+  status=$?
+  expect_code 0 "$status" "a lone idle shell whose name and argv0 differ should still be recognized"
+  [ "$out" = 4242 ] || fail "the idle-shell proof printed '$out' instead of the shell pid"
+  pass "herdr idle-shell proof: a live agent under a name/argv0-mismatched shell is never a bare idle shell"
+}
+
 test_projection_close_transient_prompt_helper_settles_then_uses_pane_death() {
   local dir log resp fb out status bgpid
   dir="$TMP_ROOT/close-transient-helper"; mkdir -p "$dir/responses"
@@ -4375,6 +4427,7 @@ test_projection_close_plain_without_move_requires_structured_removal
 test_projection_close_ambiguous_positions_fall_back_to_plain_close
 test_projection_close_move_failure_falls_back_to_plain_close
 test_projection_close_busy_pane_falls_back_to_plain_close
+test_idle_shell_proof_refuses_a_live_agent_under_a_mismatched_shell
 test_projection_close_transient_prompt_helper_settles_then_uses_pane_death
 test_projection_close_death_escalates_sigkill_after_sighup_survival
 test_projection_close_death_failure_falls_back_to_plain_close

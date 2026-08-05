@@ -238,6 +238,9 @@ Kimi continues to use the captain's normal Kimi home, including the existing con
 The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config.toml`, `python3` with `tomllib`, and `jq`; it validates but never serializes the captain's TOML and refuses before writing when the config is missing, malformed, or surprising or when either tool requirement is unavailable.
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
+For omp crewmate and secondmate launches, `fm-spawn.sh` passes omp's own `--max-time` runtime bound, defaulting to `3h`, so a wedged unattended omp worker cannot run unbounded.
+The optional local, gitignored `config/omp-max-time` file overrides that default: its first non-empty, non-comment line is either `off` (pass no bound at all) or a positive duration in omp's `--max-time` vocabulary (`3600`, `10m`, `1h`), and a file with no directive line means the default.
+`omp_max_time_flag()`'s header in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) owns the exact parsing, validation, and the observed task durations behind the default, and `omp --help` owns the flag's accepted values; item 4 of the omp re-verification checklist in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md) re-checks the flag when omp updates.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
