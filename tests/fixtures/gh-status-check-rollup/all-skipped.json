@@ -1,0 +1,44 @@
+{
+  "statusCheckRollup": [
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-07-29T17:57:20Z",
+      "conclusion": "SKIPPED",
+      "detailsUrl": "https://github.com/example/repo/actions/runs/17245993030/job/48950113030",
+      "name": "Lint shell scripts",
+      "startedAt": "2026-07-29T17:57:11Z",
+      "status": "COMPLETED",
+      "workflowName": "checks"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-07-29T17:57:21Z",
+      "conclusion": "SKIPPED",
+      "detailsUrl": "https://github.com/example/repo/actions/runs/17245993030/job/48950113031",
+      "name": "Behavior tests",
+      "startedAt": "2026-07-29T17:57:11Z",
+      "status": "COMPLETED",
+      "workflowName": "checks"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-07-29T17:59:02Z",
+      "conclusion": "CANCELLED",
+      "detailsUrl": "https://github.com/example/repo/actions/runs/17245993031/job/48950113032",
+      "name": "Docs check",
+      "startedAt": "2026-07-29T17:57:12Z",
+      "status": "COMPLETED",
+      "workflowName": "docs"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-07-29T17:59:03Z",
+      "conclusion": "CANCELLED",
+      "detailsUrl": "https://github.com/example/repo/actions/runs/17245993031/job/48950113033",
+      "name": "Typecheck",
+      "startedAt": "2026-07-29T17:57:12Z",
+      "status": "COMPLETED",
+      "workflowName": "docs"
+    }
+  ]
+}

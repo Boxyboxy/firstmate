@@ -1,0 +1,22 @@
+{
+  "statusCheckRollup": [
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-07-29T17:58:03Z",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/example/repo/actions/runs/17245993010/job/48950113010",
+      "name": "Lint shell scripts",
+      "startedAt": "2026-07-29T17:57:11Z",
+      "status": "COMPLETED",
+      "workflowName": "checks"
+    },
+    {
+      "__typename": "StatusContext",
+      "context": "vercel/preview",
+      "createdAt": "2026-07-29T18:01:02Z",
+      "description": "Deployment failed",
+      "state": "FAILURE",
+      "targetUrl": "https://vercel.com/example/repo/deployments/abc123"
+    }
+  ]
+}
