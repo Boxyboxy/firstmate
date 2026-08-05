@@ -37,6 +37,7 @@ The earlier record that every harness is observed under its own `#{pane_current_
 In this macOS run that reading reflected a rewritable process title rather than stable executable identity, so it is now one of two independent name sources rather than the sole basis of a verdict.
 
 The seven primary-capable adapters were relaunched on 2026-08-03 with tmux 3.6a on macOS 26.5.2 arm64, each on a private socket in an isolated lab.
+omp is the eighth primary-capable adapter and is not in that guard yet; its own dated process-name evidence is the observation above, and it is attributed through the same exact-name path component the classifier applies to every harness in `FM_HARNESS_NAMES`.
 
 ```sh
 tmux -L "$socket" new-window -d -t "$session:" -n "$harness" -c "$wt" -- "$bin"
@@ -179,7 +180,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
+Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Muse, and omp share that backend cleanup boundary; their harness-specific hook files, per-task extension files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Herdr
 
@@ -500,11 +501,13 @@ Real captures verified these active distinctions:
 
 - Claude and Codex use bare `❯` and `›` agent composers.
 - Pi uses content between complete separator rows and requires exact native Pi identity.
+- omp uses an adjacent rounded-arc pair (a `╭── π > … ▶───╮` status row with the `╰─ … ─╯` input row directly below it) and requires exact native omp identity on the same idle, done, or blocked conjunction as Pi; the lowest candidate on screen wins when both shapes are in view.
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.
 - A bare shell prompt has no safe agent-composer container and is unknown.
 
 `tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes.
+The omp shape was recorded on 2026-07-31 from live omp 17.2.2 panes under Herdr 0.7.5 protocol 17; those raw styled captures are replayed verbatim from `tests/fixtures/omp-herdr-composer/` by `tests/fm-backend-herdr.test.sh`, with only operator-identifying values redacted at unchanged display width.
 The U+2063 operational and routed-request separators were exercised through a real Pi-on-Herdr path; the byte-exact active regression is:
 
 ```sh

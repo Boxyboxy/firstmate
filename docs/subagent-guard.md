@@ -241,6 +241,10 @@ The bounded follow-up for each is identical to the Codex procedure above.
 On a host with the binary installed, ask the harness to enumerate its tools, then wire the matcher and re-run the live matrix below.
 `bin/fm-subagent-pretool-check.sh` needs no change for any of them: it already accepts Grok's stdin shape and the `--tool` CLI form OpenCode and Pi use, and it already emits the Grok stdout decision object by default.
 
+omp joined the verified set after that review and is unwired on the same terms.
+Its tracked `.omp/extensions/fm-primary-turnend-guard.ts` carries the identical Pi-derived gate - `event.toolName !== "bash"` inside `pi.on("tool_call", ...)`, blocking by returning `{block: true}` - so the same one-line change applies.
+Pi's not-applicable evaluation must not be assumed for it: omp's own help exposes bundled task agents and its `session_stop` contract explicitly skips subagents, so the bounded follow-up above still stands and its exact delegation tool names must be enumerated on a host with omp installed before any matcher is wired.
+
 ## Live validation record, 2026-07-22
 
 Harness version:
