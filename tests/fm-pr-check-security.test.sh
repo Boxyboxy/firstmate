@@ -61,8 +61,8 @@ make_case() {
 printf 'guard\n' >> "$FM_TEST_GUARD_LOG"
 SH
   chmod +x "$fake_root/bin/fm-guard.sh"
-  # statusCheckRollup answers the PR's head and one green check run, so the merge
-  # wrapper's red-PR refusal (bin/fm-pr-merge.sh) sees an established,
+  # statusCheckRollup answers an open PR, its head, and one green check run, so
+  # the merge wrapper's red-PR refusal (bin/fm-pr-merge.sh) sees an established,
   # non-failing check state that it can pin the merge to; these cases exercise
   # URL derivation and poll safety, not the check gate.
   cat > "$fakebin/gh" <<'SH'
@@ -71,6 +71,7 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *statusCheckRollup*)
+    printf 'state|%s\n' "${FM_TEST_GH_PR_STATE:-OPEN}"
     printf 'head|%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
     printf 'rollup|1\nSUCCESS||Lint shell scripts\n'
     ;;

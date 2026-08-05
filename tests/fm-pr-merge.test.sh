@@ -39,8 +39,13 @@
 #       land, an unmoved head still merges, a rollup with no head is unreadable,
 #       the caller may not supply the pin, and the merge is issued through the
 #       CLI that carries it rather than a wrapper that would drop it
-#   (u) a caller's --method is translated to the shorthand flag gh takes, and a
-#       value that is not a merge method is refused rather than becoming a flag
+#   (u) a caller's --method is translated to the shorthand flag gh takes, a
+#       short-form method counts as an explicit choice, and a value that is not a
+#       merge method is refused rather than becoming a flag
+#   (v) --admin is refused, because this path does not merge past the forge's own
+#       required checks and reviews
+#   (w) a PR that already landed records its metadata and stops, keeping any
+#       override record of the authorized merge that landed
 #   (s) the script's own rollup filter, not a mock's copy of what it emits, reads
 #       recorded forge payloads: a failing check run, a failing commit status, a
 #       declared-but-unreported required status, an all-skipped rollup, and a
@@ -75,9 +80,10 @@ make_case() {
 }
 
 # The check gate reads the rollup as structured data through
-# `gh pr view --json statusCheckRollup,headRefOid -q <filter>`, so the mock
-# answers what that filter emits: a "head|<sha>" header naming the commit the
-# rollup describes, a "rollup|<count>" header, then one
+# `gh pr view --json state,statusCheckRollup,headRefOid -q <filter>`, so the mock
+# answers what that filter emits: a "state|<state>" header naming where the PR
+# stands (FM_TEST_PR_STATE), a "head|<sha>" header naming the commit the rollup
+# describes, a "rollup|<count>" header, then one
 # "<conclusion>|<state>|<name>" row per entry, where a check run carries a
 # conclusion and a commit status carries a state. Rows come from FM_TEST_ROLLUP
 # (the ROLLUP_EMPTY sentinel means a rollup with no entries at all),
@@ -114,7 +120,7 @@ GH_ROLLUP_MOCK_BODY='
           [ "$prev" = "--json" ] && requested=$arg
           prev=$arg
         done
-        for field in statusCheckRollup headRefOid; do
+        for field in state statusCheckRollup headRefOid; do
           case ",$requested," in
             *",$field,"*) ;;
             *)
@@ -136,6 +142,7 @@ GH_ROLLUP_MOCK_BODY='
           [ -z "${FM_TEST_ROLLUP_ERR:-}" ] || printf "%s\n" "$FM_TEST_ROLLUP_ERR" >&2
           exit "${FM_TEST_ROLLUP_RC}"
         fi
+        printf "state|%s\n" "${FM_TEST_PR_STATE:-OPEN}"
         head=
         if [ "${FM_TEST_ROLLUP_HEAD:-}" != "__no_head__" ] && [ -f "$FM_TEST_HEAD_FILE" ]; then
           head=$(cat "$FM_TEST_HEAD_FILE")
@@ -264,7 +271,7 @@ run_pr_merge() {
   local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
-  FM_TEST_GH_AXI_LOG="$case_dir/merge.log" \
+  FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_MERGE_LOG="$case_dir/merge.log" \
   FM_TEST_MERGED_LOG="$case_dir/merged.log" \
   FM_TEST_HEAD_FILE="$case_dir/head" \
@@ -273,6 +280,7 @@ run_pr_merge() {
   FM_TEST_ROLLUP_RC="${FM_TEST_ROLLUP_RC:-0}" \
   FM_TEST_ROLLUP_ERR="${FM_TEST_ROLLUP_ERR:-}" \
   FM_TEST_ROLLUP_HEAD="${FM_TEST_ROLLUP_HEAD:-}" \
+  FM_TEST_PR_STATE="${FM_TEST_PR_STATE:-OPEN}" \
   FM_TEST_ROLLUP_FIXTURE="${FM_TEST_ROLLUP_FIXTURE:-}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
@@ -515,6 +523,122 @@ test_method_with_separate_value_is_translated() {
   assert_no_grep 'pr merge' "$case_dir/merge.log" \
     "method-separate-value: an unknown merge method reached gh pr merge"
   pass "fm-pr-merge translates a separate --method value and refuses one that is not a method"
+}
+
+# gh honours -s, -m, and -r, so a caller that spells the method that way has
+# chosen one. Missing that adds the default --squash beside it and gh refuses the
+# pair outright, which turns a valid invocation into a failed merge.
+test_short_form_merge_method_not_overridden() {
+  local case_dir
+  case_dir=$(make_case short-form-merge-method)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c
+  : > "$case_dir/merge.log"
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/25 -- -m \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "short-form-merge-method: fm-pr-merge failed"
+
+  grep -qxF 'pr merge 25 --repo example/repo --match-head-commit 5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c -m' "$case_dir/merge.log" \
+    || fail "short-form-merge-method: caller -m was not left as the only merge method"
+  assert_no_grep 'squash' "$case_dir/merge.log" \
+    "short-form-merge-method: a default --squash was added beside the caller's short-form method"
+  pass "fm-pr-merge treats a short-form merge method as the caller's explicit choice"
+}
+
+# "Never merge a red PR" leans on the forge's own required-check and review gates
+# as its backstop, and --admin is the flag that lands a PR past them. The wrapper
+# this path used to call discarded it silently; the refusal is now explicit.
+test_admin_merge_args_refuse_before_recording() {
+  local case_dir rc
+  case_dir=$(make_case admin-override)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d
+  : > "$case_dir/merge.log"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/26 -- --admin \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "admin-override: fm-pr-merge should refuse an administrator merge"
+  assert_grep 'must not include --admin' "$case_dir/stderr" \
+    "admin-override: refusal did not explain the administrator override"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/26' "$case_dir/state/task-x1.meta" \
+    "admin-override: the PR URL was recorded before rejecting the administrator merge"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "admin-override: an administrator merge armed a merge poll"
+  assert_no_grep 'pr merge' "$case_dir/merge.log" \
+    "admin-override: an administrator merge reached gh pr merge"
+  pass "fm-pr-merge refuses an administrator merge before recording state"
+}
+
+# This path is re-run exactly when a merge landed but its report did not survive.
+# The PR has nothing left to merge, so recording its metadata is the whole job -
+# and a second merge attempt would fail on a PR that is already closed.
+test_already_merged_pr_is_idempotent() {
+  local case_dir rc meta
+  case_dir=$(make_case already-merged)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e
+  : > "$case_dir/merge.log"
+  : > "$case_dir/gh-axi.log"
+  meta="$case_dir/state/task-x1.meta"
+
+  set +e
+  FM_TEST_PR_STATE=MERGED \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/27 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "already-merged: re-running against a landed PR should succeed"
+  assert_grep 'already merged' "$case_dir/stderr" \
+    "already-merged: the run did not report that the PR had already landed"
+  assert_grep 'pr=https://github.com/example/repo/pull/27' "$meta" \
+    "already-merged: the PR reference teardown needs was not recorded"
+  assert_no_grep 'pr merge' "$case_dir/merge.log" \
+    "already-merged: a landed PR was sent to gh pr merge a second time"
+  pass "fm-pr-merge records metadata and stops when the PR has already landed"
+}
+
+# An override recorded by the authorized merge that actually landed is a true
+# record of how the PR reached the base branch, so the re-run must not reconcile
+# it away on its way to reporting the landing.
+test_already_merged_pr_keeps_its_override_record() {
+  local case_dir meta rc
+  case_dir=$(make_case already-merged-override)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_merge_fails "$case_dir" 8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f
+  : > "$case_dir/merge.log"
+  : > "$case_dir/gh-axi.log"
+  meta="$case_dir/state/task-x1.meta"
+
+  set +e
+  FM_TEST_ROLLUP="$ROLLUP_RED" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/28 --allow-red-checks \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "already-merged-override: the first attempt should propagate the merge failure"
+  assert_grep 'merge_checks_override=failing checks:' "$meta" \
+    "already-merged-override: the authorized attempt did not record its override"
+
+  # The merge in fact landed; only its report was lost.
+  add_gh_mocks "$case_dir" 8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f
+  : > "$case_dir/merge.log"
+  FM_TEST_PR_STATE=MERGED FM_TEST_ROLLUP="$ROLLUP_RED" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/28 --allow-red-checks \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "already-merged-override: re-running against a landed PR should succeed"
+
+  assert_grep 'merge_checks_override=failing checks:' "$meta" \
+    "already-merged-override: the record of the authorized merge that landed was erased"
+  assert_no_grep 'pr merge' "$case_dir/merge.log" \
+    "already-merged-override: a landed PR was sent to gh pr merge a second time"
+  pass "fm-pr-merge keeps the override record of an authorized merge that already landed"
 }
 
 test_parses_pr_url_for_gh_axi() {
@@ -1113,7 +1237,7 @@ test_head_override_args_refuse_before_recording() {
 # way this suite gates its other optional tooling.
 #
 # The payloads under tests/fixtures/gh-status-check-rollup/ were recorded from
-# `gh pr view <url> --json statusCheckRollup,headRefOid` with gh 2.92.0
+# `gh pr view <url> --json state,statusCheckRollup,headRefOid` with gh 2.92.0
 # (2026-04-28), then had their repository, run, and deployment URLs rewritten to
 # example/repo and their headRefOid to a synthetic sha.
 # A CheckRun node carries a `conclusion` and no `state`, while a StatusContext
@@ -1240,6 +1364,10 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_method_with_separate_value_is_translated
+test_short_form_merge_method_not_overridden
+test_admin_merge_args_refuse_before_recording
+test_already_merged_pr_is_idempotent
+test_already_merged_pr_keeps_its_override_record
 test_parses_pr_url_for_gh_axi
 test_failing_checks_refuse_before_merge
 test_no_configured_checks_are_not_red

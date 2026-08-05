@@ -6,14 +6,17 @@
 # arguments, never as an interpolated URL.
 #
 # Merge method defaults to --squash when the caller passes none of --squash,
-# --merge, --rebase, or --method after the optional -- separator. Extra args must
-# not include --repo or -R because the repository comes only from the URL, nor
-# --match-head-commit because the head comes only from the check state below.
+# --merge, --rebase, --method, or their short forms after the optional --
+# separator. Extra args must not include --repo or -R because the repository
+# comes only from the URL, nor --match-head-commit because the head comes only
+# from the check state below, nor --admin because this path does not merge past
+# the forge's own gates.
 #
 # Red-PR refusal: AGENTS.md states "Never merge a red PR" as an absolute rule,
 # so this path reads the PR's check rollup as structured data through
-# `gh pr view --json statusCheckRollup,headRefOid` - the same JSON-and-filter idiom
-# bin/fm-pr-check.sh uses for its head reference - and classifies every entry
+# `gh pr view --json state,statusCheckRollup,headRefOid` - the same
+# JSON-and-filter idiom bin/fm-pr-check.sh uses for its head reference - and
+# classifies every entry
 # here instead of consuming another tool's rendered pass/fail/pending summary.
 # That rendering mapped a failing commit status, the shape external CI posts
 # (a state rather than a conclusion), to pending, which is the one outcome this
@@ -57,7 +60,12 @@
 # gh is already this path's hard dependency for the rollup read above, so the
 # merge uses the one CLI that can enforce what was classified. gh spells the
 # merge method as a shorthand flag and has no --method, so a caller that names
-# one is translated rather than silently losing its choice.
+# one is translated rather than silently losing its choice, and it honours the
+# short forms the wrapper used to discard, so those count as an explicit method
+# too. The same read reports where the PR itself stands, because a PR that has
+# already landed must not be merged a second time: a retry after a merge whose
+# report was lost records the metadata and reports the landing rather than
+# failing, which is the wrapper's idempotence kept rather than lost with it.
 # --allow-red-checks is the captain-authorized exception. It merges anyway and
 # records merge_checks_override=<reason> in the task's meta before the merge, so
 # the decision stays durable. The record is written above the canonical pr= line
@@ -103,11 +111,15 @@ if [ "${1:-}" = "--allow-red-checks" ]; then
 fi
 [ "${1:-}" = "--" ] && shift
 
+# gh takes -s, -m, and -r as the merge methods' short forms and honours them, so
+# a caller that spells one that way has chosen a method just as explicitly as the
+# long form; missing them would add a second, conflicting default.
 caller_has_merge_method() {
   local arg
   for arg in "$@"; do
     case "$arg" in
       --squash|--merge|--rebase|--method|--method=*) return 0 ;;
+      -s|-m|-r) return 0 ;;
     esac
   done
   return 1
@@ -115,6 +127,11 @@ caller_has_merge_method() {
 
 # The repository comes only from the URL and the head commit comes only from the
 # check state this merge classified, so neither may be supplied by the caller.
+# --admin joins them because "never merge a red PR" leans on the forge's own
+# required-check and review gates as its backstop, and administrator merge is
+# exactly the flag that lands a PR past them. The classification above already
+# refuses red before any CLI runs, so this removes no protection the caller had;
+# it makes an argument that never reached the forge an explicit refusal.
 reject_derived_overrides() {
   local arg
   for arg in "$@"; do
@@ -125,6 +142,10 @@ reject_derived_overrides() {
         ;;
       --match-head-commit|--match-head-commit=*)
         echo "error: extra merge arguments must not override the head commit; it comes only from the check state this merge classified" >&2
+        return 1
+        ;;
+      --admin)
+        echo "error: extra merge arguments must not include --admin; merging past the forge's own required checks and reviews is not something this guarded path does" >&2
         return 1
         ;;
     esac
@@ -185,15 +206,16 @@ pr_merge_cleanup() {
 trap pr_merge_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-# The rollup is asked for as data, not prose: a "head|<sha>" header naming the
-# commit the rollup describes, a "rollup|<count>" header the forge itself counts,
-# then one "<conclusion>|<state>|<name>" row per entry. The name is last so a
-# name containing the separator still parses, and conclusion and state are forge
-# enums that cannot contain one. The head comes from this same read so it is the
-# head the rollup was computed for, not whatever the branch points at by the time
-# the merge runs. A missing or non-array rollup field errors out of the filter,
-# so a read that cannot see the rollup fails instead of looking green and empty.
-CHECK_ROLLUP_FILTER='if (.statusCheckRollup | type) == "array" then ("head|\(.headRefOid // "")", (.statusCheckRollup | "rollup|\(length)", (.[] | [(.conclusion // ""), (.state // ""), ((.name // .context // "") | gsub("[\n\r]"; " "))] | join("|")))) else error("statusCheckRollup is missing from the PR view") end'
+# The rollup is asked for as data, not prose: a "state|<state>" header naming
+# where the PR itself stands, a "head|<sha>" header naming the commit the rollup
+# describes, a "rollup|<count>" header the forge itself counts, then one
+# "<conclusion>|<state>|<name>" row per entry. The name is last so a name
+# containing the separator still parses, and conclusion and state are forge enums
+# that cannot contain one. The head comes from this same read so it is the head
+# the rollup was computed for, not whatever the branch points at by the time the
+# merge runs. A missing or non-array rollup field errors out of the filter, so a
+# read that cannot see the rollup fails instead of looking green and empty.
+CHECK_ROLLUP_FILTER='"state|\(.state // "")", "head|\(.headRefOid // "")", (if (.statusCheckRollup | type) == "array" then (.statusCheckRollup | "rollup|\(length)", (.[] | [(.conclusion // ""), (.state // ""), ((.name // .context // "") | gsub("[\n\r]"; " "))] | join("|"))) else error("statusCheckRollup is missing from the PR view") end)'
 
 # Collapse whatever the CLI wrote to stderr into one bounded line. An expired
 # token, a missing scope, a rate limit, and a filter error each need a different
@@ -208,27 +230,41 @@ gh_error_detail() {
   printf '%s' "$detail"
 }
 
-# Read the PR's check rollup once. Sets CHECK_HEAD to the head commit the rollup
-# describes, CHECK_TOTAL to the count the forge reports and CHECK_ROWS to its
-# rows, and returns 1 when the state could not be established at all (CLI
-# failure, or output that does not carry the headers), leaving CHECK_READ_DETAIL
-# naming the cause.
+# Read the PR's check rollup once. Sets PR_STATE to where the PR itself stands,
+# CHECK_HEAD to the head commit the rollup describes, CHECK_TOTAL to the count
+# the forge reports and CHECK_ROWS to its rows, and returns 1 when the state
+# could not be established at all (CLI failure, or output that does not carry the
+# headers), leaving CHECK_READ_DETAIL naming the cause.
 read_check_state() {
   local out header
   CHECK_ROWS=
   CHECK_TOTAL=0
   CHECK_HEAD=
+  PR_STATE=
   CHECK_READ_DETAIL=
   GH_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-gh.XXXXXX") || {
     CHECK_READ_DETAIL="the CLI's diagnostics could not be captured"
     return 1
   }
   out=$(gh pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
-    --json statusCheckRollup,headRefOid -q "$CHECK_ROLLUP_FILTER" 2>"$GH_ERR_FILE") || {
+    --json state,statusCheckRollup,headRefOid -q "$CHECK_ROLLUP_FILTER" 2>"$GH_ERR_FILE") || {
     CHECK_READ_DETAIL=$(gh_error_detail)
     [ -n "$CHECK_READ_DETAIL" ] || CHECK_READ_DETAIL="the CLI failed without reporting a reason"
     return 1
   }
+  header=${out%%$'\n'*}
+  case "$header" in
+    "state|"*) PR_STATE=${header#state|} ;;
+    *)
+      CHECK_READ_DETAIL="the rollup query returned no PR state header"
+      return 1
+      ;;
+  esac
+  [ "$out" != "$header" ] || {
+    CHECK_READ_DETAIL="the rollup query returned no usable header"
+    return 1
+  }
+  out=${out#*$'\n'}
   header=${out%%$'\n'*}
   case "$header" in
     "head|"*) CHECK_HEAD=${header#head|} ;;
@@ -404,6 +440,7 @@ CHECK_FAIL=0
 CHECK_PENDING=0
 CHECK_SKIP=0
 CHECK_HEAD=
+PR_STATE=
 FAILING=
 UNREADABLE=
 CHECK_READ_DETAIL=
@@ -464,6 +501,17 @@ grep -qxF "pr=$URL" "$META" || {
   echo "error: PR metadata recording failed" >&2
   exit 1
 }
+
+# A PR that already landed has nothing left to merge, and this path is re-run
+# exactly when a merge succeeded but its report did not survive. Recording the
+# metadata is still the job, so that happens above and the merge itself is left
+# alone. Any override record stays untouched: the authorized merge it describes
+# may be the one that landed, and reconciling it away here would erase a true
+# record of how this PR reached the base branch.
+if [ "$PR_STATE" = MERGED ]; then
+  echo "note: PR $URL is already merged; recorded its metadata and left the merge alone" >&2
+  exit 0
+fi
 
 # Durably record the authorized exception before merging, so the decision
 # survives even if the merge itself is interrupted. A merge that needs no
