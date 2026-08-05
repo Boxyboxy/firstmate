@@ -28,7 +28,6 @@ zsh
 ```
 
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
-OMP 16.4.8 was observed in a pane under the exact process name `omp` on 2026-07-13, and 17.2.2 still reports that exact process name on 2026-07-31 (`ps -o comm=` against a live `omp` process).
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
 ### Agent liveness name sources
@@ -36,8 +35,8 @@ Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.
 In this macOS run that reading reflected a rewritable process title rather than stable executable identity, so it is now one of two independent name sources rather than the sole basis of a verdict.
 
-The seven primary-capable adapters were relaunched on 2026-08-03 with tmux 3.6a on macOS 26.5.2 arm64, each on a private socket in an isolated lab.
-omp is the eighth primary-capable adapter and is not in that guard yet; its own dated process-name evidence is the observation above, and it is attributed through the same exact-name path component the classifier applies to every harness in `FM_HARNESS_NAMES`.
+The drift guard enumerates all nine verified adapters, each launched on a private socket in an isolated lab.
+The seven original primary-capable adapters were relaunched on 2026-08-03 with tmux 3.6a on macOS 26.5.2 arm64; omp joined the same guard on 2026-08-05 and was observed there under tmux 3.6a on macOS 26.5.2 arm64, while the crewmate-only muse adapter carries its own dated evidence below.
 
 ```sh
 tmux -L "$socket" new-window -d -t "$session:" -n "$harness" -c "$wt" -- "$bin"
@@ -55,8 +54,10 @@ Observed identities, and the resulting verdict:
 | pi | 0.82.0 | `pi-launcher` | `pi-signed`, `pi` | alive |
 | pi-signed | 0.82.0 | `pi-launcher` | `pi-signed`, `pi` | alive |
 | grok | 0.2.118 | `grok-0.2.118-ma` | `grok` | alive |
+| omp | omp/17.2.8 | `omp` | `.../bin/omp` | alive |
 | kimi | 0.31.1 | `kimi` | `kimi` | alive |
 
+Every row except omp comes from the 2026-08-03 run; the omp row comes from the 2026-08-05 run that added it, where pi-signed, grok, and kimi were not installed and were therefore skipped rather than reobserved.
 Claude Code is the harness whose title no longer attributes it at all; every other adapter is currently attributed by both sources.
 Codex reported `codex-aarch64-a` at 0.145.0 and `codex` at 0.146.0, and Kimi Code reported `kimi-code` as its foreground `comm` at 0.29.1 and `kimi` at 0.31.1, so these identities move between ordinary patch releases in both directions.
 That is the evidence for treating any single process name as a surface under vendor control rather than a stable contract.
@@ -82,6 +83,10 @@ alive
 On macOS the pane command reflected the rewritable title while the full install path could survive in `ps -o comm=`; in the Linux portable regression those roles reversed for the version-named native executable, with the identifying path retained in argv[0].
 The classifier therefore accepts a harness basename first, then an exact harness path component in the full executable path, then the same component in argv[0], without depending on which field carries it on a given platform.
 
+omp is the only verified adapter with no name of its own in the classifier's explicit branch, so its verdict rests entirely on the exact `omp` component that `FM_HARNESS_NAMES` matches in a reported path.
+The guard therefore asserts that component for omp instead of accepting `alive` alone, because any other harness name leaking into the pane's foreground group would otherwise carry the verdict.
+That exact process name has held across releases: `omp` was observed on 16.4.8 on 2026-07-13, on 17.2.2 on 2026-07-31, and on 17.2.8 in the guard run above.
+
 The portable regression is CI-enforced, while the real-harness drift guard is opt-in under the policy in `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the live guard after any harness upgrade and before trusting or refreshing the table above:
 
@@ -89,12 +94,22 @@ Run the live guard after any harness upgrade and before trusting or refreshing t
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
-Bounded output from the run that produced the table:
+Bounded output from the 2026-08-03 run that produced the seven original rows:
 
 ```text
 ok - harness liveness: claude 2.1.220 (Claude Code) classifies alive
 # claude 2.1.220 (Claude Code): title='2.1.220' foreground=[claude ]
 # checked 7 installed harness(es)
+```
+
+Bounded output from the 2026-08-05 run that added omp:
+
+```text
+# omp omp/17.2.8: title='omp' foreground=[.../bin/omp ]
+# omp omp/17.2.8: attributed by the exact 'omp' component in 'omp'
+ok - harness liveness: omp omp/17.2.8 classifies alive
+# unverified on this machine (not installed): pi-signed grok kimi
+# checked 5 installed harness(es)
 ```
 
 Installed-wrapper checks:

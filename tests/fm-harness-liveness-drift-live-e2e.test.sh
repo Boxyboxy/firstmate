@@ -86,7 +86,7 @@ SKIPPED=
 # so the live process name changes on every auto-update and its install path
 # carries no `muse` component to fall back on. That is precisely the drift this
 # guard exists to catch, and only a real muse release can produce it.
-for harness in claude codex opencode pi pi-signed grok kimi muse; do
+for harness in claude codex opencode pi pi-signed grok omp kimi muse; do
   if ! bin_path=$(resolve_harness_binary "$harness"); then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine, so its classification is unverified here"
@@ -114,6 +114,33 @@ for harness in claude codex opencode pi pi-signed grok kimi muse; do
     "LIVENESS DRIFT: $harness $version is running but classifies '$state', not 'alive'. Supervision and lifecycle control treat this endpoint as unattributable. Observed process title '$title'; observed foreground process names [$comms]. Teach bin/backends/tmux.sh's fm_backend_tmux_classify_process_name the identity this release actually reports."
 
   note "$harness $version: title='$title' foreground=[$comms]"
+
+  # omp is the only verified adapter with no name of its own in
+  # fm_backend_tmux_classify_process_name's explicit branch: it reaches `agent`
+  # solely through the exact `omp` component that FM_HARNESS_NAMES matches in a
+  # reported path. An `alive` verdict alone would not catch a release that
+  # renamed the pane process, because any other harness name leaking into the
+  # foreground group would carry the verdict instead. Assert the component that
+  # actually earns it.
+  if [ "$harness" = omp ]; then
+    omp_component=
+    while IFS= read -r observed; do
+      [ -n "$observed" ] || continue
+      if [ "$(fm_harness_path_name "$observed")" = omp ]; then
+        omp_component=$observed
+        break
+      fi
+    done <<EOF
+$title
+$(fm_backend_tmux_foreground_comms "$target")
+$(fm_backend_tmux_foreground_argv0s "$target")
+EOF
+
+    [ -n "$omp_component" ] || fail \
+      "LIVENESS DRIFT: omp $version classifies 'alive' but no observed identity carries an exact 'omp' path component, so the verdict came from some other name in the pane rather than from omp itself. Observed process title '$title'; observed foreground process names [$comms]. Teach bin/fm-session-lock-lib.sh's FM_HARNESS_NAMES the identity this release actually reports."
+
+    note "omp $version: attributed by the exact 'omp' component in '$omp_component'"
+  fi
 
   pass "harness liveness: $harness $version classifies alive"
   CHECKED=$((CHECKED + 1))
