@@ -173,6 +173,7 @@ GH_ROLLUP_MOCK_BODY='
 # check rollup for the red-PR gate. The PR's head lives in a file rather than
 # baked into the mock, because it is a property of the PR that a case may move
 # mid-run rather than a constant. Args: case_dir head_sha
+# shellcheck disable=SC2016  # Mock source: these expansions must stay literal.
 GH_AXI_TRIPWIRE_MOCK='#!/usr/bin/env bash
 printf "%s\n" "$*" >> "$FM_TEST_GH_AXI_LOG"
 exit 0
