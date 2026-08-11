@@ -4,13 +4,6 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-// The Pi extension directory owns the single operational-input helper; omp
-// imports it rather than keeping a second copy. The helper resolves the shell
-// script relative to its own location, so importing it from here is safe.
-import {
-  classifyFirstmateCurrentOperationalText,
-  encodeFirstmateOperationalInput,
-} from "../../.pi/extensions/lib/fm-operational-input.ts";
 
 let forcedThisEpisode = false;
 
@@ -104,6 +97,25 @@ function runSessionstartHook(source: string): Promise<string> {
   return promise;
 }
 
+// bin/fm-operational-input.sh is the ONE owner of the operational envelope, and
+// the .pi extension lib is only a spawnSync wrapper around it. Call the owner
+// directly rather than importing across adapter roots: omp auto-discovers
+// .omp/extensions/ as a self-contained root, so a static import reaching into
+// .pi/extensions/ would make omp's turn-end backstop fail to load anywhere that
+// root is materialized on its own.
+// `kind` exits nonzero on text that is not current operational input, which is
+// how "already encoded" is distinguished from "needs encoding".
+function operationalInput(command: "kind" | "encode", body: string, kind?: string): string | undefined {
+  const args = command === "encode" ? [command, kind ?? ""] : [command];
+  const result = spawnSync(`${root}/bin/fm-operational-input.sh`, args, {
+    encoding: "utf8",
+    input: body,
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.status !== 0) return undefined;
+  return result.stdout;
+}
+
 async function injectSessionstart(pi: ExtensionAPI, source: string): Promise<void> {
   const raw = await runSessionstartHook(source);
   if (!raw) return;
@@ -112,10 +124,13 @@ async function injectSessionstart(pi: ExtensionAPI, source: string): Promise<voi
     // injects must carry operational provenance or the Ahoy skill would have to
     // guess whether it was captain-authored. The wrapper already returns an
     // encoded nudge on a context-preserving open, so only an unencoded digest
-    // needs the marker added here.
-    const content = classifyFirstmateCurrentOperationalText(raw)
-      ? raw
-      : encodeFirstmateOperationalInput("session-start", raw);
+    // needs the marker added here. An encoder that cannot run sends NOTHING
+    // rather than unmarked text, because unmarked text reads as captain-authored.
+    let content: string | undefined = raw;
+    if (!operationalInput("kind", raw)) {
+      content = operationalInput("encode", raw, "session-start");
+    }
+    if (content === undefined) return;
     pi.sendMessage({
       customType: "firstmate-sessionstart-nudge",
       content,

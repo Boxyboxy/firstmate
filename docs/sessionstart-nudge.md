@@ -76,7 +76,7 @@ A lock another session holds and a truncated digest therefore surface as digest 
 
 Pi and OMP are the adapters that inject a message rather than hook stdout, so whatever they inject must carry operational provenance or the Ahoy skill would have to guess whether it was captain-authored.
 Each extension therefore encodes an unencoded digest as `session-start` operational input before sending it, and leaves the already-encoded nudge alone.
-Both share one encoder, `.pi/extensions/lib/fm-operational-input.ts`, so the two transports cannot drift apart on provenance.
+Both call `bin/fm-operational-input.sh`, the one owner of the envelope, so the two transports cannot drift apart on provenance.
 Each streams the hook to completion and retains at most 512 KiB for message delivery; this approved containment keeps the prefix and appends a loud `PI SESSION-START DELIVERY TRUNCATED` or `OMP SESSION-START DELIVERY TRUNCATED` marker with direct-inspection guidance whenever the digest is incomplete.
 
 The OpenCode nudge runs only on `session.created`.

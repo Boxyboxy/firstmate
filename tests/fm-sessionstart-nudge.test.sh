@@ -212,14 +212,12 @@ test_omp_extension_delivers_exact_nudge_for_allowed_reasons() {
   root="$TMP_ROOT/omp-primary"
   ext="$root/.omp/extensions/fm-primary-turnend-guard.ts"
   make_primary "$root"
-  mkdir -p "$root/.omp/extensions" "$root/.pi/extensions/lib"
+  mkdir -p "$root/.omp/extensions"
   git -C "$ROOT" ls-files --error-unmatch .omp/extensions/fm-primary-turnend-guard.ts >/dev/null 2>&1 \
     || fail "omp primary extension must be git-tracked so omp auto-discovers it"
   cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
-  # The operational-input encoder has ONE owner, under .pi/extensions/lib; the
-  # omp extension imports it across directories rather than keeping a copy, so
-  # the fake root must carry it for the import to resolve.
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$root/.pi/extensions/lib/"
+  # The extension calls bin/fm-operational-input.sh, the one owner of the
+  # operational envelope, so an omp-only root needs nothing from .pi.
   cp "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
   cat > "$root/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
