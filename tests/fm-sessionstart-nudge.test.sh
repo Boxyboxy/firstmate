@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
-# Behavior and tracked-registration tests for the native session-start nudge.
+# Behavior tests for both native session-open tiers: the nudge wrapper that
+# only asks the agent to take the helm, and the run wrapper that takes it.
+#
+# The run-wrapper cases drive the REAL bin/fm-session-start.sh against a
+# throwaway home, so they prove routing by the digest that actually appears,
+# not by inspecting the wrapper's source. docs/sessionstart-nudge.md owns the
+# tier assignment and the source table these pin.
 set -u
+
+# Run the whole suite beneath one long-lived fixture harness, matching the real
+# lifecycle in which startup and later clear/compact hooks share one harness
+# ancestor. This also prevents a developer's ambient harness from making the
+# portable regression pass locally while failing on a harness-free CI runner.
+if [ "${FM_SESSIONSTART_TEST_HARNESS:-0}" != 1 ]; then
+  HARNESS_FIXTURE=$(mktemp -d "${TMPDIR:-/tmp}/fm-sessionstart-harness.XXXXXX") || exit 1
+  ln -s /bin/bash "$HARNESS_FIXTURE/codex" || exit 1
+  # shellcheck disable=SC2016 # Expand in the fixture shell, not this parent.
+  FM_SESSIONSTART_TEST_HARNESS=1 "$HARNESS_FIXTURE/codex" \
+    -c '"$@"; rc=$?; :; exit "$rc"' _ "$0" "$@"
+  HARNESS_STATUS=$?
+  rm -rf "$HARNESS_FIXTURE"
+  exit "$HARNESS_STATUS"
+fi
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -9,6 +30,7 @@ unset NO_MISTAKES_GATE
 
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
+RUN="$ROOT/bin/fm-sessionstart-run.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
 NUDGE_TEXT="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
@@ -148,35 +170,45 @@ EOF
   pass "OpenCode session.created delivers the exact wrapper nudge once per session"
 }
 
-# The hook-config harnesses (claude, codex, grok) register the wrapper through a
-# tracked JSON hook whose registration - matcher, count, and invoked command - is
+# The hook-config harnesses (claude, codex, grok) register a wrapper through a
+# tracked JSON hook whose registration - count, tier, and invoked command - is
 # the observable contract, so it is asserted through jq on the config itself.
+# Which wrapper each one invokes is its TIER, owned by docs/sessionstart-nudge.md:
+# Claude and Codex exec are run-tier and call fm-sessionstart-run.sh, while Grok
+# stays nudge-tier because it discards hook stdout from model context.
+# Claude's hook is deliberately UNMATCHED so every source reaches it and the
+# wrapper reads `source` from the hook payload instead of a matcher.
 # The extension/plugin harnesses (opencode, pi, pi-signed, omp) are covered by
 # driving the tracked adapter and observing what it delivers.
 test_hook_config_harness_registration() {
   local command
   jq -e '.hooks.SessionStart | length == 1' "$ROOT/.claude/settings.json" >/dev/null \
     || fail "Claude SessionStart hook is not registered exactly once"
-  jq -e '.hooks.SessionStart[0].matcher == "startup|resume|clear"' "$ROOT/.claude/settings.json" >/dev/null \
-    || fail "Claude SessionStart matcher must include startup/resume/clear and exclude compact"
-  jq -e 'any(.hooks.SessionStart[]?.hooks[]?.command?; contains("fm-sessionstart-nudge.sh"))' \
-    "$ROOT/.claude/settings.json" >/dev/null || fail "Claude SessionStart hook does not invoke the wrapper"
+  jq -e '.hooks.SessionStart[0] | has("matcher") | not' "$ROOT/.claude/settings.json" >/dev/null \
+    || fail "Claude's SessionStart hook must stay unmatched so every source reaches the wrapper"
+  jq -e 'any(.hooks.SessionStart[]?.hooks[]?.command?; contains("fm-sessionstart-run.sh"))' \
+    "$ROOT/.claude/settings.json" >/dev/null || fail "Claude SessionStart hook does not invoke the run-tier wrapper"
 
   command=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$ROOT/.codex/hooks.json")
-  assert_contains "$command" 'fm-sessionstart-nudge.sh' "Codex SessionStart hook does not invoke the wrapper"
+  assert_contains "$command" 'fm-sessionstart-run.sh' "Codex SessionStart hook does not invoke the run-tier wrapper"
 
   command=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$ROOT/.grok/hooks/fm-primary-sessionstart-nudge.json")
-  assert_contains "$command" 'fm-sessionstart-nudge.sh' "Grok SessionStart hook does not invoke the wrapper"
+  assert_contains "$command" 'fm-sessionstart-nudge.sh' "Grok SessionStart hook does not invoke the nudge-tier wrapper"
 
-  pass "the hook-config harnesses register the shared session-start nudge exactly once"
+  pass "the hook-config harnesses each register their tier's session-start wrapper exactly once"
 }
 
-# omp has verified native session_start. Its tracked primary extension reuses the
-# Pi-derived pi.sendMessage context injection, so the guarantee worth pinning is
-# behavioral: for startup/new/resume it delivers exactly the wrapper's bytes as a
-# non-displayed custom message, and for any other reason it delivers nothing.
+# omp has verified native session_start. Its tracked primary extension reuses
+# Pi's run tier and the same pi.sendMessage context injection, so the guarantee
+# worth pinning is behavioral and belongs to the TRANSPORT, not to the wrapper:
+# each allowed reason must reach bin/fm-sessionstart-run.sh under its own
+# --source name and deliver exactly what the wrapper printed as a non-displayed
+# custom message, any other reason must deliver nothing, and session_compact
+# must re-emit under the compact source. The wrapper's own source semantics are
+# owned by the run-tier cases below, so this drives it through a stub that
+# echoes the source it was handed.
 test_omp_extension_delivers_exact_nudge_for_allowed_reasons() {
-  local root ext out status=0
+  local root ext out status=0 digest expected_digest
   root="$TMP_ROOT/omp-primary"
   ext="$root/.omp/extensions/fm-primary-turnend-guard.ts"
   make_primary "$root"
@@ -184,10 +216,28 @@ test_omp_extension_delivers_exact_nudge_for_allowed_reasons() {
   git -C "$ROOT" ls-files --error-unmatch .omp/extensions/fm-primary-turnend-guard.ts >/dev/null 2>&1 \
     || fail "omp primary extension must be git-tracked so omp auto-discovers it"
   cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ext"
-  cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
-    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
-  chmod +x "$root/bin/fm-sessionstart-nudge.sh"
-  out=$(PLUGIN="$ext" FM_HOME="$root" EXPECTED="$NUDGE_LINE" \
+  # The extension calls bin/fm-operational-input.sh, the one owner of the
+  # operational envelope, so an omp-only root needs nothing from .pi.
+  cp "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
+  cat > "$root/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+source=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --source) source=${2:-}; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'DIGEST source=%s\n' "$source"
+SH
+  chmod +x "$root/bin/fm-sessionstart-run.sh"
+  # The extension encodes an unencoded digest as session-start operational input
+  # before sending it, so the expected bytes are the encoded form.
+  digest='DIGEST source=startup'
+  fm_operational_input_encode session-start "$digest" expected_digest \
+    || fail "could not build the expected encoded digest"
+  out=$(PLUGIN="$ext" FM_HOME="$root" EXPECTED_DIGEST="$expected_digest" \
     node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
@@ -209,32 +259,275 @@ mod.default(pi);
 
 const sessionStart = handlers.get("session_start");
 if (!sessionStart) throw new Error("omp extension did not register a session_start handler");
+const sessionCompact = handlers.get("session_compact");
+if (!sessionCompact) throw new Error("omp extension did not register a session_compact handler");
 
-for (const reason of ["startup", "new", "resume"]) {
+function only(reason) {
+  if (delivered.length !== 1) throw new Error(`${reason} delivered ${delivered.length} messages`);
+  const message = delivered[0];
+  if (message.via) throw new Error(`${reason} used the follow-up transport, not the context-safe one`);
+  if (message.customType !== "firstmate-sessionstart-nudge") {
+    throw new Error(`${reason} lost the custom type: ${JSON.stringify(message)}`);
+  }
+  if (message.display !== false) throw new Error(`${reason} displayed the operational digest`);
+  return message.content;
+}
+
+// Each allowed reason maps onto its own wrapper source name.
+for (const [reason, source] of [["startup", "startup"], ["new", "clear"], ["resume", "resume"]]) {
   delivered.length = 0;
   await sessionStart({ type: "session_start", reason }, {});
-  if (delivered.length !== 1) throw new Error(`reason ${reason} delivered ${delivered.length} messages`);
-  const message = delivered[0];
-  if (message.via) throw new Error(`reason ${reason} used the follow-up transport, not the context-safe one`);
-  if (message.customType !== "firstmate-sessionstart-nudge") {
-    throw new Error(`reason ${reason} lost the custom type: ${JSON.stringify(message)}`);
-  }
-  if (message.display !== false) throw new Error(`reason ${reason} displayed the operational nudge`);
-  if (message.content !== process.env.EXPECTED) {
-    throw new Error(`reason ${reason} delivered unexpected bytes: ${JSON.stringify(message.content)}`);
+  const content = only(`reason ${reason}`);
+  if (!content.includes(`DIGEST source=${source}`)) {
+    throw new Error(`reason ${reason} did not reach the wrapper as --source ${source}: ${JSON.stringify(content)}`);
   }
 }
 
-for (const reason of ["compact", "clear", ""]) {
+// The startup digest is delivered byte-exactly, wrapped in its operational envelope.
+delivered.length = 0;
+await sessionStart({ type: "session_start", reason: "startup" }, {});
+const startupContent = only("startup");
+if (startupContent !== process.env.EXPECTED_DIGEST) {
+  throw new Error(`startup delivered unexpected bytes: ${JSON.stringify(startupContent)}`);
+}
+// The compaction equivalent for omp re-emits under the compact source.
+delivered.length = 0;
+await sessionCompact({ type: "session_compact" }, {});
+if (!only("session_compact").includes("DIGEST source=compact")) {
+  throw new Error("session_compact did not re-emit the digest under the compact source");
+}
+
+for (const reason of ["reload", "fork", ""]) {
   delivered.length = 0;
   await sessionStart({ type: "session_start", reason }, {});
-  if (delivered.length !== 0) throw new Error(`reason ${reason} is outside the allowlist but delivered a nudge`);
+  if (delivered.length !== 0) throw new Error(`reason ${reason} is outside the allowlist but delivered a digest`);
 }
 EOF
   ) || status=$?
-  expect_code 0 "$status" "omp session_start nudge delivery"
-  [ -z "$out" ] || fail "omp session_start nudge delivery printed output: $out"
-  pass "omp session_start delivers the exact wrapper nudge for startup/new/resume only"
+  expect_code 0 "$status" "omp session_start run-tier delivery"$'\n'"$out"
+  [ -z "$out" ] || fail "omp session_start run-tier delivery printed output: $out"
+  pass "omp session_start reaches the run wrapper under each allowed source and delivers its exact bytes"
+}
+
+# --- run tier ----------------------------------------------------------------
+#
+# make_run_primary builds a primary the run wrapper accepts and the REAL
+# fm-session-start.sh can execute: a git repo on main so the tangle check
+# behaves, plus the home directories the digest reads. The deliberately bare
+# PATH keeps every bootstrap probe fast and hermetic - it reports missing tools
+# instead of reaching the host's real gh/tmux/tasks-axi.
+RUN_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+
+make_run_primary() {
+  local dir=$1
+  mkdir -p "$dir/bin" "$dir/state" "$dir/data" "$dir/config"
+  git init -q -b main "$dir"
+  git -C "$dir" commit -q --allow-empty -m init
+  : > "$dir/AGENTS.md"
+}
+
+run_hook() {  # <root> [args...]
+  local root=$1
+  shift
+  FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
+}
+
+# Every run-tier assertion keys off the digest banner, which fm-session-start.sh
+# prints before the lock result, so routing is proven whether or not the lock
+# was won in the test environment.
+FULL_BANNER="SESSION START - "
+REEMIT_BANNER="SESSION START (CONTEXT RE-EMIT) - "
+
+test_run_startup_runs_the_full_digest() {
+  local root="$TMP_ROOT/run-startup" out status=0
+  make_run_primary "$root"
+  out=$(run_hook "$root" --source startup </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper startup"
+  assert_contains "$out" "$FULL_BANNER$root" "startup did not run the full digest"
+  assert_contains "$out" "lock acquired: harness pid" \
+    "the portable startup fixture did not supply a real harness process"
+  assert_not_contains "$out" "$REEMIT_BANNER" "startup was misrouted to a context re-emit"
+  assert_not_contains "$out" "FIRSTMATE_OP" "a run-tier open also emitted the nudge instruction"
+  assert_contains "$out" "NEXT STEP" "the run wrapper did not deliver a complete digest"
+  pass "run wrapper: startup runs the full digest and never also nudges"
+}
+
+test_run_clear_and_compact_reemit() {
+  local root out source status
+  for source in clear compact; do
+    root="$TMP_ROOT/run-$source"
+    make_run_primary "$root"
+    run_hook "$root" --source startup </dev/null >/dev/null
+    assert_present "$root/state/.session-start-complete" \
+      "startup did not publish the completion proof needed by $source"
+    status=0
+    out=$(run_hook "$root" --source "$source" </dev/null) || status=$?
+    expect_code 0 "$status" "run wrapper $source"
+    assert_contains "$out" "$REEMIT_BANNER$root" "$source did not re-emit the digest"
+    assert_contains "$out" "are NOT repeated" "$source did not report the skipped startup sweeps"
+    assert_contains "$out" "Queued wakes ARE still drained" "$source did not preserve the wake-queue drain"
+    assert_not_contains "$out" "FIRSTMATE_OP" "a $source open also emitted the nudge instruction"
+  done
+  pass "run wrapper: clear and compact re-emit the digest without repeating startup sweeps"
+}
+
+test_run_clear_without_completion_finishes_startup() {
+  local root="$TMP_ROOT/run-clear-incomplete" out status=0
+  make_run_primary "$root"
+  out=$(run_hook "$root" --source clear </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper clear without completion proof"
+  assert_contains "$out" "$FULL_BANNER$root" \
+    "clear skipped full startup when no completed startup could be proven"
+  assert_not_contains "$out" "$REEMIT_BANNER" \
+    "clear trusted lock ownership as proof that startup completed"
+  assert_present "$root/state/.session-start-complete" \
+    "the recovery full startup did not publish completion proof"
+  pass "run wrapper: clear falls back to full startup when completion is unproven"
+}
+
+test_run_clear_rejects_previous_owner_completion() {
+  local root="$TMP_ROOT/run-clear-previous-owner" out status=0 previous_pid
+  make_run_primary "$root"
+  sleep 0 &
+  previous_pid=$!
+  wait "$previous_pid"
+  printf '%s\n' "$previous_pid" > "$root/state/.lock"
+  printf '%s\n' "$previous_pid" > "$root/state/.session-start-complete"
+
+  out=$(run_hook "$root" --source clear </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper clear with previous owner completion"
+  assert_contains "$out" "$FULL_BANNER$root" \
+    "clear treated a previous session's completion as current"
+  assert_not_contains "$out" "$REEMIT_BANNER" \
+    "clear skipped startup sweeps completed only by a previous session"
+  [ "$(cat "$root/state/.lock")" != "$previous_pid" ] \
+    || fail "the recovery startup did not replace the previous session's stale lock"
+  pass "run wrapper: clear accepts completion only from the current harness"
+}
+
+test_pi_large_sessionstart_digest_is_delivered_loudly() {
+  local fixture out status=0
+  command -v node >/dev/null 2>&1 || {
+    echo "skip: node not found for Pi large session-start delivery test"
+    return 0
+  }
+  fixture="$TMP_ROOT/pi-large-digest"
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state" "$fixture/data" "$fixture/config"
+  git init -q -b main "$fixture"
+  git -C "$fixture" commit -q --allow-empty -m init
+  : > "$fixture/AGENTS.md"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/bin/fm-sessionstart-run.sh" "$ROOT/bin/fm-sessionstart-nudge.sh" \
+    "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
+    "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
+  cat > "$fixture/bin/fm-session-start.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'PI_LARGE_DIGEST_PREFIX\n'
+i=0
+while [ "$i" -lt 700 ]; do
+  printf '%01024d' 0
+  i=$((i + 1))
+done
+printf '\nPI_LARGE_DIGEST_SUFFIX\n'
+SH
+  chmod +x "$fixture/bin/"*.sh
+
+  out=$(EXT="$fixture/.pi/extensions/fm-primary-turnend-guard.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_GATE_REFUSE_BYPASS=1 \
+    node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+const messages = [];
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  sendMessage(message) { messages.push(message); },
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?large=${Date.now()}`);
+extension.default(pi);
+await handlers.get("session_start")({ reason: "startup" });
+if (messages.length !== 1) throw new Error(`expected one message, got ${messages.length}`);
+const content = messages[0].content;
+if (!content.includes("PI_LARGE_DIGEST_PREFIX")) throw new Error("digest prefix was lost");
+if (!content.includes("PI SESSION-START DELIVERY TRUNCATED")) throw new Error("truncation marker was lost");
+if (content.includes("PI_LARGE_DIGEST_SUFFIX")) throw new Error("delivery exceeded its declared bound");
+if (!content.includes("FIRSTMATE_OP: v1 session-start:")) throw new Error("operational provenance was lost");
+JS
+  ) || status=$?
+  expect_code 0 "$status" "Pi large session-start delivery"
+  [ -z "$out" ] || fail "Pi large session-start delivery printed output: $out"
+  pass "Pi retains a bounded digest prefix and loudly marks oversized delivery"
+}
+
+test_run_resume_delegates_to_the_nudge() {
+  local root="$TMP_ROOT/run-resume" out status=0
+  make_run_primary "$root"
+  out=$(run_hook "$root" --source resume </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper resume"
+  [ "$out" = "$NUDGE_LINE" ] || fail "resume did not delegate to the exact nudge line, got: $out"
+  assert_absent "$root/state/.lock" "resume acquired the fleet lock instead of delegating"
+  pass "run wrapper: resume delegates to the nudge instead of re-running the digest"
+}
+
+test_run_reads_source_from_the_hook_payload() {
+  local root="$TMP_ROOT/run-payload" out status=0
+  make_run_primary "$root"
+  run_hook "$root" --source startup </dev/null >/dev/null
+  out=$(printf '{"session_id":"s1","hook_event_name":"SessionStart","source":"compact"}' |
+    run_hook "$root") || status=$?
+  expect_code 0 "$status" "run wrapper payload compact"
+  assert_contains "$out" "$REEMIT_BANNER$root" "a compact hook payload was not routed to a re-emit"
+
+  # A fresh root, because the compact case above legitimately took the lock and
+  # an owned lock is exactly when the nudge is supposed to stay silent.
+  root="$TMP_ROOT/run-payload-resume"
+  make_run_primary "$root"
+  status=0
+  out=$(printf '{"source":"resume","cwd":"/nowhere"}' | run_hook "$root") || status=$?
+  expect_code 0 "$status" "run wrapper payload resume"
+  assert_contains "$out" "FIRSTMATE_OP" "a resume hook payload did not delegate to the nudge"
+  assert_not_contains "$out" "SESSION START" "a resume hook payload still ran the digest"
+  pass "run wrapper: the hook payload's source field drives routing with no explicit argument"
+}
+
+test_run_unknown_source_takes_the_helm() {
+  local root="$TMP_ROOT/run-unknown" out status=0
+  make_run_primary "$root"
+  out=$(run_hook "$root" --source somethingnew </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper unknown source"
+  assert_contains "$out" "$FULL_BANNER$root" "an unrecognized source did not fall through to the full digest"
+
+  status=0
+  out=$(printf '{"hook_event_name":"SessionStart"}' | run_hook "$root") || status=$?
+  expect_code 0 "$status" "run wrapper sourceless payload"
+  assert_contains "$out" "$FULL_BANNER$root" "a payload with no source did not fall through to the full digest"
+  pass "run wrapper: an unrecognized or absent source takes the helm rather than skipping it"
+}
+
+test_run_gate_and_scope_are_silent() {
+  local root="$TMP_ROOT/run-gate" base="$TMP_ROOT/run-linked-base" linked="$TMP_ROOT/run-linked"
+  make_run_primary "$root"
+  expect_silent_zero "gate env run" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" --source startup
+  assert_absent "$root/state/.lock" "a gate agent's session open still took the fleet lock"
+
+  fm_git_worktree "$base" "$linked" fm/run-linked
+  mkdir -p "$linked/bin" "$linked/state"
+  : > "$linked/AGENTS.md"
+  expect_silent_zero "linked worktree run" run_hook "$linked" --source startup
+  assert_absent "$linked/state/.lock" "an unmarked task worktree still took the fleet lock"
+  pass "run wrapper: a gate agent and an unmarked task worktree never run a session start"
+}
+
+test_run_reports_a_failed_session_start_as_digest_text() {
+  local root="$TMP_ROOT/run-unwritable" out status=0
+  make_run_primary "$root"
+  chmod 0500 "$root/state"
+  out=$(run_hook "$root" --source startup </dev/null) || status=$?
+  chmod 0700 "$root/state"
+  expect_code 0 "$status" "run wrapper with an unwritable state directory"
+  assert_contains "$out" "READ-ONLY SESSION" "a failed lock did not reach the agent as digest text"
+  pass "run wrapper: a session start that cannot take the lock still opens the session and says so"
 }
 
 test_genuine_primary_nudges
@@ -247,3 +540,13 @@ test_owned_lock_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
 test_hook_config_harness_registration
 test_omp_extension_delivers_exact_nudge_for_allowed_reasons
+test_run_startup_runs_the_full_digest
+test_run_clear_and_compact_reemit
+test_run_clear_without_completion_finishes_startup
+test_run_clear_rejects_previous_owner_completion
+test_run_resume_delegates_to_the_nudge
+test_run_reads_source_from_the_hook_payload
+test_run_unknown_source_takes_the_helm
+test_run_gate_and_scope_are_silent
+test_run_reports_a_failed_session_start_as_digest_text
+test_pi_large_sessionstart_digest_is_delivered_loudly
