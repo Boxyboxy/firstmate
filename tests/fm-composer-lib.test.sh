@@ -255,6 +255,44 @@ test_matrix_pi_separated_needs_identity() {
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
 
+test_matrix_omp_arc_pair_needs_identity() {
+  # Real omp: a `╭── π > … ▶───╮` status row with the input row `╰─ … ─╯`
+  # DIRECTLY below it, the typed text sitting ON the closing arc row. The
+  # complete-box machine cannot see it - a box needs content rows BETWEEN its
+  # corners and this pair has none - so before this shape existed an unrelated
+  # row higher up the capture won and an idle omp holding unsubmitted captain
+  # text classified `empty`, which is the away-mode injector's go-signal.
+  local status empty_pair typed_pair narrow_pair stale omp_idle omp_working none
+  status='╭── π > opus > ~/repo > main ▶───╮'
+  omp_idle=$(printf 'omp\tidle'); omp_working=$(printf 'omp\tworking'); none=$(printf 'zsh\t')
+  empty_pair="$status"$'\n''╰─  ─╯'
+  typed_pair="$status"$'\n''╰─ merge fork/main please ─╯'
+  # Pane width decides whether omp renders the closing `─╯`, so the shape is
+  # matched on the leading glyph alone and a narrow pane must still read.
+  narrow_pair="$status"$'\n''╰─ merge fork/main please'
+  assert_screen "omp idle with identity" empty "$CAPS_STYLED" "$empty_pair" '' "$omp_idle"
+  assert_screen "omp typed with identity" pending "$CAPS_STYLED" "$typed_pair" '' "$omp_idle"
+  assert_screen "omp typed in a narrow pane" pending "$CAPS_STYLED" "$narrow_pair" '' "$omp_idle"
+  # Identity is the whole safety conjunction: omp closes ordinary transcript
+  # boxes with the same `╰────╯` glyph, so structure alone must never authorize
+  # an injection.
+  [ "$(fm_composer_classify_screen "$CAPS_STYLED" "$empty_pair")" = need-identity ] \
+    || fail "an identity-capable profile should request the lazy identity probe for omp's arc pair"
+  assert_screen "omp pair without identity capability" unknown "$CAPS_PLAIN" "$empty_pair"
+  assert_screen "working omp defers" unknown "$CAPS_STYLED" "$empty_pair" '' "$omp_working"
+  assert_screen "absent identity cannot prove omp's arc pair" unknown "$CAPS_STYLED" "$empty_pair" '' probe-absent
+  assert_screen "non-omp identity cannot prove the arc pair" unknown "$CAPS_STYLED" "$empty_pair" '' "$none"
+  # Adjacency is the bound that separates the composer from a transcript box: a
+  # box spans its content rows, so it can never present a back-to-back pair.
+  stale=$'╭─ tool output ─╮\n│ ran the suite │\n╰───────────────╯'
+  [ "$(fm_composer_classify_screen "$CAPS_STYLED" "$stale" '' "$omp_idle")" != empty ] \
+    || fail "a closed transcript box must not be read as omp's empty composer"
+  # A live pair BELOW a stale bordered banner is what the shape exists to win.
+  assert_screen "omp pair below a stale banner" pending "$CAPS_STYLED" \
+    "$stale"$'\n'"$typed_pair" '' "$omp_idle"
+  pass "matrix: omp's arc-pair composer needs identity + adjacency; a transcript box never proves it"
+}
+
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding the "Ask anything..." hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
@@ -544,6 +582,7 @@ test_matrix_claude_bare_nbsp_row
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_pi_separated_needs_identity
+test_matrix_omp_arc_pair_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box

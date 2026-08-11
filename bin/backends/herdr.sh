@@ -2612,51 +2612,13 @@ fm_backend_herdr_capture_ansi() {  # <target> <lines>
 # These functions are the ONLY herdr-specific composer knowledge left: the
 # ANSI pane capture (with its small-N workaround), the native `agent get`
 # identity probe, and the capability descriptor. Every shape - the bordered
-# box, the bare agent-glyph row, opencode's left-bar, and pi's
-# identity-gated separated pair (which this adapter pioneered) - now lives in
+# box, the bare agent-glyph row, opencode's left-bar, pi's identity-gated
+# separated pair (which this adapter pioneered), and omp's identity-gated
+# adjacent rounded-arc pair (likewise pioneered here) - now lives in
 # the shared owner (bin/fm-composer-lib.sh, fm_composer_classify_screen), so
 # a new harness shape is taught there once and every backend learns it in the
 # same commit. The muse `⟩` glyph this adapter's local bare-prompt pattern
 # silently omitted is exactly the drift class that consolidation removes.
-
-# Locate the input row and both row positions of the bottom-most ADJACENT
-# rounded-arc pair (omp's composer: a `╭…` status row with a `╰…` input row
-# directly below it). Adjacency is the whole bound: an ordinary transcript box
-# opens and closes around its content rows, so it can never present a
-# back-to-back pair, while the live composer always does. Scanning forward and
-# keeping the last match makes a bottom-anchored composer outrank anything
-# earlier in the capture. Globals let the caller compare this shape's screen
-# position against generic bordered/bare candidates without losing an empty
-# composer's content through command substitution, exactly as the Pi pair does.
-fm_backend_herdr_omp_composer_find() {  # <ansi-capture>
-  local cap=$1 line plain row=0 open_row=0
-  FM_BACKEND_HERDR_OMP_PAIR_FOUND=0
-  FM_BACKEND_HERDR_OMP_PAIR_OPEN_LINE=0
-  FM_BACKEND_HERDR_OMP_PAIR_LINE=0
-  FM_BACKEND_HERDR_OMP_CONTENT=""
-  while IFS= read -r line; do
-    row=$((row + 1))
-    plain=$(fm_backend_herdr_strip_ansi "$line")
-    plain="${plain#"${plain%%[![:space:]]*}"}"
-    plain="${plain%"${plain##*[![:space:]]}"}"
-    case "$plain" in
-      '╭'*)
-        open_row=$row
-        ;;
-      '╰'*)
-        if [ "$open_row" -ne 0 ] && [ "$row" -eq "$((open_row + 1))" ]; then
-          FM_BACKEND_HERDR_OMP_PAIR_FOUND=1
-          FM_BACKEND_HERDR_OMP_PAIR_OPEN_LINE=$open_row
-          FM_BACKEND_HERDR_OMP_PAIR_LINE=$row
-          FM_BACKEND_HERDR_OMP_CONTENT=$line
-        fi
-        open_row=0
-        ;;
-    esac
-  done <<EOF
-$cap
-EOF
-}
 
 fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   local out

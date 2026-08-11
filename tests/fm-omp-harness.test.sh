@@ -463,17 +463,20 @@ test_omp_busy_token_defaults() {
 # harness-scoped (a deleted omp case arm would fail here even if the literal
 # default above still parsed).
 test_omp_busy_signature_behavioral() {
-  local capture
+  local capture cursor
   # shellcheck source=/dev/null
   . "$TMUX_LIB"
   unset FM_BUSY_REGEX
   capture="$TMP_ROOT/omp-busy-pane"
+  cursor="$TMP_ROOT/omp-busy-cursor"
+  printf '0\n' > "$cursor"
   # Invoked indirectly: fm_pane_is_busy shells out to `tmux capture-pane`, so
   # the call site is not statically visible here.
   # shellcheck disable=SC2329
   tmux() {
     case "${1:-}" in
       capture-pane) cat "$capture" ;;
+      display-message) cat "$cursor" ;;
       *) return 0 ;;
     esac
   }
@@ -487,12 +490,30 @@ test_omp_busy_signature_behavioral() {
   if fm_pane_is_busy fake codex; then
     fail "omp's ⟦esc⟧ signature leaked into codex's harness-scoped matcher"
   fi
-  # No-box fallback path (allow_busy=1): an omp busy footer must classify empty
-  # (Enter queued) so fm-send does not false-report a swallowed steer for omp.
-  [ "$(fm_tmux_composer_row_state '⠧ Working… ⟦esc⟧' 0 1)" = empty ] \
-    || fail "omp busy footer on the no-box fallback must classify empty (queued), not pending"
+  # Busy-queued Enter: omp accepts an Enter mid-turn and queues it while the
+  # typed text stays visible, so a still-pending composer on a BUSY pane is a
+  # queued submit, not a swallowed one. The submit loop owns that conversion
+  # (bin/fm-tmux-lib.sh), and omp's ⟦esc⟧ footer is what proves the pane busy,
+  # so fm-send must not false-report a swallowed steer for omp.
+  printf '%s\n' \
+    '╭──────────────────╮' \
+    '│ steer text       │' \
+    '╰──────────────────╯' \
+    '⠧ Working… ⟦esc⟧' > "$capture"
+  printf '1\n' > "$cursor"
+  [ "$(fm_tmux_composer_state fake)" = pending ] \
+    || fail "an omp composer holding typed text should read pending, got '$(fm_tmux_composer_state fake)'"
+  [ "$(fm_tmux_submit_enter_core fake 1 0)" = empty ] \
+    || fail "a pending omp composer on a busy pane must report the Enter queued (empty), not swallowed"
+  # The same pending composer on an IDLE pane stays a genuine swallow.
+  printf '%s\n' \
+    '╭──────────────────╮' \
+    '│ steer text       │' \
+    '╰──────────────────╯' > "$capture"
+  [ "$(fm_tmux_submit_enter_core fake 1 0)" = pending ] \
+    || fail "a pending omp composer on an idle pane must stay a swallowed Enter, not be reported queued"
   unset -f tmux
-  pass "fm_pane_is_busy classifies omp's ⟦esc⟧ footer busy, ignores idle, and does not leak across harnesses"
+  pass "fm_pane_is_busy classifies omp's ⟦esc⟧ footer busy, ignores idle, does not leak across harnesses, and converts a busy pending submit to queued"
 }
 
 test_omp_detection_ompcode_beats_claudecode
