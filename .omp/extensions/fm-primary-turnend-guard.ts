@@ -4,6 +4,13 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+// The Pi extension directory owns the single operational-input helper; omp
+// imports it rather than keeping a second copy. The helper resolves the shell
+// script relative to its own location, so importing it from here is safe.
+import {
+  classifyFirstmateCurrentOperationalText,
+  encodeFirstmateOperationalInput,
+} from "../../.pi/extensions/lib/fm-operational-input.ts";
 
 let forcedThisEpisode = false;
 
@@ -56,10 +63,67 @@ function markLoaded() {
   return true;
 }
 
-function runSessionstartNudge(): string {
-  const result = spawnSync(`${root}/bin/fm-sessionstart-nudge.sh`, [], { encoding: "utf8" });
-  if (result.status !== 0) return "";
-  return result.stdout.trim();
+// omp shares Pi's extension surface, so this mirrors the Pi adapter's run tier
+// rather than the older one-line nudge: bin/fm-sessionstart-run.sh owns what
+// each session-open source means, and this maps omp's verified session_start
+// reasons (startup, new, resume) onto its --source names and injects whatever it
+// prints. omp 17.2.11 also emits session_compact, its compaction equivalent.
+const sessionstartDeliveryBytes = 512 * 1024;
+const sessionstartTruncatedMarker =
+  "\n\nOMP SESSION-START DELIVERY TRUNCATED - the digest exceeded 512 KiB. " +
+  "Treat omitted context as unread and inspect the named files directly before acting on it.";
+
+function runSessionstartHook(source: string): Promise<string> {
+  const { promise, resolve: resolveResult } = Promise.withResolvers<string>();
+  const child = spawn(`${root}/bin/fm-sessionstart-run.sh`, ["--source", source], {
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  const chunks: Buffer[] = [];
+  let retainedBytes = 0;
+  let truncated = false;
+  child.stdout.on("data", (chunk: Buffer) => {
+    if (retainedBytes >= sessionstartDeliveryBytes) {
+      truncated = true;
+      return;
+    }
+    const remaining = sessionstartDeliveryBytes - retainedBytes;
+    const retained = chunk.length <= remaining ? chunk : chunk.subarray(0, remaining);
+    chunks.push(retained);
+    retainedBytes += retained.length;
+    if (retained.length !== chunk.length) truncated = true;
+  });
+  child.on("error", () => resolveResult(""));
+  child.on("close", (code) => {
+    if (code !== 0) {
+      resolveResult("");
+      return;
+    }
+    const raw = Buffer.concat(chunks).toString("utf8").trim();
+    resolveResult(truncated ? `${raw}${sessionstartTruncatedMarker}` : raw);
+  });
+  return promise;
+}
+
+async function injectSessionstart(pi: ExtensionAPI, source: string): Promise<void> {
+  const raw = await runSessionstartHook(source);
+  if (!raw) return;
+  try {
+    // Like Pi, omp injects a MESSAGE rather than hook stdout, so whatever it
+    // injects must carry operational provenance or the Ahoy skill would have to
+    // guess whether it was captain-authored. The wrapper already returns an
+    // encoded nudge on a context-preserving open, so only an unencoded digest
+    // needs the marker added here.
+    const content = classifyFirstmateCurrentOperationalText(raw)
+      ? raw
+      : encodeFirstmateOperationalInput("session-start", raw);
+    pi.sendMessage({
+      customType: "firstmate-sessionstart-nudge",
+      content,
+      display: false,
+      details: { kind: "session-start" },
+    });
+  } catch {
+  }
 }
 
 function runGuard(): Promise<{ code: number; stderr: string }> {
@@ -105,15 +169,18 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on?.("session_start", (event) => {
+  pi.on?.("session_start", async (event) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
-    const nudge = ["startup", "new", "resume"].includes(reason) ? runSessionstartNudge() : "";
+    const source = { startup: "startup", new: "clear", resume: "resume" }[reason];
     markLoaded();
-    if (!nudge) return;
-    try {
-      pi.sendMessage({ customType: "firstmate-sessionstart-nudge", content: nudge, display: false });
-    } catch {
-    }
+    if (!source) return;
+    await injectSessionstart(pi, source);
+  });
+
+  // omp's compaction equivalent. The digest is what a compacted session has just
+  // lost, so re-emitting it here is the point rather than a side effect.
+  pi.on?.("session_compact", async () => {
+    await injectSessionstart(pi, "compact");
   });
 
   pi.on("tool_call", async (event) => {
