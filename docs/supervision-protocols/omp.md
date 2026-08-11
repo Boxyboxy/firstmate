@@ -3,7 +3,7 @@ Mode: omp background-notify supervision.
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
    After handling all emitted wakes and reconciling open decisions, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
-2. Source `__FM_X_MODE_ENV__` first when X mode is active.
+2. Source `__FM_X_MODE_ENV__` first when Relay is active.
 3. Run `bin/fm-watch-arm.sh` as its own omp background async job, with the bash tool's `timeout` set to `0` so the command deadline is disabled.
    The arm is expected to park indefinitely while the fleet is quiet, so omp's default deadline would kill the wake delivery path even though the watcher itself is healthy; a deadline kill is not a watcher failure.
 4. Never bundle the arm command with other commands.
