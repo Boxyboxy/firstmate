@@ -98,19 +98,25 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
   It preserves proven idle composers as empty but requires a genuine container around shell glyphs; see `docs/herdr-backend.md` "Composer and injection safety" for the operator contract.
   `pane_input_pending` is the tested fail-closed predicate for callers that need to know whether the composer is unsafe: it treats every result except exact `empty` as pending.
 
-A busy primary pane, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
+A busy primary pane, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick, and past max-defer it reaches firstmate through the durable channel below instead of waiting for a pane that may never be injectable.
 In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
 
-**Max-defer escape (the daemon must never silently wedge).**
+**Max-defer escape and injection-independent durable delivery (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
 attempts one normal flush, which still requires an idle pane and an affirmatively empty composer.
-The alarm is defense in depth rather than a substitute for keeping every genuinely idle supported composer injectable.
-If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
-an ERROR in the daemon log, a durable
-`state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
-catch-up if present), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
+If that submit cannot be confirmed, injection has demonstrably failed for a whole window, so the daemon escalates the CHANNEL rather than repeating itself.
+
+It publishes the batched digest to the durable wake queue as one `check` record keyed `away-undelivered`, and only then raises the loud, rate-limited wedge alarm: an ERROR in the daemon log naming which channel is holding the digest, a durable `state/.subsuper-inject-wedged` marker (surface it on the "while you were out" catch-up if present), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
 `docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
-So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
+The durable record is what makes an undeliverable digest reach firstmate at all: firstmate drains that queue at the start of every wake-handling turn, with nobody typing into a pane.
+This matters most on a primary whose supervision IS an in-turn background job, such as omp's parked background arm task, because that session is genuinely mid-turn for as long as supervision is armed and its busy guard therefore correctly refuses every injection - the 2026-08-14 overnight incident lost 8.2h of fleet throughput exactly that way.
+A queue record is presented at the next wake-handling turn, so on such a primary it is read when supervision next hands a turn back rather than instantly; it is a durability and visibility guarantee, not a substitute for a wake channel away mode does not have.
+
+That publication changes delivery only, never authority: classification is untouched, so the same digest reaches the same firstmate, which applies the same configured authority from `AGENTS.md` section 7 to it.
+It is bounded so a talkative fleet cannot become hundreds of overnight turns.
+The alarm marker throttles publication to at most one per max-defer window, one record carries the whole batched digest rather than one per event, and a record is refreshed only when the digest content changed - and the queue's own kind+key dedup then presents firstmate exactly one record however many refreshes were appended.
+The daemon drains and acknowledges that same queue, so it skips its own `away-undelivered` record instead of classifying it back into the buffer, and re-publishes it after each acknowledgement for as long as the digest is undelivered.
+So a guard false-positive becomes a visible stall that still reaches firstmate, never an unbounded silent no-op.
 
 ## Submit model
 
@@ -188,14 +194,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
   `FM_COMPOSER_IDLE_RE` overrides the shared idle-placeholder regex, but a match alone never bypasses the classifier's shape-specific position and ANSI de-emphasis safety gates.
   `FM_BUSY_REGEX` overrides the rendered delivery guards plus Grok's isolated task-state fallback.
   A blank or otherwise unidentified input row carries no positive container proof and defers injection, so a modal dialog or a mid-redraw pane is never an injection target.
-- **Max-defer escape** - the daemon must never silently wedge. If anything stays
-  buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one
-  normal flush, which still requires an idle pane and an affirmatively empty composer. If that
-  cannot confirm a submit, it raises a loud, rate-limited wedge alarm: ERROR log,
-  durable `state/.subsuper-inject-wedged` marker, a tmux status-line flash when
-  applicable, and a backend-independent active alert. A
-  composer false-positive surfaces as a visible stall, never an unbounded silent
-  no-op.
+- **Max-defer escape and durable delivery** - owned above by "Max-defer escape and injection-independent durable delivery"; the daemon must never silently wedge, and injection is not its only channel.
 - **Verified type-once submit model** - the digest is typed once (`send-keys -l`
   on tmux, `pane send-text` on herdr), then submitted with Enter and verified.
   Enter is retried, Enter only and never a retype, until the backend submit
@@ -227,7 +226,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
 
 ## Stale-artifact lifecycle
 
-Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-inject-wedged` as session-scoped delivery artifacts, not as the durable work record.
+Treat `state/.subsuper-escalations`, its `.since` sidecar, `state/.subsuper-inject-wedged`, and `state/.subsuper-durable-published` (the hash of the last digest published to the durable wake queue) as session-scoped delivery artifacts, not as the durable work record.
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush and clears it last.
 `docs/herdr-backend.md` "Away-mode supervisor support" owns the current mechanism, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.
@@ -238,6 +237,9 @@ These properties must hold:
 
 - Nothing is lost after queue publication.
   The daemon leaves every presented wake durable until routing completes and post-handling acknowledgement succeeds, so interruption replays the same work to the daemon or its successor.
+  Its own `away-undelivered` record is held to the same rule: the daemon re-publishes it after each acknowledgement while the digest is still undelivered, so acknowledging a cycle can never consume the one record firstmate is meant to read.
+- Away-mode delivery does not depend on an injectable pane.
+  A digest that injection cannot deliver reaches firstmate through the durable wake queue instead, bounded to one presented record per undelivered episode.
 - Wedge detection is bounded-latency, not lossy.
 - Declared external waits are rechecked on a separate, bounded cadence rather than being mislabeled as wedges.
 - The catch-all scan backs up the keyword classifier.

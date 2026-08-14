@@ -1185,6 +1185,191 @@ test_max_defer_pending_composer_alarms_without_typing() {
   pass "max-defer on a pending composer alarms without typing"
 }
 
+# queue_rows <state> [key]: print the durable wake-queue rows, optionally only
+# those carrying <key> in the key field, as this suite's one reader of the
+# queue's tab-separated record shape.
+queue_rows() {  # <state> [key]
+  local state=$1 key=${2:-}
+  local queue="$state/.wake-queue"
+  [ -s "$queue" ] || return 0
+  if [ -n "$key" ]; then
+    awk -F '\t' -v k="$key" 'NF >= 5 && $4 == k { print }' "$queue"
+  else
+    awk -F '\t' 'NF >= 5 { print }' "$queue"
+  fi
+}
+
+# The 2026-08-14 overnight incident, and the 2026-08-09 one before it. On a
+# primary whose supervision IS an in-turn background job (omp's parked background
+# arm), the supervisor pane is genuinely mid-turn for as long as away mode is
+# armed, so the busy guard correctly refuses every injection - 8.2h of
+# "inject deferred: supervisor pane busy" while a needs-decision and two done:
+# PRs sat buffered and undelivered. Injection is no longer the only channel:
+# past max-defer the digest is published to the durable wake queue, which
+# firstmate drains at the start of every wake-handling turn with nobody typing
+# into a pane. The guards themselves are untouched, so nothing is typed into the
+# busy pane and the buffer is still preserved.
+test_undelivered_escalation_reaches_the_durable_wake_queue() {
+  local dir state fakebin sent rows drained
+  dir=$(make_bordered_case durable-undelivered)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  # An omp supervisor pane rendering omp's own verified busy signature.
+  printf '╭─────╮\n│ >   │\n╰─────╯\n⟦esc⟧ interrupt\n' > "$dir/composer"
+  escalate_add "$state" "rvfy-wfu-fa.status: needs-decision: pick the cutover shape"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  (
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+      FM_DAEMON_PRIMARY_HARNESS=omp FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 \
+      FM_INJECT_CONFIRM_SLEEP=0.05 housekeeping "$state"
+  ) || true
+
+  [ ! -s "$sent" ] || fail "the mid-turn supervisor pane was typed into: $(cat "$sent")"
+  rows=$(queue_rows "$state" away-undelivered)
+  [ -n "$rows" ] \
+    || fail "an undeliverable away-mode escalation never reached the durable wake queue: $(queue_rows "$state")"
+  [ "$(printf '%s\n' "$rows" | wc -l | tr -d '[:space:]')" -eq 1 ] \
+    || fail "expected exactly one durable delivery record, got: $rows"
+  [ "$(printf '%s\n' "$rows" | cut -f3)" = check ] \
+    || fail "durable delivery record is not a check wake: $rows"
+  printf '%s\n' "$rows" | cut -f5 | grep -F 'needs-decision: pick the cutover shape' >/dev/null \
+    || fail "durable delivery record did not carry the pre-read digest: $rows"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "buffer discarded once the digest was published (nothing may be lost)"
+  [ -s "$state/.subsuper-inject-wedged" ] \
+    || fail "publishing durably silenced the alarm marker"
+  grep -F 'durable wake queue' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "alarm marker did not record which channel is holding the digest"
+  # The point of the channel is that firstmate actually READS it, so drive the
+  # real drain rather than trusting the queue file: it must present the record
+  # and still demand the generation-bound acknowledgement that keeps it durable.
+  drained=$(FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" 2>"$dir/drain.err") \
+    || fail "the drain firstmate runs every wake-handling turn failed: $(cat "$dir/drain.err")"
+  printf '%s\n' "$drained" | grep -F 'away-undelivered' >/dev/null \
+    || fail "a real drain did not present the record to firstmate: $drained"
+  printf '%s\n' "$drained" | grep -F 'needs-decision: pick the cutover shape' >/dev/null \
+    || fail "the presented record lost its pre-read digest: $drained"
+  grep -F 'WAKE_ACK_REQUIRED' "$dir/drain.err" >/dev/null \
+    || fail "the presented record was not held durable pending acknowledgement: $(cat "$dir/drain.err")"
+  pass "an undeliverable away-mode escalation reaches firstmate through the durable wake queue"
+}
+
+# Requirement: anything genuinely the captain's keeps its existing escalation path
+# and batching. The durable channel is a fallback for a digest injection could
+# not deliver, never a second copy of one it did.
+test_delivered_digest_needs_no_durable_record() {
+  local dir state fakebin sent
+  dir=$(make_bordered_case durable-not-needed)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  escalate_add "$state" "null-refuse-save.status: done: PR https://x/y/pull/1 checks green"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  (
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+      FM_MAX_DEFER_SECS=60 FM_INJECT_CONFIRM_SLEEP=0.05 housekeeping "$state"
+  ) || true
+
+  grep -F 'Supervisor escalate' "$sent" >/dev/null \
+    || fail "captain-relevant digest was not injected on an idle pane: $(cat "$sent")"
+  grep -F 'PR https://x/y/pull/1' "$sent" >/dev/null \
+    || fail "injected digest lost its pre-read content: $(cat "$sent")"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after a confirmed injection"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "a delivered digest raised a wedge alarm"
+  [ -z "$(queue_rows "$state")" ] \
+    || fail "a delivered digest was duplicated onto the durable queue: $(queue_rows "$state")"
+  pass "a digest that injection delivers keeps its existing path and adds no durable record"
+}
+
+# Requirement: a firstmate wake must not fire per poll, and a talkative fleet must
+# not turn one undeliverable digest into hundreds of overnight turns. Two bounds
+# hold that: the alarm marker throttles publication to one attempt per max-defer
+# window however often housekeeping ticks, and the queue's own kind+key dedup
+# presents exactly one record however many windows refreshed it.
+test_durable_delivery_bounds_a_burst_to_one_record() {
+  local dir state fakebin sent tick appends presented
+  dir=$(make_bordered_case durable-burst)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  printf '╭─────╮\n│ >   │\n╰─────╯\n⟦esc⟧ interrupt\n' > "$dir/composer"
+  for tick in 1 2 3 4 5 6 7 8 9 10; do
+    escalate_add "$state" "task-$tick.status: done: PR https://x/y/pull/$tick"
+  done
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+
+  # Ten housekeeping ticks inside ONE max-defer window: the wedge marker written
+  # by the first tick throttles every later one, so this must not fire per poll.
+  for tick in 1 2 3 4 5 6 7 8 9 10; do
+    (
+      PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+        FM_DAEMON_PRIMARY_HARNESS=omp FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 \
+        FM_INJECT_CONFIRM_SLEEP=0.05 housekeeping "$state"
+    ) || true
+  done
+  appends=$(queue_rows "$state" away-undelivered | wc -l | tr -d '[:space:]')
+  [ "$appends" -eq 1 ] \
+    || fail "10 ticks and 10 events inside one max-defer window produced $appends records, not 1"
+
+  # Now open three further windows, each with new events, by dropping the marker
+  # that throttles the escape. The digest content changes every window, so the
+  # record is refreshed rather than left stale - and firstmate is still presented
+  # exactly one record, because the queue dedupes by kind+key.
+  for tick in 11 12 13; do
+    escalate_add "$state" "task-$tick.status: needs-decision: pick a shape"
+    rm -f "$state/.subsuper-inject-wedged"
+    (
+      PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+        FM_DAEMON_PRIMARY_HARNESS=omp FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 \
+        FM_INJECT_CONFIRM_SLEEP=0.05 housekeeping "$state"
+    ) || true
+  done
+  presented=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_wake_print_deduped "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue" | awk -F '\t' '$4 == "away-undelivered"' | wc -l | tr -d '[:space:]')
+  [ "$presented" -eq 1 ] \
+    || fail "firstmate would be presented $presented undelivered records instead of one"
+  presented=$(queue_rows "$state" away-undelivered | tail -1 | cut -f5)
+  case "$presented" in
+    *'needs-decision: pick a shape'*) : ;;
+    *) fail "the refreshed record does not carry the current digest: $presented" ;;
+  esac
+  [ ! -s "$sent" ] || fail "the mid-turn supervisor pane was typed into during the burst"
+  pass "durable delivery is bounded to one record per max-defer window and one presented record"
+}
+
+# Nothing is lost: the daemon drains and acknowledges the SAME durable queue it
+# publishes into, and that acknowledgement is a sequence watermark, so a naive
+# publication would be consumed by the daemon's very next cycle and firstmate
+# would never see it. The record must survive every daemon cycle for as long as
+# the digest is undelivered, and must never be fed back through classification
+# into the escalation buffer it came from.
+test_durable_record_survives_the_daemon_own_drain_cycle() {
+  local dir state before after
+  dir=$(make_supercase durable-survives-drain)
+  state="$dir/state"
+  escalate_add "$state" "rvfy-wfu-fa.status: needs-decision: pick the cutover shape"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  escalate_publish_durable "$state" 600 || fail "durable publication failed"
+  [ -n "$(queue_rows "$state" away-undelivered)" ] || fail "nothing was published to publish-and-drain"
+  before=$(wc -l < "$state/.subsuper-escalations" | tr -d '[:space:]')
+
+  FM_STATE_OVERRIDE="$state" handle_durable_wakes heartbeat "$state" \
+    || fail "handle_durable_wakes did not complete its acknowledgement"
+
+  [ -n "$(queue_rows "$state" away-undelivered)" ] \
+    || fail "the daemon acknowledged away its own durable delivery record: $(queue_rows "$state")"
+  [ "$(queue_rows "$state" away-undelivered | wc -l | tr -d '[:space:]')" -eq 1 ] \
+    || fail "re-ensuring the record left more than one queued: $(queue_rows "$state" away-undelivered)"
+  after=$(wc -l < "$state/.subsuper-escalations" | tr -d '[:space:]')
+  [ "$after" -eq "$before" ] \
+    || fail "the daemon re-classified its own record back into the buffer ($before -> $after lines)"
+  pass "the durable delivery record survives the daemon's own drain and acknowledgement"
+}
+
 test_normal_flush_clears_stale_wedge_marker() {
   local dir state fakebin sent
   dir=$(make_bordered_case normal-clears-wedge)
@@ -1893,6 +2078,10 @@ test_submit_ack_reports_pending_on_persistent_swallow
 test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
+test_undelivered_escalation_reaches_the_durable_wake_queue
+test_delivered_digest_needs_no_durable_record
+test_durable_record_survives_the_daemon_own_drain_cycle
+test_durable_delivery_bounds_a_burst_to_one_record
 test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_nothing
 test_max_defer_afk_inactive_does_not_flush_or_alarm
