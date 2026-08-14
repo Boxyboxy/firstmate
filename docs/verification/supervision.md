@@ -386,3 +386,4 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+These channels are no longer the last resort for an undelivered away-mode escalation; the `afk` skill's "Max-defer escape and injection-independent durable delivery" owns the durable wake-queue channel that runs alongside them, and `tests/fm-daemon.test.sh` covers it.
