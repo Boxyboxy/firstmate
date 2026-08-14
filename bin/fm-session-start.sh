@@ -745,8 +745,11 @@ if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
 elif [ "$PRIMARY_HARNESS" = omp ]; then
   # omp auto-discovers tracked .omp/extensions/*.ts, so there is no bridge to
   # generate (skip generation entirely). Just verify the primary turn-end guard
-  # actually auto-loaded; alarm loudly if discovery silently failed.
-  if ! pi_extension_loaded "$STATE/.omp-turnend-extension-loaded" "$(hash_file "$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts")" "$STATE/.lock"; then
+  # actually auto-loaded; alarm loudly if discovery silently failed. The marker
+  # contract is Pi's, so the shared owner in bin/fm-wake-lib.sh reads it.
+  OMP_TURNEND_EXT="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+  OMP_TURNEND_VERSION=$(fm_pi_extension_version "$OMP_TURNEND_EXT" || printf '')
+  if ! fm_pi_extension_loaded "$STATE/.omp-turnend-extension-loaded" "$OMP_TURNEND_VERSION" "$STATE/.lock"; then
     printf 'OMP_TURNEND_EXTENSION: not loaded - the .omp/extensions guard did not auto-discover; check omp extension discovery / disabledExtensions / --no-extensions before relying on turn-end guard coverage\n'
   fi
 fi
