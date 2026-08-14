@@ -81,7 +81,7 @@ if [ -z "$HARNESS" ]; then
 fi
 
 case "$HARNESS" in
-  claude|codex|opencode|pi|grok|omp) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
+  claude|codex|opencode|pi|grok|cursor|omp) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
   pi-signed) SNIPPET="$DOC_DIR/pi.md" ;;
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
@@ -152,6 +152,9 @@ repair_line() {
     omp)
       printf '%s%s\n' "$prefix" 'resume supervision with bin/fm-watch-arm.sh as its own omp background async job with the command deadline disabled (timeout 0), never shell &.'
       ;;
+    cursor)
+      printf '%s%s\n' "$prefix" 'watcher supervision is owned by the stop-hook park; inspect the hook registration and watcher startup path before ending the turn.'
+      ;;
     *)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision according to the session-start block for this harness; do not use shell &.'
       ;;
@@ -177,6 +180,9 @@ ordinary_wake_line() {
       ;;
     omp)
       printf '%s\n' '- Ordinary wake: re-arm exactly one bin/fm-watch-arm.sh omp background async job with the command deadline disabled (timeout 0), as directed below.'
+      ;;
+    cursor)
+      printf '%s\n' '- Ordinary wake: the stop-hook park (bin/fm-turnend-guard-cursor.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
       ;;
     *)
       printf '%s\n' '- Ordinary wake: follow the continuation in the harness protocol below; do not use shell &.'

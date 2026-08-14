@@ -305,6 +305,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/supervision-protocols/cursor.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/grok.md",
       "audience": "agent-runtime"
     },
@@ -379,6 +383,14 @@
     {
       "path": "docs/zellij-backend.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "skills/diagnosing-bugs/SKILL.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/resolving-merge-conflicts/SKILL.md",
+      "audience": "public-product"
     },
     {
       "path": "skills/stow/SKILL.md",

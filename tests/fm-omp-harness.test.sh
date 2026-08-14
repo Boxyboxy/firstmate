@@ -416,43 +416,39 @@ test_omp_meta_records_harness() {
 
 # --- delivery-guard busy token (per-harness omp default + shared default) ---
 
-# Pull the shipped default literal out of the adapter rather than hardcode it, so
-# the test tracks whatever the adapter actually ships.
-extract_tmux_busy_default() {
-  sed -n "s/.*FM_TMUX_BUSY_REGEX_DEFAULT='\(.*\)'.*/\1/p" "$TMUX_LIB"
-}
-
-extract_tmux_omp_busy_default() {
-  sed -n "s/.*FM_TMUX_OMP_BUSY_REGEX_DEFAULT='\(.*\)'.*/\1/p" "$TMUX_LIB"
+# Exercise the shipped dispatch rather than the source bytes, so the test tracks
+# whatever the adapter actually classifies. The delivery table moved to
+# bin/fm-composer-lib.sh (FM_DELIVERY_*), which fm-tmux-lib.sh sources.
+omp_busy_match() {  # <harness> <line>
+  printf '%s\n' "$2" | fm_busy_lines_match "$1"
 }
 
 # Busy 11 (REQUIRED): omp's per-harness delivery-guard token matches omp's ⟦esc⟧
 # interrupt hint, ignores a clean idle line, and the shared ASCII "Working\.\.\."
 # token does NOT match omp's unicode-ellipsis "Working…".
 # This token is NOT a task-state source - bin/fm-busy-lib.sh's semantic contract
-# owns task busy state. It serves only fm-tmux-lib.sh's delivery guards (fm-send
-# submit acknowledgement and the away-mode supervisor-pane guard), so the
-# assertions below are scoped to fm-tmux-lib.sh alone.
+# owns task busy state. It serves only the delivery guards (fm-send submit
+# acknowledgement and the away-mode supervisor-pane guard), so the assertions
+# below are scoped to that dispatch alone.
 test_omp_busy_token_defaults() {
-  local tmux_re omp_re
-  tmux_re=$(extract_tmux_busy_default)
-  omp_re=$(extract_tmux_omp_busy_default)
-  [ -n "$tmux_re" ] || fail "could not extract FM_TMUX_BUSY_REGEX_DEFAULT from bin/fm-tmux-lib.sh"
-  [ -n "$omp_re" ] || fail "could not extract FM_TMUX_OMP_BUSY_REGEX_DEFAULT from bin/fm-tmux-lib.sh"
+  # shellcheck source=/dev/null
+  . "$TMUX_LIB"
+  unset FM_BUSY_REGEX
   # omp busy: the bracketed interrupt hint rides both the thinking + tool phases.
-  printf '%s\n' '⠧ Working… ⟦esc⟧' | grep -qiE "$omp_re" \
+  omp_busy_match omp '⠧ Working… ⟦esc⟧' \
     || fail "omp busy signature must match omp's ⟦esc⟧ interrupt hint"
-  # The shared default also carries omp's unambiguous ⟦esc⟧ so the harness-agnostic
-  # composer/submit fallback (fm-send submit-ack, away-mode read) classifies omp busy.
-  printf '%s\n' '⠧ Working… ⟦esc⟧' | grep -qiE "$tmux_re" \
+  # The harness-less default also carries omp's unambiguous ⟦esc⟧ so the
+  # harness-agnostic composer/submit fallback (fm-send submit-ack, away-mode
+  # read) classifies omp busy.
+  omp_busy_match '' '⠧ Working… ⟦esc⟧' \
     || fail "shared busy default must match omp's ⟦esc⟧ so the harness-agnostic fallback sees omp busy"
   # omp idle composer: rounded box, no busy footer.
-  if printf '%s\n' '❯ ' | grep -qiE "$omp_re"; then
+  if omp_busy_match omp '❯ '; then
     fail "omp busy signature must not match a clean omp idle line"
   fi
   # NEGATIVE: omp's "Working…" uses U+2026, so the shared ASCII Working\.\.\. token
   # misses it - only the per-harness ⟦esc⟧ hint reliably classifies omp busy.
-  if printf '%s\n' '⠧ Working…' | grep -qiE "$tmux_re"; then
+  if omp_busy_match '' '⠧ Working…'; then
     fail "shared busy default must not match omp's unicode-ellipsis Working… via the ASCII token"
   fi
   pass "omp delivery-guard token matches ⟦esc⟧, ignores idle, and the ASCII Working token misses unicode Working…"
