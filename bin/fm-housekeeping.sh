@@ -75,9 +75,10 @@
 #                         --prune-orphans is never passed.
 #   2. stopped containers
 #   3. dangling volumes - run `docker volume ls --filter dangling=true
-#                         --format '{{.Name}}'` twice, 30 seconds apart, retain
-#                         Docker-generated 64-hex anonymous names, and remove
-#                         only names present in both samples.
+#                         --format '{{.Name}}|{{.Label
+#                         "com.docker.volume.anonymous"}}'` twice, 30 seconds
+#                         apart, and remove only proven-anonymous names present
+#                         in both samples and absent from protected mounts.
 #   4. build cache      - `docker builder prune -f`.
 #   5. orphaned running containers of finished tasks.
 #   6. dangling volumes again - repeat the two-sample removal after orphan
@@ -124,7 +125,7 @@ DF_PATH="${FM_HOUSEKEEPING_DF_PATH:-/}"
 VOLUME_STABILITY_SECONDS="${FM_HOUSEKEEPING_VOLUME_STABILITY_SECONDS:-30}"
 
 usage() {
-  sed -n '2,114{s/^#$//;s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,115{s/^#$//;s/^# \{0,1\}//;p;}' "$0"
 }
 
 if ! [[ "$VOLUME_STABILITY_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
@@ -552,14 +553,53 @@ prune() { # <label> <docker args...>
 
 sample_dangling_volumes() { # <output>
   local output="$1"
-  if docker volume ls --filter dangling=true --format '{{.Name}}' >"$output.all" 2>/dev/null; then
-    awk 'length($0) == 64 && $0 ~ /^[0-9a-f]+$/ { print }' "$output.all" | sort -u >"$output"
+  if docker volume ls --filter dangling=true \
+    --format '{{.Name}}|{{.Label "com.docker.volume.anonymous"}}' >"$output.all" 2>/dev/null; then
+    awk -F'|' '$1 != "" && $2 == "true" { print $1 }' "$output.all" | sort -u >"$output"
   else
     : >"$output"
     warn 'could not list dangling anonymous volumes'
     EXIT=1
     return 1
   fi
+}
+
+container_volume_mounts() { # <container> <output>
+  docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name}}{{end}}{{end}}' \
+    "$1" >"$2" 2>/dev/null
+}
+
+capture_protected_volume_mounts() {
+  local inventory="$WORK/protected-volume-containers" name state project task ports wd mounts
+  [ "${PROTECTED_VOLUMES_CAPTURED:-0}" = 0 ] || return 0
+  : >"$WORK/protected-volumes"
+  if ! docker ps -a --format "$DOCKER_FMT" >"$inventory" 2>/dev/null; then
+    warn 'could not inventory protected container mounts'
+    return 1
+  fi
+  if ! awk -F'|' '
+    NF < 6 { exit 1 }
+    $1 == "" { exit 1 }
+    $2 !~ /^(created|restarting|running|removing|paused|exited|dead)$/ { exit 1 }
+  ' "$inventory"; then
+    warn 'could not parse protected container mounts'
+    return 1
+  fi
+  while IFS='|' read -r name state project task ports wd; do
+    [ -n "$name" ] || continue
+    if grep -qxF "$name" "$WORK/kill-names" &&
+      ! current_live_task_owns "$name" "${project:-}" "${wd:-}" "${task:-}"; then
+      continue
+    fi
+    mounts="$WORK/protected-mounts.$name"
+    if ! container_volume_mounts "$name" "$mounts"; then
+      warn "could not inspect protected container $name mounts"
+      return 1
+    fi
+    cat "$mounts" >>"$WORK/protected-volumes"
+  done <"$inventory"
+  sort -u "$WORK/protected-volumes" -o "$WORK/protected-volumes"
+  PROTECTED_VOLUMES_CAPTURED=1
 }
 
 protected_container_not_running() {
@@ -609,6 +649,11 @@ stable_volume_candidates() { # <label> <output>
   local label="$1" output="$2" blocked count guard_status
   : >"$output"
   sample_dangling_volumes "$output.first" || return 1
+  if ! capture_protected_volume_mounts; then
+    EXIT=1
+    note "  skipped $label: protected container mounts could not be verified"
+    return 0
+  fi
   blocked="$(protected_container_not_running)"
   guard_status=$?
   case "$guard_status" in
@@ -623,13 +668,56 @@ stable_volume_candidates() { # <label> <output>
     0) note "  skipped $label: protected container $blocked is not running"; return 0 ;;
     2) EXIT=1; note "  skipped $label: protected container state could not be verified"; return 0 ;;
   esac
-  comm -12 "$output.first" "$output.second" >"$output"
+  comm -12 "$output.first" "$output.second" >"$output.common"
+  comm -23 "$output.common" "$WORK/protected-volumes" >"$output"
   count="$(awk 'END { print NR + 0 }' "$output")"
   if [ "$APPLY" = 1 ]; then
     note "  reclaiming $count stable anonymous volumes from $label"
   else
     note "  would reclaim $count stable anonymous volumes from $label"
   fi
+}
+
+volume_is_anonymous() { # <volume>
+  [ "$(docker volume inspect --format '{{.Label "com.docker.volume.anonymous"}}' "$1" 2>/dev/null)" = true ]
+}
+
+model_post_orphan_volumes() { # <output>
+  local output="$1" name volume ref shared mounts
+  : >"$output"
+  : >"$WORK/all-container-mounts"
+  while IFS='|' read -r name _state _project _task _ports _wd; do
+    [ -n "$name" ] || continue
+    mounts="$WORK/model-mounts.$name"
+    if ! container_volume_mounts "$name" "$mounts"; then
+      warn "could not inspect container $name mounts for the dry-run second volume pass"
+      EXIT=1
+      return 1
+    fi
+    while IFS= read -r volume; do
+      [ -n "$volume" ] && printf '%s|%s\n' "$name" "$volume" >>"$WORK/all-container-mounts"
+    done <"$mounts"
+  done <"$WORK/inventory"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    awk -F'|' -v name="$name" '$1 == name { print $2 }' "$WORK/all-container-mounts"
+  done <"$WORK/kill-running" | sort -u >"$WORK/post-orphan-mounted-volumes"
+  while IFS= read -r volume; do
+    [ -n "$volume" ] || continue
+    shared=0
+    while IFS= read -r ref; do
+      [ -n "$ref" ] || continue
+      if ! grep -qxF "$ref" "$WORK/kill-names"; then
+        shared=1
+        break
+      fi
+    done < <(awk -F'|' -v volume="$volume" '$2 == volume { print $1 }' "$WORK/all-container-mounts")
+    [ "$shared" = 0 ] || continue
+    volume_is_anonymous "$volume" || continue
+    grep -qxF "$volume" "$WORK/protected-volumes" && continue
+    printf '%s\n' "$volume" >>"$output"
+  done <"$WORK/post-orphan-mounted-volumes"
+  sort -u "$output" -o "$output"
 }
 
 reclaim_stable_volumes() { # <label>
@@ -650,6 +738,14 @@ if [ "$APPLY" = 0 ]; then
     note 'volumes'
     if [ "$INVENTORY_OK" = 1 ]; then
       stable_volume_candidates 'dangling volumes' "$WORK/volumes.dry"
+      note '  post-orphan second-pass volume candidates:'
+      if model_post_orphan_volumes "$WORK/volumes.dry.second-pass" &&
+        [ -s "$WORK/volumes.dry.second-pass" ]; then
+        sed 's/^/    /' "$WORK/volumes.dry.second-pass"
+      else
+        note '    (none)'
+      fi
+      note '  this second-pass set is an upper bound subject to the same apply-time stability check'
     else
       note '  skipped dangling volumes: protected container state could not be verified'
     fi

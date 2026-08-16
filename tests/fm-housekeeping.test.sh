@@ -44,10 +44,22 @@ case "$cmd" in
       exit 0
     fi
     if [ "$all" = 1 ]; then
-      cat "$FM_TEST_DOCKER_FIXTURE"
+      count=$(cat "$FM_TEST_CONTAINER_SAMPLE_COUNT")
+      count=$((count + 1))
+      printf '%s\n' "$count" >"$FM_TEST_CONTAINER_SAMPLE_COUNT"
+      sample="$FM_TEST_CONTAINER_SAMPLE_DIR/$count"
+      if [ -f "$sample" ]; then
+        cat "$sample"
+      else
+        cat "$FM_TEST_DOCKER_FIXTURE"
+      fi
     else
       awk -F'|' '$2=="running" {print $1}' "$FM_TEST_DOCKER_FIXTURE"
     fi
+    ;;
+  inspect)
+    name="${@: -1}"
+    awk -F'|' -v name="$name" '$1 == name {print $2}' "$FM_TEST_CONTAINER_MOUNTS"
     ;;
   rm)
     for a in "$@"; do
@@ -67,6 +79,10 @@ case "$cmd" in
         ;;
       rm)
         printf '%s\n' "$@" >>"$FM_TEST_VOLUME_RM"
+        ;;
+      inspect)
+        name="${@: -1}"
+        awk -F'|' -v name="$name" '$1 == name {print $2}' "$FM_TEST_VOLUME_METADATA"
         ;;
     esac
     ;;
@@ -110,6 +126,10 @@ fm_hk_case() {
   : >"$dir/treehouse.late-live"
   : >"$dir/containers"
   : >"$dir/volume.rm"
+  : >"$dir/container-mounts"
+  : >"$dir/volume-metadata"
+  printf '0\n' >"$dir/container-sample-count"
+  mkdir -p "$dir/container-samples"
   printf '0\n' >"$dir/volume-sample-count"
   mkdir -p "$dir/volume-samples"
   printf '%s\n' "$dir"
@@ -131,6 +151,10 @@ fm_hk_run() { # <dir> <args...>
     FM_TEST_VOLUME_RM="$dir/volume.rm" \
     FM_TEST_VOLUME_SAMPLE_COUNT="$dir/volume-sample-count" \
     FM_TEST_VOLUME_SAMPLE_DIR="$dir/volume-samples" \
+    FM_TEST_CONTAINER_MOUNTS="$dir/container-mounts" \
+    FM_TEST_CONTAINER_SAMPLE_COUNT="$dir/container-sample-count" \
+    FM_TEST_CONTAINER_SAMPLE_DIR="$dir/container-samples" \
+    FM_TEST_VOLUME_METADATA="$dir/volume-metadata" \
     FM_HOUSEKEEPING_VOLUME_STABILITY_SECONDS=0 \
     "$HOUSEKEEPING" "$@" >"$dir/out" 2>"$dir/err"
 }
@@ -404,8 +428,8 @@ test_stable_anonymous_volume_is_reclaimed() {
   local dir volume
   dir=$(fm_hk_case stable-volume)
   volume=$(printf 'a%.0s' {1..64})
-  printf '%s\n' "$volume" >"$dir/volume-samples/1"
-  printf '%s\n' "$volume" >"$dir/volume-samples/2"
+  printf '%s|true\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s|true\n' "$volume" >"$dir/volume-samples/2"
   fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
 
   fm_hk_run "$dir" --apply --no-worktrees
@@ -421,7 +445,7 @@ test_transient_dangling_volume_is_kept() {
   local dir volume
   dir=$(fm_hk_case transient-volume)
   volume=$(printf 'b%.0s' {1..64})
-  printf '%s\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s|true\n' "$volume" >"$dir/volume-samples/1"
   fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
 
   fm_hk_run "$dir" --apply --no-worktrees
@@ -434,7 +458,7 @@ test_nonrunning_protected_container_aborts_volume_phase() {
   local dir volume
   dir=$(fm_hk_case guarded-volume)
   volume=$(printf 'c%.0s' {1..64})
-  printf '%s\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s|true\n' "$volume" >"$dir/volume-samples/1"
   printf '%s\n' pinned-db >"$dir/home/config/housekeeping-keep"
   fm_hk_container "$dir" pinned-db exited '' '' '' ''
 
@@ -446,12 +470,64 @@ test_nonrunning_protected_container_aborts_volume_phase() {
   pass 'a non-running protected container aborts volume reclamation'
 }
 
+test_live_container_mount_stays_protected_after_container_disappears() {
+  local dir volume
+  dir=$(fm_hk_case disappearing-live-container)
+  volume=$(printf 'e%.0s' {1..64})
+  mkdir -p "$dir/home/data/live-alpha"
+  fm_write_meta "$dir/home/state/live-alpha.meta" 'kind=ship' 'worktree=/pool/live-alpha'
+  fm_hk_container "$dir" fm-live-alpha-db running '' '' '' ''
+  printf 'fm-live-alpha-db|%s\n' "$volume" >"$dir/container-mounts"
+  printf '%s|true\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s|true\n' "$volume" >"$dir/volume-samples/2"
+  : >"$dir/container-samples/4"
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply while a live container disappears between volume samples'
+  assert_no_grep "$volume" "$dir/volume.rm" 'removed a volume mounted by live work at the first sample'
+  pass 'a live container mount remains protected after its container disappears'
+}
+
+test_hex_shaped_named_volume_is_kept() {
+  local dir volume
+  dir=$(fm_hk_case hex-named-volume)
+  volume=$(printf 'f%.0s' {1..64})
+  printf '%s|\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s|\n' "$volume" >"$dir/volume-samples/2"
+  fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply with an unlabeled hex-shaped named volume'
+  assert_no_grep "$volume" "$dir/volume.rm" 'removed a named volume based on its name shape'
+  pass 'a hex-shaped named volume without anonymous metadata is kept'
+}
+
+test_dry_run_models_post_orphan_volume_pass() {
+  local dir volume
+  dir=$(fm_hk_case dry-post-orphan-volume)
+  volume=$(printf '9%.0s' {1..64})
+  mkdir -p "$dir/home/data/gone-beta"
+  fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
+  fm_hk_container "$dir" fm-gone-beta-db running '' '' '' ''
+  printf 'fm-gone-beta-db|%s\n' "$volume" >"$dir/container-mounts"
+  printf '%s|true\n' "$volume" >"$dir/volume-metadata"
+
+  fm_hk_run "$dir" --no-worktrees
+  expect_code 0 "$?" 'dry run with an orphan-mounted anonymous volume'
+  assert_grep 'post-orphan second-pass volume candidates' "$dir/out" \
+    'the dry run omitted the distinct second volume pass'
+  assert_grep "$volume" "$dir/out" 'the dry run omitted the orphan-mounted volume'
+  assert_grep 'upper bound subject to the same apply-time stability check' "$dir/out" \
+    'the dry run presented the second-pass model as certain'
+  pass 'the dry run models the post-orphan volume pass'
+}
+
 test_dry_run_deletes_nothing() {
   local dir volume
   dir=$(fm_hk_case dry-run)
   volume=$(printf 'd%.0s' {1..64})
-  printf '%s\n' "$volume" >"$dir/volume-samples/1"
-  printf '%s\n' "$volume" >"$dir/volume-samples/2"
+  printf '%s|true\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s|true\n' "$volume" >"$dir/volume-samples/2"
   mkdir -p "$dir/home/data/gone-beta"
   fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
   fm_hk_container "$dir" fm-gone-beta-db running '' '' '' ''
@@ -488,4 +564,7 @@ test_late_live_worktree_loss_is_reported
 test_stable_anonymous_volume_is_reclaimed
 test_transient_dangling_volume_is_kept
 test_nonrunning_protected_container_aborts_volume_phase
+test_live_container_mount_stays_protected_after_container_disappears
+test_hex_shaped_named_volume_is_kept
+test_dry_run_models_post_orphan_volume_pass
 test_dry_run_deletes_nothing

@@ -79,6 +79,8 @@ Phases run in ascending cost to re-acquire, so an interrupted run has spent the 
    Build cache comes back on the next build, but a volume can contain data that no rebuild restores.
    Losing a worktree costs a re-lease because uncommitted work is protected independently, while losing a volume costs data.
    The volume phase is therefore allowed to be slower and more conservative than every other phase.
+   Deciding a destructive question from the shape of a string instead of an authoritative fact is the same defect class as the original filter failure.
+   The volume phase keeps anything whose anonymity it cannot prove.
 3. **Orphaned running containers with no live owner.**
    This is the only phase that stops something that is currently running, and it acts only on containers positively attributed to a task that has finished.
 4. **Volumes again.**
