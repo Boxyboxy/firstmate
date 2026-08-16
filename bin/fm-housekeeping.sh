@@ -73,6 +73,10 @@
 #                         Treehouse's own refusal to prune a worktree with
 #                         uncommitted changes is never overridden and
 #                         --prune-orphans is never passed.
+#                         Failing closed on live metadata was rejected because it
+#                         disables normal fleet cleanup, and treehouse offers no
+#                         atomic exclusion. The residual window reaches only a
+#                         clean, stale, unleased worktree, so loss costs a re-lease.
 #   2. stopped containers
 #   3. dangling volumes - the shared dry/apply mutation model lists volumes with
 #                         `docker volume ls --filter dangling=true --filter
@@ -83,6 +87,9 @@
 #                         the first sample and remain excluded for the run. The
 #                         phase aborts if protected work is non-running at either
 #                         sample.
+#                         Positive attribution only was rejected because anonymous
+#                         volumes have no attribution and the phase would reclaim
+#                         almost nothing.
 #   4. build cache      - `docker builder prune -f`.
 #   5. orphaned running containers of finished tasks.
 #   6. dangling volumes again - repeat the two-sample removal after orphan
@@ -526,13 +533,24 @@ fi
 # --- phases 2-7 --------------------------------------------------------------
 
 remove_containers() { # <list-file> <label>
-  local list="$1" label="$2" name
+  local list="$1" label="$2" name protection
   [ -s "$list" ] || return 0
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     # Re-assert per name: the keep-list is the last word before any removal.
     if grep -qxF "$name" "$WORK/keep-names"; then
       refuse "refusing to remove $name: it is on the keep-list"
+    fi
+    current_container_protection "$name"
+    protection=$?
+    if [ "$protection" = 0 ]; then
+      note "  kept $label container $name: it became protected before removal"
+      continue
+    fi
+    if [ "$protection" = 2 ]; then
+      warn "could not verify current protections for $name; keeping it"
+      EXIT=1
+      continue
     fi
     if docker rm -f "$name" >/dev/null 2>&1; then
       note "  removed $label container $name"
@@ -541,6 +559,46 @@ remove_containers() { # <list-file> <label>
       EXIT=1
     fi
   done <"$list"
+}
+
+current_container_protection() { # <name>
+  local target="$1" inventory="$WORK/current-containers" name state project task ports wd
+  local target_projects="$WORK/current-target-projects" found=0
+  if ! docker ps -a --format "$DOCKER_FMT" >"$inventory" 2>/dev/null; then
+    return 2
+  fi
+  if ! awk -F'|' '
+    NF < 6 { exit 1 }
+    $1 == "" { exit 1 }
+    $2 !~ /^(created|restarting|running|removing|paused|exited|dead)$/ { exit 1 }
+  ' "$inventory"; then
+    return 2
+  fi
+  : >"$target_projects"
+  while IFS='|' read -r name state project task ports wd; do
+    [ "$name" = "$target" ] || continue
+    found=1
+    [ -n "${project:-}" ] && printf '%s\n' "$project" >>"$target_projects"
+    if matches_keep_pattern "$name" || claimed_by_keep_dir "$name" "${wd:-}" ||
+      current_live_task_owns "$name" "${project:-}" "${wd:-}" "${task:-}" ||
+      { [ "$state" = running ] && case "${ports:-}" in *'->'*) true ;; *) false ;; esac; } ||
+      has_stack_manifest "${wd:-}"; then
+      return 0
+    fi
+  done <"$inventory"
+  [ "$found" = 1 ] || return 0
+  sort -u "$target_projects" -o "$target_projects"
+  [ -s "$target_projects" ] || return 1
+  while IFS='|' read -r name state project task ports wd; do
+    grep -qxF "${project:-}" "$target_projects" || continue
+    if matches_keep_pattern "$name" || claimed_by_keep_dir "$name" "${wd:-}" ||
+      current_live_task_owns "$name" "${project:-}" "${wd:-}" "${task:-}" ||
+      { [ "$state" = running ] && case "${ports:-}" in *'->'*) true ;; *) false ;; esac; } ||
+      has_stack_manifest "${wd:-}"; then
+      return 0
+    fi
+  done <"$inventory"
+  return 1
 }
 
 prune() { # <label> <docker args...>

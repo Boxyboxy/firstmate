@@ -73,12 +73,16 @@ Phases run in ascending cost to re-acquire, so an interrupted run has spent the 
 1. **Worktrees.**
    Treehouse already refuses to prune a worktree with uncommitted changes and reports it instead.
    That refusal is never overridden and never argued with: a skipped worktree is unlanded work, and this sweep has no authority to discard unlanded work under any flag.
+   Failing closed whenever live metadata exists or changes was rejected because a normal active fleet would disable the phase exactly when cleanup is useful, while treehouse offers no atomic exclusion boundary.
+   The remaining window is bounded to a worktree treehouse already considers stale and unleased, firstmate metadata considers live, and treehouse confirms is clean, so a loss costs a re-lease and never unlanded work.
    Report every skipped worktree to the captain by path, as work still sitting on the machine rather than as a housekeeping failure.
 2. **Stopped containers**, then **dangling volumes**, then **build cache**.
    These are the cheap ones.
    Build cache comes back on the next build, but a volume can contain data that no rebuild restores.
    Losing a worktree costs a re-lease because uncommitted work is protected independently, while losing a volume costs data.
    The volume phase is therefore allowed to be slower and more conservative than every other phase.
+   Requiring positive finished-task attribution was rejected because anonymous volumes carry no attribution, so that rule would remove the feature while pretending to protect it.
+   The worktree phase's detect-and-report boundary is not reused here because no report can recover destroyed volume data.
    Deciding a destructive question from the shape of a string instead of an authoritative fact is the same defect class as the original filter failure.
    The volume phase keeps anything whose anonymity it cannot prove.
 3. **Orphaned running containers with no live owner.**

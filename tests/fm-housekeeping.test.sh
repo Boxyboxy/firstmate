@@ -43,6 +43,13 @@ case "$cmd" in
         "$FM_TEST_DOCKER_FIXTURE"
       exit 0
     fi
+    if [ -s "$FM_TEST_CONTAINER_LATE_LIVE" ]; then
+      IFS='|' read -r late_id late_sample <"$FM_TEST_CONTAINER_LATE_LIVE"
+      current_sample=$(cat "$FM_TEST_CONTAINER_SAMPLE_COUNT")
+      if [ "$current_sample" -ge "$late_sample" ] && [ ! -e "$FM_HOME/state/$late_id.meta" ]; then
+        printf 'kind=ship\nworktree=/pool/%s\n' "$late_id" >"$FM_HOME/state/$late_id.meta"
+      fi
+    fi
     if [ "$all" = 1 ]; then
       count=$(cat "$FM_TEST_CONTAINER_SAMPLE_COUNT")
       count=$((count + 1))
@@ -166,6 +173,7 @@ fm_hk_case() {
   : >"$dir/containers"
   : >"$dir/volume.rm"
   : >"$dir/container-mounts"
+  : >"$dir/container.late-live"
   : >"$dir/volume-metadata"
   printf '0\n' >"$dir/container-sample-count"
   mkdir -p "$dir/container-samples"
@@ -193,6 +201,7 @@ fm_hk_run() { # <dir> <args...>
     FM_TEST_CONTAINER_MOUNTS="$dir/container-mounts" \
     FM_TEST_CONTAINER_SAMPLE_COUNT="$dir/container-sample-count" \
     FM_TEST_CONTAINER_SAMPLE_DIR="$dir/container-samples" \
+    FM_TEST_CONTAINER_LATE_LIVE="$dir/container.late-live" \
     FM_TEST_VOLUME_METADATA="$dir/volume-metadata" \
     FM_HOUSEKEEPING_VOLUME_STABILITY_SECONDS=0 \
     "$HOUSEKEEPING" "$@" >"$dir/out" 2>"$dir/err"
@@ -309,6 +318,23 @@ test_orphan_removed_while_live_task_and_stack_are_kept() {
     'removed the serving captain stack'
   assert_no_kept_name_removed "$dir"
   pass 'a finished task loses its containers while live work and live stacks keep theirs'
+}
+
+test_orphan_that_becomes_live_before_removal_is_kept() {
+  local dir
+  dir=$(fm_hk_case late-live-container)
+  mkdir -p "$dir/home/data/gone-beta"
+  fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
+  fm_hk_container "$dir" fm-gone-beta-db running '' '' '' ''
+  printf 'gone-beta|1\n' >"$dir/container.late-live"
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply when an orphan becomes live before removal'
+  assert_no_grep fm-gone-beta-db "$dir/docker.rm" \
+    'removed an orphan whose owning task became live before removal'
+  assert_grep 'became protected before removal' "$dir/out" \
+    'the late live-task protection was not reported'
+  pass 'an orphan whose task becomes live before removal is kept'
 }
 
 test_finished_task_name_with_bound_port_is_kept() {
@@ -648,6 +674,7 @@ test_unattributable_fleet_yields_empty_kill_list
 test_degraded_id_listing_still_reclaims_nothing
 test_refuses_a_listing_it_cannot_parse
 test_orphan_removed_while_live_task_and_stack_are_kept
+test_orphan_that_becomes_live_before_removal_is_kept
 test_finished_task_name_with_bound_port_is_kept
 test_refuses_when_nothing_running_would_be_kept
 test_refuses_when_a_name_lands_on_both_lists
