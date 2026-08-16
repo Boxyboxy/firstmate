@@ -56,8 +56,8 @@ If you are working across homes, make sure the run reads the home whose work is 
 
 ### 3. A stack the captain is using is off limits, and it is detected structurally
 
-The captain's localhost stack lives at `/Users/eugene/wff-localhost-stack/`, has its own `stack.sh status`, its own container-name prefix, and its own ports.
-A name prefix is not a good enough signal, because the next such stack will use a different prefix and the sweep would not know about it.
+A captain's local stack typically has its own directory with a `stack.sh` or equivalent status command, its own container-name prefix, and its own ports.
+The prefix is not a good enough signal on its own, because the next such stack will use a different prefix and the sweep would not know about it.
 
 The primary signal is structural: a running container with a host port bound to it is in use, whatever it is called, and something on disk that claims a container - a `stack.sh` or an equivalent manifest - keeps it too.
 The configured keep-list is a second line of defence behind that, not the only one.
@@ -88,10 +88,11 @@ Phases run in ascending cost to re-acquire, so an interrupted run has spent the 
 
 ## Deciding
 
-The dry run needs no permission and no captain decision.
+Running the dry run needs no permission: it deletes nothing.
 
-Running the delete path is a routine gate you may take under standing autonomy when the dry run reclaims only stopped containers, dangling volumes, and build cache, and reports no skipped worktree and nothing unattributable.
-Take it to the captain first when the run would stop a running container, when unused images are in scope, or when the report contains anything the script could not attribute.
+The delete path always needs the captain's word, because removing containers, volumes, and images is destructive and this sweep runs on the captain's own machine.
+An invocation that already asks to reclaim the space is that word; a bare `/housekeeping` is a request for the report, so send the report and wait.
+Either way, name what would be stopped before stopping it: a running container, or unused images, is a bigger decision than build cache and must be called out separately rather than folded into a total.
 A refusal always goes to the captain with its reason, because a refusal means the sweep saw something it could not make safe.
 
 ## Verify afterwards
