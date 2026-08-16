@@ -74,11 +74,15 @@
 #                         uncommitted changes is never overridden and
 #                         --prune-orphans is never passed.
 #   2. stopped containers
-#   3. dangling volumes - run `docker volume ls --filter dangling=true
-#                         --format '{{.Name}}|{{.Label
-#                         "com.docker.volume.anonymous"}}'` twice, 30 seconds
-#                         apart, and remove only proven-anonymous names present
-#                         in both samples and absent from protected mounts.
+#   3. dangling volumes - the shared dry/apply mutation model lists volumes with
+#                         `docker volume ls --filter dangling=true --filter
+#                         label=com.docker.volume.anonymous --format
+#                         '{{.Name}}'` twice, 30 seconds apart, and removes only
+#                         names present in both samples. Protected mounts are
+#                         the union of observations immediately before and after
+#                         the first sample and remain excluded for the run. The
+#                         phase aborts if protected work is non-running at either
+#                         sample.
 #   4. build cache      - `docker builder prune -f`.
 #   5. orphaned running containers of finished tasks.
 #   6. dangling volumes again - repeat the two-sample removal after orphan
@@ -570,10 +574,8 @@ container_volume_mounts() { # <container> <output>
     "$1" >"$2" 2>/dev/null
 }
 
-capture_protected_volume_mounts() {
+observe_protected_volume_mounts() {
   local inventory="$WORK/protected-volume-containers" name state project task ports wd mounts
-  [ "${PROTECTED_VOLUMES_CAPTURED:-0}" = 0 ] || return 0
-  : >"$WORK/protected-volumes"
   if ! docker ps -a --format "$DOCKER_FMT" >"$inventory" 2>/dev/null; then
     warn 'could not inventory protected container mounts'
     return 1
@@ -600,7 +602,6 @@ capture_protected_volume_mounts() {
     cat "$mounts" >>"$WORK/protected-volumes"
   done <"$inventory"
   sort -u "$WORK/protected-volumes" -o "$WORK/protected-volumes"
-  PROTECTED_VOLUMES_CAPTURED=1
 }
 
 protected_container_not_running() {
@@ -649,11 +650,22 @@ current_live_task_owns() { # <name> <project> <working-dir> <task-label>
 stable_volume_candidates() { # <label> <output>
   local label="$1" output="$2" blocked count guard_status
   : >"$output"
-  sample_dangling_volumes "$output.first" || return 1
-  if ! capture_protected_volume_mounts; then
-    EXIT=1
-    note "  skipped $label: protected container mounts could not be verified"
-    return 0
+  if [ "${PROTECTED_VOLUMES_CAPTURED:-0}" = 0 ]; then
+    : >"$WORK/protected-volumes"
+    if ! observe_protected_volume_mounts; then
+      EXIT=1
+      note "  skipped $label: protected container mounts could not be verified"
+      return 0
+    fi
+    sample_dangling_volumes "$output.first" || return 1
+    if ! observe_protected_volume_mounts; then
+      EXIT=1
+      note "  skipped $label: protected container mounts could not be verified"
+      return 0
+    fi
+    PROTECTED_VOLUMES_CAPTURED=1
+  else
+    sample_dangling_volumes "$output.first" || return 1
   fi
   blocked="$(protected_container_not_running)"
   guard_status=$?

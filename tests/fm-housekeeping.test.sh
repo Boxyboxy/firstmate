@@ -491,9 +491,9 @@ test_nonrunning_protected_container_aborts_volume_phase() {
   pass 'a non-running protected container aborts volume reclamation'
 }
 
-test_live_container_mount_stays_protected_after_container_disappears() {
+test_live_mount_seen_before_first_sample_stays_protected() {
   local dir volume
-  dir=$(fm_hk_case disappearing-live-container)
+  dir=$(fm_hk_case live-mount-before-sample)
   volume=$(printf 'e%.0s' {1..64})
   mkdir -p "$dir/home/data/live-alpha"
   fm_write_meta "$dir/home/state/live-alpha.meta" 'kind=ship' 'worktree=/pool/live-alpha'
@@ -502,12 +502,37 @@ test_live_container_mount_stays_protected_after_container_disappears() {
   printf '%s\n' "$volume" >"$dir/volume-samples/1"
   printf '%s\n' "$volume" >"$dir/volume-samples/2"
   printf '%s|com.docker.volume.anonymous|\n' "$volume" >"$dir/volume-metadata"
+  cp "$dir/containers" "$dir/container-samples/2"
+  : >"$dir/container-samples/3"
   : >"$dir/container-samples/4"
 
   fm_hk_run "$dir" --apply --no-worktrees
-  expect_code 0 "$?" 'apply while a live container disappears between volume samples'
-  assert_no_grep "$volume" "$dir/volume.rm" 'removed a volume mounted by live work at the first sample'
-  pass 'a live container mount remains protected after its container disappears'
+  expect_code 0 "$?" 'apply when live work exists only before the first volume sample'
+  assert_no_grep "$volume" "$dir/volume.rm" \
+    'removed a volume mounted by live work before the first sample'
+  pass 'the before-sample observation contributes to protected mounts'
+}
+
+test_live_mount_seen_after_first_sample_stays_protected() {
+  local dir volume
+  dir=$(fm_hk_case live-mount-after-sample)
+  volume=$(printf '7%.0s' {1..64})
+  mkdir -p "$dir/home/data/live-alpha"
+  fm_write_meta "$dir/home/state/live-alpha.meta" 'kind=ship' 'worktree=/pool/live-alpha'
+  fm_hk_container "$dir" fm-live-alpha-db running '' '' '' ''
+  printf 'fm-live-alpha-db|%s\n' "$volume" >"$dir/container-mounts"
+  printf '%s\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s\n' "$volume" >"$dir/volume-samples/2"
+  printf '%s|com.docker.volume.anonymous|\n' "$volume" >"$dir/volume-metadata"
+  : >"$dir/container-samples/2"
+  cp "$dir/containers" "$dir/container-samples/3"
+  : >"$dir/container-samples/4"
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply when live work exists only after the first volume sample'
+  assert_no_grep "$volume" "$dir/volume.rm" \
+    'removed a volume mounted by live work after the first sample'
+  pass 'the after-sample observation contributes to protected mounts'
 }
 
 test_hex_shaped_named_volume_is_kept() {
@@ -613,7 +638,8 @@ test_late_live_worktree_loss_is_reported
 test_stable_anonymous_volume_is_reclaimed
 test_transient_dangling_volume_is_kept
 test_nonrunning_protected_container_aborts_volume_phase
-test_live_container_mount_stays_protected_after_container_disappears
+test_live_mount_seen_before_first_sample_stays_protected
+test_live_mount_seen_after_first_sample_stays_protected
 test_hex_shaped_named_volume_is_kept
 test_dry_run_models_post_orphan_volume_pass
 test_dry_run_deletes_nothing
