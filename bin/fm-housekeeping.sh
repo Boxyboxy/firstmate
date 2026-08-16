@@ -554,8 +554,9 @@ prune() { # <label> <docker args...>
 sample_dangling_volumes() { # <output>
   local output="$1"
   if docker volume ls --filter dangling=true \
-    --format '{{.Name}}|{{.Label "com.docker.volume.anonymous"}}' >"$output.all" 2>/dev/null; then
-    awk -F'|' '$1 != "" && $2 == "true" { print $1 }' "$output.all" | sort -u >"$output"
+    --filter label=com.docker.volume.anonymous \
+    --format '{{.Name}}' >"$output.all" 2>/dev/null; then
+    sed '/^$/d' "$output.all" | sort -u >"$output"
   else
     : >"$output"
     warn 'could not list dangling anonymous volumes'
@@ -678,19 +679,14 @@ stable_volume_candidates() { # <label> <output>
   fi
 }
 
-volume_is_anonymous() { # <volume>
-  [ "$(docker volume inspect --format '{{.Label "com.docker.volume.anonymous"}}' "$1" 2>/dev/null)" = true ]
-}
-
-model_post_orphan_volumes() { # <output>
-  local output="$1" name volume ref shared mounts
-  : >"$output"
+capture_container_volume_mounts() {
+  local name volume mounts
   : >"$WORK/all-container-mounts"
   while IFS='|' read -r name _state _project _task _ports _wd; do
     [ -n "$name" ] || continue
     mounts="$WORK/model-mounts.$name"
     if ! container_volume_mounts "$name" "$mounts"; then
-      warn "could not inspect container $name mounts for the dry-run second volume pass"
+      warn "could not inspect container $name mounts for the reclamation model"
       EXIT=1
       return 1
     fi
@@ -698,32 +694,67 @@ model_post_orphan_volumes() { # <output>
       [ -n "$volume" ] && printf '%s|%s\n' "$name" "$volume" >>"$WORK/all-container-mounts"
     done <"$mounts"
   done <"$WORK/inventory"
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    awk -F'|' -v name="$name" '$1 == name { print $2 }' "$WORK/all-container-mounts"
-  done <"$WORK/kill-running" | sort -u >"$WORK/post-orphan-mounted-volumes"
+}
+
+capture_anonymous_volumes() {
+  if ! docker volume ls --filter label=com.docker.volume.anonymous \
+    --format '{{.Name}}' >"$WORK/anonymous-volumes.raw" 2>/dev/null; then
+    warn 'could not establish anonymous volume metadata'
+    EXIT=1
+    return 1
+  fi
+  sed '/^$/d' "$WORK/anonymous-volumes.raw" | sort -u >"$WORK/anonymous-volumes"
+}
+
+model_volume_candidates() { # <stable-input> <output>
+  local stable="$1" output="$2" volume ref shared
+  : >"$output.added"
+  awk -F'|' '{ print $2 }' "$WORK/all-container-mounts" | sort -u >"$output.mounted"
   while IFS= read -r volume; do
     [ -n "$volume" ] || continue
     shared=0
     while IFS= read -r ref; do
       [ -n "$ref" ] || continue
-      if ! grep -qxF "$ref" "$WORK/kill-names"; then
+      if ! grep -qxF "$ref" "$WORK/model-removed-containers"; then
         shared=1
         break
       fi
     done < <(awk -F'|' -v volume="$volume" '$2 == volume { print $1 }' "$WORK/all-container-mounts")
     [ "$shared" = 0 ] || continue
-    volume_is_anonymous "$volume" || continue
+    grep -qxF "$volume" "$WORK/anonymous-volumes" || continue
     grep -qxF "$volume" "$WORK/protected-volumes" && continue
-    printf '%s\n' "$volume" >>"$output"
-  done <"$WORK/post-orphan-mounted-volumes"
-  sort -u "$output" -o "$output"
+    printf '%s\n' "$volume" >>"$output.added"
+  done <"$output.mounted"
+  cat "$stable" "$output.added" | sort -u >"$output.all"
+  comm -23 "$output.all" "$WORK/model-reported-volumes" >"$output"
 }
 
-reclaim_stable_volumes() { # <label>
-  local label="$1" list="$WORK/volumes.$2" volume
-  stable_volume_candidates "$label" "$list"
-  [ "$APPLY" = 1 ] || return 0
+plan_remove_containers() { # <list-file> <label>
+  local list="$1" label="$2"
+  if [ "$APPLY" = 1 ]; then
+    remove_containers "$list" "$label"
+  else
+    cat "$list" >>"$WORK/model-removed-containers"
+    sort -u "$WORK/model-removed-containers" -o "$WORK/model-removed-containers"
+  fi
+}
+
+plan_volume_pass() { # <label> <suffix>
+  local label="$1" suffix="$2" stable list volume count
+  stable="$WORK/volumes.$suffix.stable"
+  list="$WORK/volumes.$suffix"
+  stable_volume_candidates "$label" "$stable"
+  if [ "$APPLY" = 0 ]; then
+    model_volume_candidates "$stable" "$list"
+    count="$(awk 'END { print NR + 0 }' "$list")"
+    note "  would reclaim $count anonymous volumes from $label:"
+    if [ -s "$list" ]; then sed 's/^/    /' "$list"; else note '    (none)'; fi
+    note '  this modelled set is an upper bound subject to the same apply-time stability check'
+    cat "$list" >>"$WORK/model-reported-volumes"
+    sort -u "$WORK/model-reported-volumes" -o "$WORK/model-reported-volumes"
+    return 0
+  fi
+  list="$stable"
   while IFS= read -r volume; do
     [ -n "$volume" ] || continue
     if ! docker volume rm "$volume" >/dev/null 2>&1; then
@@ -733,39 +764,43 @@ reclaim_stable_volumes() { # <label>
   done <"$list"
 }
 
-if [ "$APPLY" = 0 ]; then
-  if [ "$DOCKER_OK" = 1 ]; then
-    note 'volumes'
-    if [ "$INVENTORY_OK" = 1 ]; then
-      stable_volume_candidates 'dangling volumes' "$WORK/volumes.dry"
-      note '  post-orphan second-pass volume candidates:'
-      if model_post_orphan_volumes "$WORK/volumes.dry.second-pass" &&
-        [ -s "$WORK/volumes.dry.second-pass" ]; then
-        sed 's/^/    /' "$WORK/volumes.dry.second-pass"
-      else
-        note '    (none)'
-      fi
-      note '  this second-pass set is an upper bound subject to the same apply-time stability check'
+plan_prune() { # <label> <docker args...>
+  local label="$1"; shift
+  if [ "$APPLY" = 1 ]; then
+    prune "$label" "$@"
+  else
+    note "  would prune $label"
+  fi
+}
+
+run_reclamation_plan() {
+  plan_remove_containers "$WORK/kill-stopped" stopped
+  plan_volume_pass 'first volume pass after stopped containers' first
+  plan_prune 'build cache' builder prune -f
+  plan_remove_containers "$WORK/kill-running" orphaned
+  plan_volume_pass 'second volume pass after orphan removal' second
+  if [ "$IMAGES" = 1 ]; then
+    plan_prune 'unused images' image prune -a -f
+  fi
+}
+
+if [ "$DOCKER_OK" = 1 ]; then
+  note "$([ "$APPLY" = 1 ] && printf reclaiming || printf 'reclamation plan')"
+  if [ "$INVENTORY_OK" = 1 ]; then
+    : >"$WORK/model-removed-containers"
+    : >"$WORK/model-reported-volumes"
+    if capture_container_volume_mounts && capture_anonymous_volumes; then
+      run_reclamation_plan
     else
       note '  skipped dangling volumes: protected container state could not be verified'
     fi
-    note ''
-  fi
-  note 'nothing was deleted. Re-run with --apply to reclaim the above.'
-  exit "$EXIT"
-fi
-
-if [ "$DOCKER_OK" = 1 ]; then
-  note 'reclaiming'
-  remove_containers "$WORK/kill-stopped" stopped
-  reclaim_stable_volumes 'dangling volumes' first
-  prune 'build cache' builder prune -f
-  remove_containers "$WORK/kill-running" orphaned
-  reclaim_stable_volumes 'dangling volumes after orphan removal' second
-  if [ "$IMAGES" = 1 ]; then
-    prune 'unused images' image prune -a -f
   fi
   note ''
+fi
+
+if [ "$APPLY" = 0 ]; then
+  note 'nothing was deleted. Re-run with --apply to reclaim the above.'
+  exit "$EXIT"
 fi
 
 # --- verification ------------------------------------------------------------

@@ -71,11 +71,29 @@ case "$cmd" in
     subcmd="${1:-}"; shift 2>/dev/null || true
     case "$subcmd" in
       ls)
-        count=$(cat "$FM_TEST_VOLUME_SAMPLE_COUNT")
-        count=$((count + 1))
-        printf '%s\n' "$count" >"$FM_TEST_VOLUME_SAMPLE_COUNT"
-        sample="$FM_TEST_VOLUME_SAMPLE_DIR/$count"
-        [ -f "$sample" ] && cat "$sample"
+        dangling=0; anonymous=0
+        for a in "$@"; do
+          [ "$a" = dangling=true ] && dangling=1
+          [ "$a" = label=com.docker.volume.anonymous ] && anonymous=1
+        done
+        if [ "$dangling" = 1 ]; then
+          count=$(cat "$FM_TEST_VOLUME_SAMPLE_COUNT")
+          count=$((count + 1))
+          printf '%s\n' "$count" >"$FM_TEST_VOLUME_SAMPLE_COUNT"
+          sample="$FM_TEST_VOLUME_SAMPLE_DIR/$count"
+          [ -f "$sample" ] || exit 0
+          if [ "$anonymous" = 1 ]; then
+            while IFS= read -r name; do
+              awk -F'|' -v name="$name" \
+                '$1 == name && $2 == "com.docker.volume.anonymous" { found=1 } END { exit !found }' \
+                "$FM_TEST_VOLUME_METADATA" && printf '%s\n' "$name"
+            done <"$sample"
+          else
+            cat "$sample"
+          fi
+        elif [ "$anonymous" = 1 ]; then
+          awk -F'|' '$2 == "com.docker.volume.anonymous" {print $1}' "$FM_TEST_VOLUME_METADATA"
+        fi
         ;;
       rm)
         printf '%s\n' "$@" >>"$FM_TEST_VOLUME_RM"
@@ -428,8 +446,9 @@ test_stable_anonymous_volume_is_reclaimed() {
   local dir volume
   dir=$(fm_hk_case stable-volume)
   volume=$(printf 'a%.0s' {1..64})
-  printf '%s|true\n' "$volume" >"$dir/volume-samples/1"
-  printf '%s|true\n' "$volume" >"$dir/volume-samples/2"
+  printf '%s\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s\n' "$volume" >"$dir/volume-samples/2"
+  printf '%s|com.docker.volume.anonymous|\n' "$volume" >"$dir/volume-metadata"
   fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
 
   fm_hk_run "$dir" --apply --no-worktrees
@@ -445,7 +464,8 @@ test_transient_dangling_volume_is_kept() {
   local dir volume
   dir=$(fm_hk_case transient-volume)
   volume=$(printf 'b%.0s' {1..64})
-  printf '%s|true\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s|com.docker.volume.anonymous|\n' "$volume" >"$dir/volume-metadata"
   fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
 
   fm_hk_run "$dir" --apply --no-worktrees
@@ -458,7 +478,8 @@ test_nonrunning_protected_container_aborts_volume_phase() {
   local dir volume
   dir=$(fm_hk_case guarded-volume)
   volume=$(printf 'c%.0s' {1..64})
-  printf '%s|true\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s|com.docker.volume.anonymous|\n' "$volume" >"$dir/volume-metadata"
   printf '%s\n' pinned-db >"$dir/home/config/housekeeping-keep"
   fm_hk_container "$dir" pinned-db exited '' '' '' ''
 
@@ -478,8 +499,9 @@ test_live_container_mount_stays_protected_after_container_disappears() {
   fm_write_meta "$dir/home/state/live-alpha.meta" 'kind=ship' 'worktree=/pool/live-alpha'
   fm_hk_container "$dir" fm-live-alpha-db running '' '' '' ''
   printf 'fm-live-alpha-db|%s\n' "$volume" >"$dir/container-mounts"
-  printf '%s|true\n' "$volume" >"$dir/volume-samples/1"
-  printf '%s|true\n' "$volume" >"$dir/volume-samples/2"
+  printf '%s\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s\n' "$volume" >"$dir/volume-samples/2"
+  printf '%s|com.docker.volume.anonymous|\n' "$volume" >"$dir/volume-metadata"
   : >"$dir/container-samples/4"
 
   fm_hk_run "$dir" --apply --no-worktrees
@@ -492,8 +514,8 @@ test_hex_shaped_named_volume_is_kept() {
   local dir volume
   dir=$(fm_hk_case hex-named-volume)
   volume=$(printf 'f%.0s' {1..64})
-  printf '%s|\n' "$volume" >"$dir/volume-samples/1"
-  printf '%s|\n' "$volume" >"$dir/volume-samples/2"
+  printf '%s\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s\n' "$volume" >"$dir/volume-samples/2"
   fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
 
   fm_hk_run "$dir" --apply --no-worktrees
@@ -510,11 +532,11 @@ test_dry_run_models_post_orphan_volume_pass() {
   fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
   fm_hk_container "$dir" fm-gone-beta-db running '' '' '' ''
   printf 'fm-gone-beta-db|%s\n' "$volume" >"$dir/container-mounts"
-  printf '%s|true\n' "$volume" >"$dir/volume-metadata"
+  printf '%s|com.docker.volume.anonymous|\n' "$volume" >"$dir/volume-metadata"
 
   fm_hk_run "$dir" --no-worktrees
   expect_code 0 "$?" 'dry run with an orphan-mounted anonymous volume'
-  assert_grep 'post-orphan second-pass volume candidates' "$dir/out" \
+  assert_grep 'second volume pass after orphan removal' "$dir/out" \
     'the dry run omitted the distinct second volume pass'
   assert_grep "$volume" "$dir/out" 'the dry run omitted the orphan-mounted volume'
   assert_grep 'upper bound subject to the same apply-time stability check' "$dir/out" \
@@ -526,8 +548,9 @@ test_dry_run_deletes_nothing() {
   local dir volume
   dir=$(fm_hk_case dry-run)
   volume=$(printf 'd%.0s' {1..64})
-  printf '%s|true\n' "$volume" >"$dir/volume-samples/1"
-  printf '%s|true\n' "$volume" >"$dir/volume-samples/2"
+  printf '%s\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s\n' "$volume" >"$dir/volume-samples/2"
+  printf '%s|com.docker.volume.anonymous|\n' "$volume" >"$dir/volume-metadata"
   mkdir -p "$dir/home/data/gone-beta"
   fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
   fm_hk_container "$dir" fm-gone-beta-db running '' '' '' ''
@@ -549,6 +572,32 @@ test_dry_run_deletes_nothing() {
   pass 'the default run reports what it would reclaim and deletes nothing'
 }
 
+test_dry_run_models_post_stopped_volume_pass() {
+  local dir volume
+  dir=$(fm_hk_case dry-post-stopped-volume)
+  volume=$(printf '8%.0s' {1..64})
+  fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
+  fm_hk_container "$dir" junk-cache exited '' '' '' ''
+  printf 'junk-cache|%s\n' "$volume" >"$dir/container-mounts"
+  printf '%s|com.docker.volume.anonymous|\n' "$volume" >"$dir/volume-metadata"
+
+  fm_hk_run "$dir" --no-worktrees
+  expect_code 0 "$?" 'dry run with a stopped-container anonymous volume'
+  assert_grep 'first volume pass after stopped containers' "$dir/out" \
+    'the dry run omitted the ordered first volume pass'
+  assert_grep "$volume" "$dir/out" \
+    'the dry run omitted the volume released by the stopped container'
+
+  printf '0\n' >"$dir/volume-sample-count"
+  printf '%s\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s\n' "$volume" >"$dir/volume-samples/2"
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply with the modelled post-stopped volume'
+  assert_grep "$volume" "$dir/volume.rm" \
+    'the apply first-pass sample diverged from the dry-run model'
+  pass 'dry run and apply share the post-stopped volume sequence'
+}
+
 test_unattributable_fleet_yields_empty_kill_list
 test_degraded_id_listing_still_reclaims_nothing
 test_refuses_a_listing_it_cannot_parse
@@ -568,3 +617,4 @@ test_live_container_mount_stays_protected_after_container_disappears
 test_hex_shaped_named_volume_is_kept
 test_dry_run_models_post_orphan_volume_pass
 test_dry_run_deletes_nothing
+test_dry_run_models_post_stopped_volume_pass
