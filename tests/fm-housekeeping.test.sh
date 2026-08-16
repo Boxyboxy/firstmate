@@ -71,28 +71,49 @@ case "$cmd" in
     subcmd="${1:-}"; shift 2>/dev/null || true
     case "$subcmd" in
       ls)
-        dangling=0; anonymous=0
+        dangling=0; label_key=''; label_val=''; label_has_val=0
         for a in "$@"; do
           [ "$a" = dangling=true ] && dangling=1
-          [ "$a" = label=com.docker.volume.anonymous ] && anonymous=1
+          case "$a" in
+            label=*)
+              label_key="${a#label=}"
+              case "$label_key" in
+                *=*)
+                  label_val="${label_key#*=}"
+                  label_key="${label_key%%=*}"
+                  label_has_val=1
+                  ;;
+              esac
+              ;;
+          esac
         done
+        # Model docker's own label filter: it selects only volumes carrying that
+        # label key (and value, when one is given). An unrecognized key matches
+        # NOTHING. A permissive fallback here would let a protection check that
+        # silently matches nothing still pass its test, which is the exact bug
+        # this suite exists to catch.
+        fake_volume_has_label() {
+          awk -F'|' -v name="$1" -v k="$label_key" -v v="$label_val" -v hv="$label_has_val" '
+            $1 == name && $2 == k { if (hv == 0 || $3 == v) found = 1 }
+            END { exit !found }
+          ' "$FM_TEST_VOLUME_METADATA"
+        }
         if [ "$dangling" = 1 ]; then
           count=$(cat "$FM_TEST_VOLUME_SAMPLE_COUNT")
           count=$((count + 1))
           printf '%s\n' "$count" >"$FM_TEST_VOLUME_SAMPLE_COUNT"
           sample="$FM_TEST_VOLUME_SAMPLE_DIR/$count"
           [ -f "$sample" ] || exit 0
-          if [ "$anonymous" = 1 ]; then
+          if [ -n "$label_key" ]; then
             while IFS= read -r name; do
-              awk -F'|' -v name="$name" \
-                '$1 == name && $2 == "com.docker.volume.anonymous" { found=1 } END { exit !found }' \
-                "$FM_TEST_VOLUME_METADATA" && printf '%s\n' "$name"
+              fake_volume_has_label "$name" && printf '%s\n' "$name"
             done <"$sample"
           else
             cat "$sample"
           fi
-        elif [ "$anonymous" = 1 ]; then
-          awk -F'|' '$2 == "com.docker.volume.anonymous" {print $1}' "$FM_TEST_VOLUME_METADATA"
+        elif [ -n "$label_key" ]; then
+          awk -F'|' -v k="$label_key" -v v="$label_val" -v hv="$label_has_val" \
+            '$2 == k { if (hv == 0 || $3 == v) print $1 }' "$FM_TEST_VOLUME_METADATA"
         fi
         ;;
       rm)
