@@ -59,7 +59,7 @@ If you are working across homes, make sure the run reads the home whose work is 
 A captain's local stack typically has its own directory with a `stack.sh` or equivalent status command, its own container-name prefix, and its own ports.
 The prefix is not a good enough signal on its own, because the next such stack will use a different prefix and the sweep would not know about it.
 
-The primary signal is structural: a running container with a host port bound to it is in use, whatever it is called, and something on disk that claims a container - a `stack.sh` or an equivalent manifest - keeps it too.
+The structural signals are a bound host port on a running container and a stack manifest on disk that claims a container, regardless of its name.
 The configured keep-list is a second line of defence behind that, not the only one.
 
 Anything the script cannot attribute is KEPT, never removed, and reported for the captain to judge.
@@ -102,7 +102,8 @@ A refusal always goes to the captain with its reason, because a refusal means th
 ## Verify afterwards
 
 A reclaim that broke the captain's environment is a failure even if it freed a lot of disk.
-After the delete path, confirm every protected stack is still serving - the run re-checks this itself, and the captain's stack has its own status command - and note free space before and after.
+After the delete path, confirm every protected stack is still serving and note free space before and after.
+The run re-checks that protected containers are still running; where a protected stack exposes a status command, use it to confirm service health.
 The sweep this skill comes from went from 466 GB to 533 GB free.
 If verification reports that a protected container is no longer running, say so immediately and plainly; that is a failure to report, not a detail to bury under the number of gigabytes reclaimed.
 
