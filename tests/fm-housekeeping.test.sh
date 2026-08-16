@@ -55,7 +55,22 @@ case "$cmd" in
     done
     ;;
   system) printf 'TYPE TOTAL ACTIVE SIZE RECLAIMABLE\n' ;;
-  volume|builder|image) printf 'Total reclaimed space: 0B\n' ;;
+  volume)
+    subcmd="${1:-}"; shift 2>/dev/null || true
+    case "$subcmd" in
+      ls)
+        count=$(cat "$FM_TEST_VOLUME_SAMPLE_COUNT")
+        count=$((count + 1))
+        printf '%s\n' "$count" >"$FM_TEST_VOLUME_SAMPLE_COUNT"
+        sample="$FM_TEST_VOLUME_SAMPLE_DIR/$count"
+        [ -f "$sample" ] && cat "$sample"
+        ;;
+      rm)
+        printf '%s\n' "$@" >>"$FM_TEST_VOLUME_RM"
+        ;;
+    esac
+    ;;
+  builder|image) printf 'Total reclaimed space: 0B\n' ;;
 esac
 exit 0
 FAKE
@@ -94,6 +109,9 @@ fm_hk_case() {
   : >"$dir/treehouse.candidate"
   : >"$dir/treehouse.late-live"
   : >"$dir/containers"
+  : >"$dir/volume.rm"
+  printf '0\n' >"$dir/volume-sample-count"
+  mkdir -p "$dir/volume-samples"
   printf '%s\n' "$dir"
 }
 
@@ -110,6 +128,10 @@ fm_hk_run() { # <dir> <args...>
     FM_TEST_DOCKER_FIXTURE="$dir/containers" FM_TEST_TREEHOUSE_LOG="$dir/treehouse.log" \
     FM_TEST_TREEHOUSE_CANDIDATE="$dir/treehouse.candidate" \
     FM_TEST_TREEHOUSE_LATE_LIVE="$dir/treehouse.late-live" \
+    FM_TEST_VOLUME_RM="$dir/volume.rm" \
+    FM_TEST_VOLUME_SAMPLE_COUNT="$dir/volume-sample-count" \
+    FM_TEST_VOLUME_SAMPLE_DIR="$dir/volume-samples" \
+    FM_HOUSEKEEPING_VOLUME_STABILITY_SECONDS=0 \
     "$HOUSEKEEPING" "$@" >"$dir/out" 2>"$dir/err"
 }
 
@@ -378,9 +400,58 @@ test_late_live_worktree_loss_is_reported() {
   pass 'a worktree entering the live set during prune is reported if lost'
 }
 
+test_stable_anonymous_volume_is_reclaimed() {
+  local dir volume
+  dir=$(fm_hk_case stable-volume)
+  volume=$(printf 'a%.0s' {1..64})
+  printf '%s\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s\n' "$volume" >"$dir/volume-samples/2"
+  fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply with a stable dangling anonymous volume'
+  assert_grep "$volume" "$dir/volume.rm" 'a stable dangling anonymous volume was kept'
+  if grep 'volume ls' "$dir/docker.log" | grep -q -- '-q'; then
+    fail 'combined volume --format listing with -q'
+  fi
+  pass 'a volume dangling at both samples is reclaimed'
+}
+
+test_transient_dangling_volume_is_kept() {
+  local dir volume
+  dir=$(fm_hk_case transient-volume)
+  volume=$(printf 'b%.0s' {1..64})
+  printf '%s\n' "$volume" >"$dir/volume-samples/1"
+  fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply with a transient dangling anonymous volume'
+  assert_no_grep "$volume" "$dir/volume.rm" 'removed a volume absent from the second sample'
+  pass 'a volume referenced again by the second sample is kept'
+}
+
+test_nonrunning_protected_container_aborts_volume_phase() {
+  local dir volume
+  dir=$(fm_hk_case guarded-volume)
+  volume=$(printf 'c%.0s' {1..64})
+  printf '%s\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s\n' pinned-db >"$dir/home/config/housekeeping-keep"
+  fm_hk_container "$dir" pinned-db exited '' '' '' ''
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply with a non-running protected container'
+  assert_no_grep "$volume" "$dir/volume.rm" 'removed a volume while protected work was non-running'
+  assert_grep 'protected container pinned-db is not running' "$dir/out" \
+    'the volume phase did not explain its safety abort'
+  pass 'a non-running protected container aborts volume reclamation'
+}
+
 test_dry_run_deletes_nothing() {
-  local dir
+  local dir volume
   dir=$(fm_hk_case dry-run)
+  volume=$(printf 'd%.0s' {1..64})
+  printf '%s\n' "$volume" >"$dir/volume-samples/1"
+  printf '%s\n' "$volume" >"$dir/volume-samples/2"
   mkdir -p "$dir/home/data/gone-beta"
   fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
   fm_hk_container "$dir" fm-gone-beta-db running '' '' '' ''
@@ -397,6 +468,8 @@ test_dry_run_deletes_nothing() {
   assert_grep 'DRY RUN' "$dir/out" 'the run did not announce itself as a dry run'
   assert_grep 'reclaim fm-gone-beta-db' "$dir/out" 'the dry run did not name the orphan it would reclaim'
   assert_grep 'reclaim junk-cache' "$dir/out" 'the dry run did not name the stopped container it would reclaim'
+  assert_grep 'would reclaim 1 stable anonymous volumes' "$dir/out" \
+    'the dry run did not report the stable two-sample volume set'
   pass 'the default run reports what it would reclaim and deletes nothing'
 }
 
@@ -412,4 +485,7 @@ test_worktree_phase_never_overrides_the_uncommitted_refusal
 test_live_task_worktree_is_refused_before_pruning
 test_skipped_live_worktree_does_not_refuse_apply
 test_late_live_worktree_loss_is_reported
+test_stable_anonymous_volume_is_reclaimed
+test_transient_dangling_volume_is_kept
+test_nonrunning_protected_container_aborts_volume_phase
 test_dry_run_deletes_nothing

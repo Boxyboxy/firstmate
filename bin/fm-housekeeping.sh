@@ -74,10 +74,14 @@
 #                         uncommitted changes is never overridden and
 #                         --prune-orphans is never passed.
 #   2. stopped containers
-#   3. dangling volumes - `docker volume prune -f` (anonymous unused only).
+#   3. dangling volumes - run `docker volume ls --filter dangling=true
+#                         --format '{{.Name}}'` twice, 30 seconds apart, retain
+#                         Docker-generated 64-hex anonymous names, and remove
+#                         only names present in both samples.
 #   4. build cache      - `docker builder prune -f`.
 #   5. orphaned running containers of finished tasks.
-#   6. dangling volumes again - an orphan's volumes only become dangling once
+#   6. dangling volumes again - repeat the two-sample removal after orphan
+#                         removal because its volumes become dangling only once
 #                         the container is gone. Skipping this rerun cost a real
 #                         sweep 1.3 GB after it had already reclaimed 42.3 GB.
 #   7. unused images    - `docker image prune -a -f`, only with --images. Largest
@@ -103,6 +107,8 @@
 #   FM_HOME                 home whose state/ and data/ define live and finished
 #                           work (default: this repo root)
 #   FM_HOUSEKEEPING_DF_PATH filesystem sampled for free space (default: /)
+#   FM_HOUSEKEEPING_VOLUME_STABILITY_SECONDS
+#                           delay between dangling-volume samples (default: 30)
 #
 # Exit status: 0 completed; 1 an underlying command failed; 2 invalid use;
 # 3 refused for safety without deleting anything.
@@ -115,10 +121,16 @@ DATA="$FM_HOME/data"
 STATE="$FM_HOME/state"
 KEEP_FILE="$FM_HOME/config/housekeeping-keep"
 DF_PATH="${FM_HOUSEKEEPING_DF_PATH:-/}"
+VOLUME_STABILITY_SECONDS="${FM_HOUSEKEEPING_VOLUME_STABILITY_SECONDS:-30}"
 
 usage() {
-  sed -n '2,108{s/^#$//;s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,114{s/^#$//;s/^# \{0,1\}//;p;}' "$0"
 }
+
+if ! [[ "$VOLUME_STABILITY_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  printf 'fm-housekeeping: FM_HOUSEKEEPING_VOLUME_STABILITY_SECONDS must be non-negative\n' >&2
+  exit 2
+fi
 
 APPLY=0
 IMAGES=0
@@ -506,11 +518,6 @@ if [ "$WORKTREES" = 1 ]; then
   note ''
 fi
 
-if [ "$APPLY" = 0 ]; then
-  note 'nothing was deleted. Re-run with --apply to reclaim the above.'
-  exit "$EXIT"
-fi
-
 # --- phases 2-7 --------------------------------------------------------------
 
 remove_containers() { # <list-file> <label>
@@ -543,14 +550,122 @@ prune() { # <label> <docker args...>
   fi
 }
 
+sample_dangling_volumes() { # <output>
+  local output="$1"
+  if docker volume ls --filter dangling=true --format '{{.Name}}' >"$output.all" 2>/dev/null; then
+    awk 'length($0) == 64 && $0 ~ /^[0-9a-f]+$/ { print }' "$output.all" | sort -u >"$output"
+  else
+    : >"$output"
+    warn 'could not list dangling anonymous volumes'
+    EXIT=1
+    return 1
+  fi
+}
+
+protected_container_not_running() {
+  local inventory="$WORK/volume-containers" name state project task ports wd
+  if ! docker ps -a --format "$DOCKER_FMT" >"$inventory" 2>/dev/null; then
+    warn 'could not verify protected container state before volume reclamation'
+    return 2
+  fi
+  if ! awk -F'|' '
+    NF < 6 { exit 1 }
+    $1 == "" { exit 1 }
+    $2 !~ /^(created|restarting|running|removing|paused|exited|dead)$/ { exit 1 }
+  ' "$inventory"; then
+    warn 'could not parse protected container state before volume reclamation'
+    return 2
+  fi
+  while IFS='|' read -r name state project task ports wd; do
+    [ -n "${name:-}" ] || continue
+    [ "$state" != running ] || continue
+    if grep -qxF "$name" "$WORK/keep-names" || matches_keep_pattern "$name" ||
+      claimed_by_keep_dir "$name" "${wd:-}" || has_stack_manifest "${wd:-}"; then
+      printf '%s\n' "$name"
+      return 0
+    fi
+    if current_live_task_owns "$name" "${project:-}" "${wd:-}" "${task:-}"; then
+      printf '%s\n' "$name"
+      return 0
+    fi
+  done <"$inventory"
+  return 1
+}
+
+current_live_task_owns() { # <name> <project> <working-dir> <task-label>
+  local hay="$1 $2 $3" label="$4" meta id
+  [ -d "$STATE" ] || return 1
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    id="$(basename "$meta" .meta)"
+    if [ "$label" = "$id" ] || contains_token "$hay" "$id"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+stable_volume_candidates() { # <label> <output>
+  local label="$1" output="$2" blocked count guard_status
+  : >"$output"
+  sample_dangling_volumes "$output.first" || return 1
+  blocked="$(protected_container_not_running)"
+  guard_status=$?
+  case "$guard_status" in
+    0) note "  skipped $label: protected container $blocked is not running"; return 0 ;;
+    2) EXIT=1; note "  skipped $label: protected container state could not be verified"; return 0 ;;
+  esac
+  sleep "$VOLUME_STABILITY_SECONDS"
+  sample_dangling_volumes "$output.second" || return 1
+  blocked="$(protected_container_not_running)"
+  guard_status=$?
+  case "$guard_status" in
+    0) note "  skipped $label: protected container $blocked is not running"; return 0 ;;
+    2) EXIT=1; note "  skipped $label: protected container state could not be verified"; return 0 ;;
+  esac
+  comm -12 "$output.first" "$output.second" >"$output"
+  count="$(awk 'END { print NR + 0 }' "$output")"
+  if [ "$APPLY" = 1 ]; then
+    note "  reclaiming $count stable anonymous volumes from $label"
+  else
+    note "  would reclaim $count stable anonymous volumes from $label"
+  fi
+}
+
+reclaim_stable_volumes() { # <label>
+  local label="$1" list="$WORK/volumes.$2" volume
+  stable_volume_candidates "$label" "$list"
+  [ "$APPLY" = 1 ] || return 0
+  while IFS= read -r volume; do
+    [ -n "$volume" ] || continue
+    if ! docker volume rm "$volume" >/dev/null 2>&1; then
+      warn 'could not remove a stable anonymous volume'
+      EXIT=1
+    fi
+  done <"$list"
+}
+
+if [ "$APPLY" = 0 ]; then
+  if [ "$DOCKER_OK" = 1 ]; then
+    note 'volumes'
+    if [ "$INVENTORY_OK" = 1 ]; then
+      stable_volume_candidates 'dangling volumes' "$WORK/volumes.dry"
+    else
+      note '  skipped dangling volumes: protected container state could not be verified'
+    fi
+    note ''
+  fi
+  note 'nothing was deleted. Re-run with --apply to reclaim the above.'
+  exit "$EXIT"
+fi
+
 if [ "$DOCKER_OK" = 1 ]; then
   note 'reclaiming'
   remove_containers "$WORK/kill-stopped" stopped
-  prune 'dangling volumes' volume prune -f
+  reclaim_stable_volumes 'dangling volumes' first
   prune 'build cache' builder prune -f
   remove_containers "$WORK/kill-running" orphaned
-  # Rerun: an orphan's volumes only become dangling once its container is gone.
-  prune 'dangling volumes (after orphan removal)' volume prune -f
+  reclaim_stable_volumes 'dangling volumes after orphan removal' second
   if [ "$IMAGES" = 1 ]; then
     prune 'unused images' image prune -a -f
   fi

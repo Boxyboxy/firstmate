@@ -76,7 +76,9 @@ Phases run in ascending cost to re-acquire, so an interrupted run has spent the 
    Report every skipped worktree to the captain by path, as work still sitting on the machine rather than as a housekeeping failure.
 2. **Stopped containers**, then **dangling volumes**, then **build cache**.
    These are the cheap ones.
-   A dangling volume is referenced by no container and build cache is pure cache, so both come back on the next build.
+   Build cache comes back on the next build, but a volume can contain data that no rebuild restores.
+   Losing a worktree costs a re-lease because uncommitted work is protected independently, while losing a volume costs data.
+   The volume phase is therefore allowed to be slower and more conservative than every other phase.
 3. **Orphaned running containers with no live owner.**
    This is the only phase that stops something that is currently running, and it acts only on containers positively attributed to a task that has finished.
 4. **Volumes again.**
