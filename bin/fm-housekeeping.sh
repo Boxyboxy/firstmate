@@ -544,6 +544,12 @@ remove_containers() { # <list-file> <label>
     current_container_protection "$name"
     protection=$?
     if [ "$protection" = 0 ]; then
+      printf '%s\n' "$name" >>"$WORK/keep-names"
+      sort -u "$WORK/keep-names" -o "$WORK/keep-names"
+      if [ -s "$WORK/current-protected-running" ]; then
+        printf '%s\n' "$name" >>"$WORK/keep-running"
+        sort -u "$WORK/keep-running" -o "$WORK/keep-running"
+      fi
       note "  kept $label container $name: it became protected before removal"
       continue
     fi
@@ -563,7 +569,8 @@ remove_containers() { # <list-file> <label>
 
 current_container_protection() { # <name>
   local target="$1" inventory="$WORK/current-containers" name state project task ports wd
-  local target_projects="$WORK/current-target-projects" found=0
+  local target_projects="$WORK/current-target-projects" found=0 target_running=0
+  : >"$WORK/current-protected-running"
   if ! docker ps -a --format "$DOCKER_FMT" >"$inventory" 2>/dev/null; then
     return 2
   fi
@@ -578,11 +585,13 @@ current_container_protection() { # <name>
   while IFS='|' read -r name state project task ports wd; do
     [ "$name" = "$target" ] || continue
     found=1
+    [ "$state" = running ] && target_running=1
     [ -n "${project:-}" ] && printf '%s\n' "$project" >>"$target_projects"
     if matches_keep_pattern "$name" || claimed_by_keep_dir "$name" "${wd:-}" ||
       current_live_task_owns "$name" "${project:-}" "${wd:-}" "${task:-}" ||
       { [ "$state" = running ] && case "${ports:-}" in *'->'*) true ;; *) false ;; esac; } ||
       has_stack_manifest "${wd:-}"; then
+      [ "$target_running" = 1 ] && printf '%s\n' "$target" >"$WORK/current-protected-running"
       return 0
     fi
   done <"$inventory"
@@ -595,6 +604,7 @@ current_container_protection() { # <name>
       current_live_task_owns "$name" "${project:-}" "${wd:-}" "${task:-}" ||
       { [ "$state" = running ] && case "${ports:-}" in *'->'*) true ;; *) false ;; esac; } ||
       has_stack_manifest "${wd:-}"; then
+      [ "$target_running" = 1 ] && printf '%s\n' "$target" >"$WORK/current-protected-running"
       return 0
     fi
   done <"$inventory"

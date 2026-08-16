@@ -61,7 +61,17 @@ case "$cmd" in
         cat "$FM_TEST_DOCKER_FIXTURE"
       fi
     else
-      awk -F'|' '$2=="running" {print $1}' "$FM_TEST_DOCKER_FIXTURE"
+      late_active=0
+      if [ -n "${late_id:-}" ] && [ -e "$FM_HOME/state/$late_id.meta" ]; then
+        late_active=1
+      fi
+      awk -F'|' -v stopped_file="$FM_TEST_CONTAINER_STOP_AFTER_LATE" -v late_active="$late_active" '
+        BEGIN {
+          while ((getline stopped < stopped_file) > 0) stop[stopped] = 1
+          close(stopped_file)
+        }
+        $2 == "running" && !(late_active && ($1 in stop)) { print $1 }
+      ' "$FM_TEST_DOCKER_FIXTURE"
     fi
     ;;
   inspect)
@@ -174,6 +184,7 @@ fm_hk_case() {
   : >"$dir/volume.rm"
   : >"$dir/container-mounts"
   : >"$dir/container.late-live"
+  : >"$dir/container.stop-after-late"
   : >"$dir/volume-metadata"
   printf '0\n' >"$dir/container-sample-count"
   mkdir -p "$dir/container-samples"
@@ -202,6 +213,7 @@ fm_hk_run() { # <dir> <args...>
     FM_TEST_CONTAINER_SAMPLE_COUNT="$dir/container-sample-count" \
     FM_TEST_CONTAINER_SAMPLE_DIR="$dir/container-samples" \
     FM_TEST_CONTAINER_LATE_LIVE="$dir/container.late-live" \
+    FM_TEST_CONTAINER_STOP_AFTER_LATE="$dir/container.stop-after-late" \
     FM_TEST_VOLUME_METADATA="$dir/volume-metadata" \
     FM_HOUSEKEEPING_VOLUME_STABILITY_SECONDS=0 \
     "$HOUSEKEEPING" "$@" >"$dir/out" 2>"$dir/err"
@@ -321,20 +333,26 @@ test_orphan_removed_while_live_task_and_stack_are_kept() {
 }
 
 test_orphan_that_becomes_live_before_removal_is_kept() {
-  local dir
+  local dir code
   dir=$(fm_hk_case late-live-container)
   mkdir -p "$dir/home/data/gone-beta"
   fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
   fm_hk_container "$dir" fm-gone-beta-db running '' '' '' ''
   printf 'gone-beta|1\n' >"$dir/container.late-live"
+  printf 'fm-gone-beta-db\n' >"$dir/container.stop-after-late"
 
   fm_hk_run "$dir" --apply --no-worktrees
-  expect_code 0 "$?" 'apply when an orphan becomes live before removal'
+  code=$?
+  expect_code 1 "$code" 'apply when a late-protected orphan stops before verification'
   assert_no_grep fm-gone-beta-db "$dir/docker.rm" \
     'removed an orphan whose owning task became live before removal'
   assert_grep 'became protected before removal' "$dir/out" \
     'the late live-task protection was not reported'
-  pass 'an orphan whose task becomes live before removal is kept'
+  assert_grep 'FAILED: protected container fm-gone-beta-db is no longer running' "$dir/out" \
+    'final verification omitted a container protected only by the late check'
+  assert_no_grep 'every protected container is still running' "$dir/out" \
+    'verification passed after a late-protected container stopped'
+  pass 'a late-protected orphan is included in final verification'
 }
 
 test_finished_task_name_with_bound_port_is_kept() {
