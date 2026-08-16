@@ -69,6 +69,13 @@ Skipped 1 unsafe idle worktree:
   18    /pool/18/demo
 OUT
 [ -f "$FM_TEST_TREEHOUSE_CANDIDATE" ] && cat "$FM_TEST_TREEHOUSE_CANDIDATE"
+if case " $* " in *' --yes '*) true ;; *) false ;; esac &&
+  [ -s "$FM_TEST_TREEHOUSE_LATE_LIVE" ]; then
+  while IFS='|' read -r id worktree; do
+    printf 'kind=ship\nworktree=%s\n' "$worktree" >"$FM_HOME/state/$id.meta"
+    rmdir "$worktree"
+  done <"$FM_TEST_TREEHOUSE_LATE_LIVE"
+fi
 FAKE
   chmod +x "$bin/docker" "$bin/treehouse"
   printf '%s\n' "$bin"
@@ -85,6 +92,7 @@ fm_hk_case() {
   : >"$dir/docker.rm"
   : >"$dir/treehouse.log"
   : >"$dir/treehouse.candidate"
+  : >"$dir/treehouse.late-live"
   : >"$dir/containers"
   printf '%s\n' "$dir"
 }
@@ -101,6 +109,7 @@ fm_hk_run() { # <dir> <args...>
     FM_TEST_DOCKER_LOG="$dir/docker.log" FM_TEST_DOCKER_RM="$dir/docker.rm" \
     FM_TEST_DOCKER_FIXTURE="$dir/containers" FM_TEST_TREEHOUSE_LOG="$dir/treehouse.log" \
     FM_TEST_TREEHOUSE_CANDIDATE="$dir/treehouse.candidate" \
+    FM_TEST_TREEHOUSE_LATE_LIVE="$dir/treehouse.late-live" \
     "$HOUSEKEEPING" "$@" >"$dir/out" 2>"$dir/err"
 }
 
@@ -282,6 +291,7 @@ test_configured_keep_and_stack_project_protect_stopped_members() {
   fm_hk_container "$dir" pinned-db exited '' '' '' ''
   fm_hk_container "$dir" web-api running webstack '' '127.0.0.1:3000->3000/tcp' ''
   fm_hk_container "$dir" web-worker exited webstack '' '' ''
+  fm_hk_container "$dir" web-orphan exited webstack gone-beta '' ''
   fm_hk_container "$dir" junk-cache exited '' '' '' ''
 
   fm_hk_run "$dir" --apply --no-worktrees
@@ -290,6 +300,8 @@ test_configured_keep_and_stack_project_protect_stopped_members() {
   assert_no_grep reserved-cache "$dir/docker.rm" 'removed a configured keep-list prefix match'
   assert_no_grep pinned-db "$dir/docker.rm" 'removed a container a stack manifest claims'
   assert_no_grep web-worker "$dir/docker.rm" 'removed a stopped member of a live stack'
+  assert_no_grep web-orphan "$dir/docker.rm" \
+    'removed a stopped finished-task container from a protected project'
   assert_grep junk-cache "$dir/docker.rm" 'left an unclaimed stopped container behind'
   assert_no_kept_name_removed "$dir"
   pass 'the keep-list, stack manifests, and live projects protect stopped members'
@@ -332,6 +344,40 @@ test_live_task_worktree_is_refused_before_pruning() {
   pass 'a clean worktree recorded by live metadata survives pruning'
 }
 
+test_skipped_live_worktree_does_not_refuse_apply() {
+  local dir live_worktree
+  dir=$(fm_hk_case skipped-live-worktree)
+  live_worktree="$dir/live-dirty"
+  mkdir -p "$live_worktree"
+  fm_write_meta "$dir/home/state/live-dirty.meta" 'kind=ship' "worktree=$live_worktree"
+  printf 'Skipped 1 unsafe idle worktree:\n  uncommitted changes:\n  18    %s\n' \
+    "$live_worktree" >"$dir/treehouse.candidate"
+  fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
+
+  fm_hk_run "$dir" --apply
+  expect_code 0 "$?" 'apply when treehouse reports a skipped live worktree'
+  assert_grep '--all --yes' "$dir/treehouse.log" 'a skipped live worktree refused apply'
+  [ -d "$live_worktree" ] || fail 'treehouse removed a skipped live worktree'
+  pass 'a skipped live worktree does not trigger candidate refusal'
+}
+
+test_late_live_worktree_loss_is_reported() {
+  local dir live_worktree code
+  dir=$(fm_hk_case late-live-worktree)
+  live_worktree="$dir/late-live"
+  mkdir -p "$live_worktree"
+  printf 'late-alpha|%s\n' "$live_worktree" >"$dir/treehouse.late-live"
+  fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
+
+  fm_hk_run "$dir" --apply
+  code=$?
+  expect_code 1 "$code" 'apply when a worktree becomes live during pruning'
+  assert_grep 'LIVE WORKTREE LOST' "$dir/err" 'the post-prune check missed the lost worktree'
+  assert_grep 'task late-alpha' "$dir/err" 'the incident report omitted the owning task id'
+  assert_grep "$live_worktree" "$dir/err" 'the incident report omitted the worktree path'
+  pass 'a worktree entering the live set during prune is reported if lost'
+}
+
 test_dry_run_deletes_nothing() {
   local dir
   dir=$(fm_hk_case dry-run)
@@ -364,4 +410,6 @@ test_refuses_when_a_name_lands_on_both_lists
 test_configured_keep_and_stack_project_protect_stopped_members
 test_worktree_phase_never_overrides_the_uncommitted_refusal
 test_live_task_worktree_is_refused_before_pruning
+test_skipped_live_worktree_does_not_refuse_apply
+test_late_live_worktree_loss_is_reported
 test_dry_run_deletes_nothing

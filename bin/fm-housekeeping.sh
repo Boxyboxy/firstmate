@@ -49,8 +49,8 @@
 #                           delete reason.
 #   7. reclaim:stopped    - stopped, unprotected, and in no protected compose
 #                           project. A stopped container is doing nothing now,
-#                           and one a live stack owns is protected by 1, 2, 5, or
-#                           by project propagation below.
+#                           and one a live stack owns is protected by 1, 2, 3, 4,
+#                           or by project propagation below.
 #
 # Protection propagates across a compose project: if any member is kept by 1, 2,
 # 3, or 4, every member of that project is kept, so a stack with one stopped
@@ -172,14 +172,12 @@ contains_token() {
 # --- inputs ------------------------------------------------------------------
 
 : >"$WORK/live-ids"
-: >"$WORK/live-worktrees"
 : >"$WORK/done-ids"
 if [ -d "$STATE" ]; then
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     id="$(basename "$meta" .meta)"
     printf '%s\n' "$id" >>"$WORK/live-ids"
-    sed -n 's/^worktree=//p' "$meta" | head -n 1 >>"$WORK/live-worktrees"
   done
 fi
 if [ -d "$DATA" ]; then
@@ -359,7 +357,7 @@ if [ -s "$WORK/protected-projects" ]; then
   sort -u "$WORK/protected-projects" -o "$WORK/protected-projects"
   : >"$WORK/classified.propagated"
   while IFS='|' read -r name state verdict project reason; do
-    if [ "$verdict" = 'reclaim:stopped' ] && [ -n "$project" ] &&
+    if [ "$state" != running ] && [ "${verdict#keep:}" = "$verdict" ] && [ -n "$project" ] &&
       grep -qxF "$project" "$WORK/protected-projects"; then
       verdict='keep:stack-claimed'
       reason="stopped member of the live stack $project"
@@ -370,8 +368,9 @@ if [ -s "$WORK/protected-projects" ]; then
 fi
 
 awk -F'|' '$3 ~ /^keep:/ {print $1}' "$WORK/classified" | sort -u >"$WORK/keep-names"
-awk -F'|' '$3 == "orphan" {print $1}' "$WORK/classified" | sort -u >"$WORK/kill-running"
-awk -F'|' '$3 == "reclaim:stopped" {print $1}' "$WORK/classified" | sort -u >"$WORK/kill-stopped"
+awk -F'|' '$2 == "running" && $3 == "orphan" {print $1}' "$WORK/classified" | sort -u >"$WORK/kill-running"
+awk -F'|' '$2 != "running" && ($3 == "orphan" || $3 == "reclaim:stopped") {print $1}' \
+  "$WORK/classified" | sort -u >"$WORK/kill-stopped"
 awk -F'|' '$2 == "running" {print $1}' "$WORK/classified" | sort -u >"$WORK/running-names"
 awk -F'|' '$2 == "running" && $3 ~ /^keep:/ {print $1}' "$WORK/classified" | sort -u >"$WORK/keep-running"
 cat "$WORK/kill-running" "$WORK/kill-stopped" | sort -u >"$WORK/kill-names"
@@ -433,21 +432,42 @@ nothing running is the failure this script exists to prevent.'
   fi
 fi
 
-# Treehouse has no per-path exclusion flag, so inspect its dry-run candidates
-# before authorizing deletion and fail closed if it names a live task worktree.
-if [ "$APPLY" = 1 ] && [ "$WORKTREES" = 1 ] && have treehouse; then
-  if ! treehouse prune --all >"$WORK/treehouse.preflight" 2>&1; then
-    refuse 'treehouse dry-run preflight failed, so live worktree exclusions could not be verified'
-  fi
-  while IFS= read -r live_worktree; do
-    [ -n "$live_worktree" ] || continue
-    if grep -qF -- "$live_worktree" "$WORK/treehouse.preflight"; then
-      refuse "treehouse proposed the live task worktree $live_worktree for pruning"
-    fi
-  done <"$WORK/live-worktrees"
-fi
-
 # --- phase 1: worktrees ------------------------------------------------------
+
+snapshot_live_worktrees() { # <output>
+  local output="$1" meta id worktree
+  : >"$output"
+  [ -d "$STATE" ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    id="$(basename "$meta" .meta)"
+    worktree="$(sed -n 's/^worktree=//p' "$meta" | head -n 1)"
+    [ -n "$worktree" ] && printf '%s|%s\n' "$id" "$worktree" >>"$output"
+  done
+}
+
+treehouse_candidates() { # <input> <output>
+  awk '
+    /^Would prune [0-9]+ stale worktree/ { candidates=1; next }
+    /^(Skipped|No stale worktrees|Pruned) / { candidates=0 }
+    candidates && /^[[:space:]]*[0-9]+[[:space:]]+/ {
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "")
+      print
+    }
+  ' "$1" >"$2"
+}
+
+verify_live_worktrees() { # <snapshot>
+  local snapshot="$1" id live_worktree lost=0
+  while IFS='|' read -r id live_worktree; do
+    [ -n "$live_worktree" ] || continue
+    if [ ! -e "$live_worktree" ]; then
+      warn "LIVE WORKTREE LOST: task $id records $live_worktree, which vanished during pruning"
+      lost=1
+    fi
+  done <"$snapshot"
+  return "$lost"
+}
 
 if [ "$WORKTREES" = 1 ]; then
   note 'worktrees'
@@ -456,7 +476,23 @@ if [ "$WORKTREES" = 1 ]; then
     # Treehouse already refuses a worktree with uncommitted changes; that
     # refusal is never overridden, because a skipped worktree is unlanded work.
     if [ "$APPLY" = 1 ]; then
+      if ! treehouse prune --all >"$WORK/treehouse.preflight" 2>&1; then
+        refuse 'treehouse dry-run preflight failed, so live worktree exclusions could not be verified'
+      fi
+      treehouse_candidates "$WORK/treehouse.preflight" "$WORK/treehouse.candidates"
+      snapshot_live_worktrees "$WORK/live-worktrees.before"
+      while IFS='|' read -r _id live_worktree; do
+        [ -n "$live_worktree" ] || continue
+        if grep -qxF -- "$live_worktree" "$WORK/treehouse.candidates"; then
+          refuse "treehouse proposed the live task worktree $live_worktree for pruning"
+        fi
+      done <"$WORK/live-worktrees.before"
       treehouse prune --all --yes >"$WORK/treehouse.out" 2>&1 || EXIT=1
+      snapshot_live_worktrees "$WORK/live-worktrees.after"
+      if ! verify_live_worktrees "$WORK/live-worktrees.after"; then
+        sed 's/^/  /' "$WORK/treehouse.out"
+        exit 1
+      fi
     else
       treehouse prune --all >"$WORK/treehouse.out" 2>&1 || EXIT=1
     fi
