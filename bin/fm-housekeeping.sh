@@ -34,16 +34,16 @@
 #   1. keep:configured    - name matches the configured keep-list (below).
 #   2. keep:live-task     - name, compose project, or compose working_dir carries
 #                           the id of a task with a live state/<id>.meta.
-#   3. orphan             - the same match against a KNOWN but finished task id
-#                           (a data/<id>/ directory with no state/<id>.meta).
-#                           Running orphans are removed only under --apply.
-#   4. keep:serving       - running with a published host port. Docker binds that
+#   3. keep:serving       - running with a published host port. Docker binds that
 #                           port for as long as the container runs, so the port
 #                           binding itself is the structural in-use signal; no
 #                           name prefix is consulted.
-#   5. keep:stack-claimed - its compose working_dir exists on disk and holds a
+#   4. keep:stack-claimed - its compose working_dir exists on disk and holds a
 #                           stack manifest (stack.sh, compose.sh, or a compose
 #                           yaml), so something on disk still claims it.
+#   5. orphan             - the same match against a KNOWN but finished task id
+#                           (a data/<id>/ directory with no state/<id>.meta).
+#                           Running orphans are removed only under --apply.
 #   6. keep:unattributed  - running and none of the above: KEPT and reported for
 #                           the captain to judge. Unattributable is never a
 #                           delete reason.
@@ -53,7 +53,7 @@
 #                           by project propagation below.
 #
 # Protection propagates across a compose project: if any member is kept by 1, 2,
-# 4, or 5, every member of that project is kept, so a stack with one stopped
+# 3, or 4, every member of that project is kept, so a stack with one stopped
 # member never loses it.
 #
 # --- the two delete-path refusals -------------------------------------------
@@ -172,12 +172,14 @@ contains_token() {
 # --- inputs ------------------------------------------------------------------
 
 : >"$WORK/live-ids"
+: >"$WORK/live-worktrees"
 : >"$WORK/done-ids"
 if [ -d "$STATE" ]; then
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     id="$(basename "$meta" .meta)"
     printf '%s\n' "$id" >>"$WORK/live-ids"
+    sed -n 's/^worktree=//p' "$meta" | head -n 1 >>"$WORK/live-worktrees"
   done
 fi
 if [ -d "$DATA" ]; then
@@ -331,12 +333,12 @@ while [ "$INVENTORY_OK" = 1 ] && IFS='|' read -r name state project task ports w
     kind="${match%% *}"; id="${match#* }"
     if [ "$kind" = live ]; then
       verdict='keep:live-task'; reason="owned by live task $id"
-    elif [ "$kind" = 'done' ]; then
-      verdict='orphan'; reason="left by finished task $id"
     elif [ "$serving" = 1 ]; then
       verdict='keep:serving'; reason='running with a bound host port'
     elif has_stack_manifest "${wd:-}"; then
       verdict='keep:stack-claimed'; reason="claimed by the stack at $wd"
+    elif [ "$kind" = 'done' ]; then
+      verdict='orphan'; reason="left by finished task $id"
     elif [ "$state" = running ]; then
       verdict='keep:unattributed'; reason='running and unattributable'
     else
@@ -411,6 +413,40 @@ if [ "$DOCKER_OK" = 1 ]; then
   note ''
 fi
 
+# --- delete-path preflight --------------------------------------------------
+
+if [ "$APPLY" = 1 ] && [ "$DOCKER_OK" = 1 ]; then
+  if [ "$INVENTORY_OK" = 0 ]; then
+    refuse 'the container listing is not in the expected shape. Reclaiming from a
+listing this script cannot read is how a filter that matches nothing turns into
+a sweep that removes everything.'
+  fi
+  if [ -s "$WORK/running-names" ] && [ ! -s "$WORK/keep-running" ]; then
+    refuse 'every running container ended up on the kill-list. A sweep that keeps
+nothing running is the failure this script exists to prevent.'
+  fi
+  if [ -s "$WORK/kill-names" ]; then
+    comm -12 "$WORK/kill-names" "$WORK/keep-names" >"$WORK/intersection"
+    if [ -s "$WORK/intersection" ]; then
+      refuse "the kill-list intersects the keep-list by name: $(tr '\n' ' ' <"$WORK/intersection")"
+    fi
+  fi
+fi
+
+# Treehouse has no per-path exclusion flag, so inspect its dry-run candidates
+# before authorizing deletion and fail closed if it names a live task worktree.
+if [ "$APPLY" = 1 ] && [ "$WORKTREES" = 1 ] && have treehouse; then
+  if ! treehouse prune --all >"$WORK/treehouse.preflight" 2>&1; then
+    refuse 'treehouse dry-run preflight failed, so live worktree exclusions could not be verified'
+  fi
+  while IFS= read -r live_worktree; do
+    [ -n "$live_worktree" ] || continue
+    if grep -qF -- "$live_worktree" "$WORK/treehouse.preflight"; then
+      refuse "treehouse proposed the live task worktree $live_worktree for pruning"
+    fi
+  done <"$WORK/live-worktrees"
+fi
+
 # --- phase 1: worktrees ------------------------------------------------------
 
 if [ "$WORKTREES" = 1 ]; then
@@ -439,26 +475,6 @@ if [ "$APPLY" = 0 ]; then
   exit "$EXIT"
 fi
 
-# --- delete-path refusals ----------------------------------------------------
-
-if [ "$DOCKER_OK" = 1 ]; then
-  if [ "$INVENTORY_OK" = 0 ]; then
-    refuse 'the container listing is not in the expected shape. Reclaiming from a
-listing this script cannot read is how a filter that matches nothing turns into
-a sweep that removes everything.'
-  fi
-  if [ -s "$WORK/running-names" ] && [ ! -s "$WORK/keep-running" ]; then
-    refuse 'every running container ended up on the kill-list. A sweep that keeps
-nothing running is the failure this script exists to prevent.'
-  fi
-  if [ -s "$WORK/kill-names" ]; then
-    comm -12 "$WORK/kill-names" "$WORK/keep-names" >"$WORK/intersection"
-    if [ -s "$WORK/intersection" ]; then
-      refuse "the kill-list intersects the keep-list by name: $(tr '\n' ' ' <"$WORK/intersection")"
-    fi
-  fi
-fi
-
 # --- phases 2-7 --------------------------------------------------------------
 
 remove_containers() { # <list-file> <label>
@@ -480,9 +496,15 @@ remove_containers() { # <list-file> <label>
 }
 
 prune() { # <label> <docker args...>
-  local label="$1"; shift
+  local label="$1" output; shift
   note "  pruning $label"
-  docker "$@" 2>&1 | sed 's/^/    /' || EXIT=1
+  output="$WORK/prune-output"
+  if docker "$@" >"$output" 2>&1; then
+    sed 's/^/    /' "$output"
+  else
+    sed 's/^/    /' "$output"
+    EXIT=1
+  fi
 }
 
 if [ "$DOCKER_OK" = 1 ]; then

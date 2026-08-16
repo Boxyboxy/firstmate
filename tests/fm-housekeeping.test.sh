@@ -68,6 +68,7 @@ Skipped 1 unsafe idle worktree:
   uncommitted changes:
   18    /pool/18/demo
 OUT
+[ -f "$FM_TEST_TREEHOUSE_CANDIDATE" ] && cat "$FM_TEST_TREEHOUSE_CANDIDATE"
 FAKE
   chmod +x "$bin/docker" "$bin/treehouse"
   printf '%s\n' "$bin"
@@ -83,6 +84,7 @@ fm_hk_case() {
   : >"$dir/docker.log"
   : >"$dir/docker.rm"
   : >"$dir/treehouse.log"
+  : >"$dir/treehouse.candidate"
   : >"$dir/containers"
   printf '%s\n' "$dir"
 }
@@ -98,6 +100,7 @@ fm_hk_run() { # <dir> <args...>
   PATH="$bin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_TEST_DOCKER_LOG="$dir/docker.log" FM_TEST_DOCKER_RM="$dir/docker.rm" \
     FM_TEST_DOCKER_FIXTURE="$dir/containers" FM_TEST_TREEHOUSE_LOG="$dir/treehouse.log" \
+    FM_TEST_TREEHOUSE_CANDIDATE="$dir/treehouse.candidate" \
     "$HOUSEKEEPING" "$@" >"$dir/out" 2>"$dir/err"
 }
 
@@ -214,6 +217,21 @@ test_orphan_removed_while_live_task_and_stack_are_kept() {
   pass 'a finished task loses its containers while live work and live stacks keep theirs'
 }
 
+test_finished_task_name_with_bound_port_is_kept() {
+  local dir
+  dir=$(fm_hk_case serving-orphan)
+  mkdir -p "$dir/home/data/gone-beta"
+  fm_hk_container "$dir" fm-gone-beta-api running '' '' '127.0.0.1:3000->3000/tcp' ''
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply with a serving container named for a finished task'
+  assert_no_grep fm-gone-beta-api "$dir/docker.rm" \
+    'removed a structurally protected container attributed to finished work'
+  assert_grep 'running with a bound host port' "$dir/out" \
+    'structural protection did not precede finished-task attribution'
+  pass 'a bound host port protects a container named for finished work'
+}
+
 test_refuses_when_nothing_running_would_be_kept() {
   local dir code
   dir=$(fm_hk_case sweep-everything)
@@ -296,6 +314,24 @@ test_worktree_phase_never_overrides_the_uncommitted_refusal() {
   pass 'worktree pruning never overrides treehouse refusals and never chases orphans'
 }
 
+test_live_task_worktree_is_refused_before_pruning() {
+  local dir live_worktree code
+  dir=$(fm_hk_case live-worktree)
+  live_worktree="$dir/live-worktree"
+  mkdir -p "$live_worktree"
+  fm_write_meta "$dir/home/state/live-alpha.meta" 'kind=ship' "worktree=$live_worktree"
+  printf 'Would prune 1 stale worktree:\n  18    %s\n' "$live_worktree" >"$dir/treehouse.candidate"
+  fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
+
+  fm_hk_run "$dir" --apply
+  code=$?
+  expect_code 3 "$code" 'apply when treehouse proposes a live task worktree'
+  assert_grep 'live task worktree' "$dir/err" 'the refusal did not name the live-worktree risk'
+  assert_no_grep '--yes' "$dir/treehouse.log" 'authorized pruning after identifying a live worktree'
+  [ -d "$live_worktree" ] || fail 'the live task worktree did not survive the prune guard'
+  pass 'a clean worktree recorded by live metadata survives pruning'
+}
+
 test_dry_run_deletes_nothing() {
   local dir
   dir=$(fm_hk_case dry-run)
@@ -322,8 +358,10 @@ test_unattributable_fleet_yields_empty_kill_list
 test_degraded_id_listing_still_reclaims_nothing
 test_refuses_a_listing_it_cannot_parse
 test_orphan_removed_while_live_task_and_stack_are_kept
+test_finished_task_name_with_bound_port_is_kept
 test_refuses_when_nothing_running_would_be_kept
 test_refuses_when_a_name_lands_on_both_lists
 test_configured_keep_and_stack_project_protect_stopped_members
 test_worktree_phase_never_overrides_the_uncommitted_refusal
+test_live_task_worktree_is_refused_before_pruning
 test_dry_run_deletes_nothing
