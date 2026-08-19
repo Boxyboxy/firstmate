@@ -76,7 +76,17 @@ case "$cmd" in
     ;;
   inspect)
     name="${@: -1}"
+    if [ -s "$FM_TEST_CONTAINER_INSPECT_FAIL" ] && grep -qxF "$name" "$FM_TEST_CONTAINER_INSPECT_FAIL"; then
+      exit 1
+    fi
+    # Real `docker inspect --format '{{println .Name}}'` prints one line per
+    # volume, and docker inspect appends a final newline to the whole result, so
+    # the output ALWAYS ends with a trailing empty line (a zero-volume container
+    # yields a single empty line). Model that faithfully: an earlier "clean"
+    # fake that omitted the trailing newline hid a real bug where a helper leaked
+    # that empty line's exit status and silently skipped the whole reclaim.
     awk -F'|' -v name="$name" '$1 == name {print $2}' "$FM_TEST_CONTAINER_MOUNTS"
+    printf '\n'
     ;;
   rm)
     for a in "$@"; do
@@ -183,6 +193,7 @@ fm_hk_case() {
   : >"$dir/containers"
   : >"$dir/volume.rm"
   : >"$dir/container-mounts"
+  : >"$dir/container.inspect-fail"
   : >"$dir/container.late-live"
   : >"$dir/container.stop-after-late"
   : >"$dir/volume-metadata"
@@ -214,6 +225,7 @@ fm_hk_run() { # <dir> <args...>
     FM_TEST_CONTAINER_SAMPLE_DIR="$dir/container-samples" \
     FM_TEST_CONTAINER_LATE_LIVE="$dir/container.late-live" \
     FM_TEST_CONTAINER_STOP_AFTER_LATE="$dir/container.stop-after-late" \
+    FM_TEST_CONTAINER_INSPECT_FAIL="$dir/container.inspect-fail" \
     FM_TEST_VOLUME_METADATA="$dir/volume-metadata" \
     FM_HOUSEKEEPING_VOLUME_STABILITY_SECONDS=0 \
     "$HOUSEKEEPING" "$@" >"$dir/out" 2>"$dir/err"
@@ -688,6 +700,50 @@ test_dry_run_models_post_stopped_volume_pass() {
   pass 'dry run and apply share the post-stopped volume sequence'
 }
 
+test_capture_helper_success_when_mounts_end_with_blank_line() {
+  # Real `docker inspect --format '{{println .Name}}'` output always ends with a
+  # trailing empty line, so the mount-capture helper's final loop iteration reads
+  # an empty line. The helper must still report success; when it leaks that empty
+  # line's exit status the entire docker reclamation plan is silently skipped.
+  local dir volume
+  dir=$(fm_hk_case capture-trailing-blank)
+  volume=$(printf 'a%.0s' {1..64})
+  # One running container that owns a volume, and it is the LAST inventory line,
+  # so its trailing empty mount line is what decides the helper's exit status.
+  fm_hk_container "$dir" wffui-db running '' '' '127.0.0.1:55931->5432/tcp' ''
+  printf 'wffui-db|%s\n' "$volume" >"$dir/container-mounts"
+
+  fm_hk_run "$dir"
+  expect_code 0 "$?" 'dry run over a normal fleet'
+  assert_no_grep 'skipped the entire docker reclamation plan' "$dir/out" \
+    'the plan was skipped because the capture helper leaked a trailing-blank-line status'
+  assert_grep 'would prune build cache' "$dir/out" \
+    'the build-cache phase never ran, so the reclamation plan did not execute'
+  assert_grep 'first volume pass after stopped containers' "$dir/out" \
+    'the first volume pass never ran, so the reclamation plan did not execute'
+  pass 'the capture helper reports success when a mount list ends with an empty line'
+}
+
+test_inspection_failure_skips_reclaim_fail_closed() {
+  # A genuine `docker inspect` failure must stay fail-closed: the capture helper
+  # returns non-zero, the run surfaces a nonzero status, and the entire docker
+  # reclamation plan is skipped rather than run against unverified state.
+  local dir
+  dir=$(fm_hk_case inspect-failure)
+  fm_hk_container "$dir" wffui-db running '' '' '127.0.0.1:55931->5432/tcp' ''
+  printf 'wffui-db\n' >"$dir/container.inspect-fail"
+
+  fm_hk_run "$dir"
+  expect_code 1 "$?" 'a genuine inspect failure must surface a nonzero status'
+  assert_grep 'skipped the entire docker reclamation plan' "$dir/out" \
+    'the failure did not report that the whole reclamation plan was skipped'
+  assert_grep 'container volume mounts could not be verified' "$dir/out" \
+    'the failure did not name the check that failed'
+  assert_no_grep 'would prune build cache' "$dir/out" \
+    'the reclamation plan ran despite an unverified container inventory'
+  pass 'a genuine inspection failure returns nonzero and skips the whole reclaim'
+}
+
 test_unattributable_fleet_yields_empty_kill_list
 test_degraded_id_listing_still_reclaims_nothing
 test_refuses_a_listing_it_cannot_parse
@@ -710,3 +766,5 @@ test_hex_shaped_named_volume_is_kept
 test_dry_run_models_post_orphan_volume_pass
 test_dry_run_deletes_nothing
 test_dry_run_models_post_stopped_volume_pass
+test_capture_helper_success_when_mounts_end_with_blank_line
+test_inspection_failure_skips_reclaim_fail_closed
