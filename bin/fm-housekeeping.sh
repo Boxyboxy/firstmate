@@ -468,6 +468,7 @@ snapshot_live_worktrees() { # <output>
     worktree="$(sed -n 's/^worktree=//p' "$meta" | head -n 1)"
     [ -n "$worktree" ] && printf '%s|%s\n' "$id" "$worktree" >>"$output"
   done
+  return 0
 }
 
 treehouse_candidates() { # <input> <output>
@@ -565,6 +566,7 @@ remove_containers() { # <list-file> <label>
       EXIT=1
     fi
   done <"$list"
+  return 0
 }
 
 current_container_protection() { # <name>
@@ -774,6 +776,7 @@ capture_container_volume_mounts() {
       [ -n "$volume" ] && printf '%s|%s\n' "$name" "$volume" >>"$WORK/all-container-mounts"
     done <"$mounts"
   done <"$WORK/inventory"
+  return 0
 }
 
 capture_anonymous_volumes() {
@@ -842,6 +845,7 @@ plan_volume_pass() { # <label> <suffix>
       EXIT=1
     fi
   done <"$list"
+  return 0
 }
 
 plan_prune() { # <label> <docker args...>
@@ -869,10 +873,12 @@ if [ "$DOCKER_OK" = 1 ]; then
   if [ "$INVENTORY_OK" = 1 ]; then
     : >"$WORK/model-removed-containers"
     : >"$WORK/model-reported-volumes"
-    if capture_container_volume_mounts && capture_anonymous_volumes; then
-      run_reclamation_plan
+    if ! capture_container_volume_mounts; then
+      note '  skipped the entire docker reclamation plan: container volume mounts could not be verified'
+    elif ! capture_anonymous_volumes; then
+      note '  skipped the entire docker reclamation plan: anonymous volume metadata could not be established'
     else
-      note '  skipped dangling volumes: protected container state could not be verified'
+      run_reclamation_plan
     fi
   fi
   note ''
