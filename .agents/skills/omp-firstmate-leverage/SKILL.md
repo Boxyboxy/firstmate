@@ -1,7 +1,7 @@
 ---
 name: omp-firstmate-leverage
 description: >-
-  Recurring maintenance for a firstmate running on omp: update omp, fast-forward firstmate's default branch, merge it into the local omp adapter branch, and audit whether omp's current feature surface is actually reachable from firstmate.
+  Recurring maintenance for a firstmate running on omp: update omp, fast-forward firstmate's default branch, merge it into the omp adapter branch and publish the result, and audit whether omp's current feature surface is actually reachable from firstmate.
   Use when the captain invokes /omp-firstmate-leverage, asks to update omp and firstmate together, asks whether firstmate is leveraging omp, or when the recurring backlog item for this sweep comes due.
 user-invocable: true
 metadata:
@@ -29,17 +29,27 @@ trigger for step 4 even when nothing else changed.
 Load and follow that skill rather than restating its guards here.
 It fast-forwards this home and every registered secondmate, never forces, and never touches `projects/`.
 
-## 3. Merge the default branch into the omp adapter branch
+## 3. Merge the default branch into the omp adapter branch and publish it
 
-The captain maintains a long-lived local adapter branch (`feat/omp-adaptor` at the time of writing;
+The captain maintains a long-lived adapter branch (`feat/omp-adaptor` at the time of writing;
 confirm the current name from `config/` or by asking, never assume).
 
 Merge, never rebase - it is published and other work is built on it.
 This is firstmate's own repo, so when the fleet is empty firstmate may do it directly; when any
 crewmate is live, delegate it per `AGENTS.md` section 1.
-
 Resolve conflicts on the merits and keep the primary checkout's tangle rule in mind: if the merge
 leaves the primary on a feature branch, restore it afterwards.
+
+Run `git fetch --all` before measuring anything.
+This home has more than one remote and the adapter branch's publish target is not `origin`, so an ahead-or-behind count taken against a ref this session never fetched is arithmetic about nothing while looking exactly like a measurement.
+Measure the adapter branch against its own upstream, the remote-tracking ref `git rev-parse --abbrev-ref '@{upstream}'` names for it, not against `origin` alone.
+
+Establish where a commit came from before saying whose work it is.
+An author name is not provenance: a commit this sweep's own merge just brought onto the branch is history the merge carried in, not the captain's unpushed work.
+
+Publishing is part of this step, not a follow-up - a completed merge left unpushed means the sweep is unfinished.
+When the adapter branch is zero behind its upstream, push it as the plain fast-forward it is, with no force.
+A non-fast-forward result, or any push that would need a force, is a stop-and-ask.
 
 ## 4. Audit whether omp's features are actually reachable from firstmate
 
@@ -76,7 +86,7 @@ budget cannot carry it.
 
 ## Output
 
-A short report: omp version before and after, whether the fast-forward and merge succeeded, and the
+A short report: omp version before and after, whether the fast-forward, merge and push succeeded, and the
 leverage findings as concrete gaps - each naming the omp capability, the firstmate surface that would
 have to change, and whether a dispatch change is also required for it to matter.
 
