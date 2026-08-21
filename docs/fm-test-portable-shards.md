@@ -5,35 +5,35 @@
 
 ## Verification inputs
 
-The current candidate timings came from the 2026-07-29 concurrent proof recorded in [fm-test-isolation-proof.md](fm-test-isolation-proof.md).
+The current candidate timings came from the 2026-08-20 concurrent proof recorded in [fm-test-isolation-proof.md](fm-test-isolation-proof.md).
 The proof ran 24 candidates with four workers and no failures.
 
 | duration_ms | script |
 |---:|---|
-| 52939 | `tests/fm-x-mode.test.sh` |
-| 48294 | `tests/fm-backend-herdr.test.sh` |
-| 46788 | `tests/fm-arm-pretool-check.test.sh` |
-| 34207 | `tests/fm-cd-pretool-check.test.sh` |
-| 30771 | `tests/fm-decision-hold-lifecycle.test.sh` |
-| 25365 | `tests/fm-crew-state.test.sh` |
-| 15674 | `tests/fm-test-run.test.sh` |
-| 15422 | `tests/fm-herdr-lab.test.sh` |
-| 9065 | `tests/fm-composer-ghost.test.sh` |
-| 8564 | `tests/fm-pr-merge.test.sh` |
-| 6251 | `tests/fm-grok-harness.test.sh` |
-| 5644 | `tests/fm-send-popup-settle.test.sh` |
-| 5237 | `tests/fm-lint.test.sh` |
-| 4816 | `tests/fm-tmux-submit-busy.test.sh` |
-| 2945 | `tests/fm-pi-primary-types.test.sh` |
-| 2911 | `tests/fm-send-settle.test.sh` |
-| 2875 | `tests/fm-review-diff.test.sh` |
-| 2747 | `tests/fm-send-strict.test.sh` |
-| 2224 | `tests/fm-brief.test.sh` |
-| 855 | `tests/fm-spawn-batch.test.sh` |
-| 703 | `tests/fm-supervision-instructions.test.sh` |
-| 581 | `tests/fm-ensure-agents-md.test.sh` |
-| 248 | `tests/fm-transition-lib.test.sh` |
-| 64 | `tests/fm-composer-lib.test.sh` |
+| 45356 | `tests/fm-backend-herdr.test.sh` |
+| 35415 | `tests/fm-x-mode.test.sh` |
+| 35095 | `tests/fm-captain-hold-lifecycle.test.sh` |
+| 27529 | `tests/fm-arm-pretool-check.test.sh` |
+| 20922 | `tests/fm-test-run.test.sh` |
+| 17558 | `tests/fm-crew-state.test.sh` |
+| 16582 | `tests/fm-cd-pretool-check.test.sh` |
+| 9766 | `tests/fm-lint.test.sh` |
+| 9562 | `tests/fm-herdr-lab.test.sh` |
+| 6768 | `tests/fm-grok-harness.test.sh` |
+| 6290 | `tests/fm-pr-merge.test.sh` |
+| 5569 | `tests/fm-composer-ghost.test.sh` |
+| 4563 | `tests/fm-send-popup-settle.test.sh` |
+| 4021 | `tests/fm-tmux-submit-busy.test.sh` |
+| 3544 | `tests/fm-composer-lib.test.sh` |
+| 3025 | `tests/fm-send-strict.test.sh` |
+| 2753 | `tests/fm-send-settle.test.sh` |
+| 2166 | `tests/fm-review-diff.test.sh` |
+| 1315 | `tests/fm-brief.test.sh` |
+| 975 | `tests/fm-spawn-batch.test.sh` |
+| 598 | `tests/fm-pi-primary-types.test.sh` |
+| 513 | `tests/fm-ensure-agents-md.test.sh` |
+| 331 | `tests/fm-supervision-instructions.test.sh` |
+| 99 | `tests/fm-transition-lib.test.sh` |
 
 ## Parallel lanes
 
@@ -41,9 +41,9 @@ The two parallel lanes use longest-processing-time assignment from those measure
 
 | Lane | Script count | Estimated duration |
 |---|---:|---:|
-| `portable-parallel-1` | 11 | 162436 ms (~162.4 s) |
-| `portable-parallel-2` | 13 | 162754 ms (~162.8 s) |
-| imbalance | | 318 ms |
+| `portable-parallel-1` | 11 | 134295 ms (~134.3 s) |
+| `portable-parallel-2` | 13 | 126020 ms (~126.0 s) |
+| imbalance | | 8275 ms |
 
 `bin/fm-test-run.sh` contains the exact ordered memberships in `list_portable_parallel_1` and `list_portable_parallel_2`.
 
@@ -105,10 +105,11 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 
 ## Timeouts
 
-| Job | timeout-minutes | Rationale |
-|---|---:|---|
-| portable parallel 1/2 | 10 | The measured shard sums are about three minutes and the timeout is a hang tripwire. |
-| portable serial 1-4 | 15 | Each balanced shard is about five minutes, leaving roughly 3x hang-tripwire margin. |
-| Herdr | 40 | The real-Herdr lane keeps its dedicated timeout. |
+| Lane | Bound | Rationale |
+|---|---|---|
+| portable parallel 1/2 | job `timeout-minutes: 10` | The measured shard sums are about three minutes and the timeout is a hang tripwire. |
+| portable serial 1-4 | job `timeout-minutes: 15` | Each balanced shard is about five minutes, leaving roughly 3x hang-tripwire margin. |
+| Herdr | family-run step `timeout-minutes: 20`; job `timeout-minutes: 75` backstop | Healthy runs finish around 7 minutes, so the step bound is the hang tripwire (cleanup and timing artifacts still upload) while the job cap stays a last-resort backstop. |
 
 Timeouts are hang tripwires rather than expected healthy durations.
+`.github/workflows/ci.yml` owns the exact numbers.
