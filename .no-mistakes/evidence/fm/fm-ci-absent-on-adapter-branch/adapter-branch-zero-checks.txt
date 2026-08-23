@@ -1,0 +1,12 @@
+Real-world impact of the defect: check runs on pull requests merged into Boxyboxy:feat/omp-adaptor
+(queried live with: gh api repos/Boxyboxy/firstmate/commits/<head-sha>/check-runs)
+
+PR #11  head 9823c987  check runs: 0
+PR #10  head cc5cf844  check runs: 0
+PR #9  head ec08bc43  check runs: 0
+
+Contrast - pull requests whose BASE is main, the one branch the old filter listed
+(Boxyboxy/firstmate has no PRs based on main; these are the upstream kunchenguid/firstmate ones):
+upstream PR #2811  head 77e36fd7  check runs: 14
+upstream PR #2810  head 20a480f8  check runs: 14
+upstream PR #2795  head efea26ef  check runs: 15

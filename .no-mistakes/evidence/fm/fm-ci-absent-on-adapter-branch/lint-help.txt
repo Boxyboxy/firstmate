@@ -1,0 +1,24 @@
+fm-lint-workflows.sh - owner of firstmate's GitHub workflow lint.
+
+Runs pinned actionlint on every .github/workflows/*.{yml,yaml} so a malformed
+workflow, including a self-broken ci.yml, fails in the local and no-mistakes
+lint lane before merge. A broken ci.yml cannot report its own breakage, so
+this check must not live only as a step inside that workflow. bin/fm-lint.sh
+invokes this owner on its default (no explicit-path) path, which CI and
+commands.lint both use.
+
+The directory-scan path then checks one gating invariant across the scanned
+set: every PR base gated by any pull_request or pull_request_target workflow
+must also be gated by no-mistakes-required.yml, so a base can never get CI
+without the check branch protection requires. A required check narrowed by a
+paths: or paths-ignore: filter fails too, because it then stops gating every
+base it lists. Any on: form this gate cannot read confidently is refused by
+name rather than guessed at. See the comment above REQUIRED_CHECK_WORKFLOW
+for why that is worth enforcing mechanically.
+
+Usage:
+  fm-lint-workflows.sh                 lint workflows under this repo
+  fm-lint-workflows.sh --root <dir>    lint workflows under <dir>
+  fm-lint-workflows.sh <path>...       lint explicit workflow files
+  fm-lint-workflows.sh --required-version
+  fm-lint-workflows.sh --help

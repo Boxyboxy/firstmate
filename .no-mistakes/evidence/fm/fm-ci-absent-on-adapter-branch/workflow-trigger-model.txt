@@ -1,0 +1,19 @@
+Parsed .github/workflows/*.yml with a real YAML parser (Ruby Psych).
+Shown below: the PR trigger model GitHub evaluates, per file.
+
+ci.yml
+  triggers: ["pull_request", "push"]
+  pull_request.branches (matches the PR BASE branch): ["main", "feat/omp-adaptor"]
+  gates a PR whose base is feat/omp-adaptor: true
+  gates a PR whose base is main: true
+
+no-mistakes-required.yml
+  triggers: ["pull_request"]
+  pull_request.branches (matches the PR BASE branch): ["main", "feat/omp-adaptor"]
+  gates a PR whose base is feat/omp-adaptor: true
+  gates a PR whose base is main: true
+
+windows-herdr-spike.yml
+  triggers: ["workflow_dispatch"]
+  no pull_request trigger - no base filter to maintain here
+

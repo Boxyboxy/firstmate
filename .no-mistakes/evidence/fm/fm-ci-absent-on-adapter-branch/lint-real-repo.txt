@@ -1,0 +1,4 @@
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
+fm-lint-workflows.sh: PR base gating: no-mistakes-required.yml requires checks on: main feat/omp-adaptor
+exit=0

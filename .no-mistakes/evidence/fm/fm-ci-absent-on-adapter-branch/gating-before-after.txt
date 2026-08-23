@@ -1,0 +1,17 @@
+$ bin/fm-lint-workflows.sh --root <base commit 1231b6ae workflow set>
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
+fm-lint-workflows.sh: PR base gating: no-mistakes-required.yml requires checks on: main
+exit=0
+
+$ bin/fm-lint-workflows.sh --root <this branch, but adapter base added to ci.yml only>
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
+fm-lint-workflows.sh: ci.yml gates PR base(s) feat/omp-adaptor through its pull_request trigger that no-mistakes-required.yml does not require, so a PR into them can merge with the required check absent. Add them to no-mistakes-required.yml.
+exit=1
+
+$ bin/fm-lint-workflows.sh   (this branch, real repo)
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
+fm-lint-workflows.sh: PR base gating: no-mistakes-required.yml requires checks on: main feat/omp-adaptor
+exit=0
