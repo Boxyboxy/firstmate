@@ -42,20 +42,32 @@
 #                   selected script is in the proven-isolated set
 #                   (bin/fm-test-isolation-proof.sh --list). Cap is 8. Stateful
 #                   families never schedule under --jobs.
+#   --timeout S     hard per-script bound in seconds (default 600). A script
+#                   that outruns it is killed with its whole process group,
+#                   recorded as exit=124, and named on a FM_TEST_TIMEOUT
+#                   marker, so a hung test reports instead of consuming the
+#                   run. Must be a positive integer; there is no way to
+#                   disable the bound.
 #   -h, --help      print this header
 #
 # Per-script machine-parseable markers (stdout):
 #   FM_TEST_BEGIN <iso8601> <script> family=<family> expected_gate_skip=<class>
 #   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false>
+#   FM_TEST_TIMEOUT <iso8601> <script> bound_s=<n>   (only for a timed-out script)
 #
 # After all scripts (stdout):
-#   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
+#   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n> timed_out=<n>
 #   FM_TEST_SUMMARY_FAMILY family=<name> count=<n> duration_ms=<n> failed=<n>
 #   FM_TEST_SLOWEST rank=<k> script=<path> duration_ms=<n>
 #
-# Exit status is non-zero if any selected script exits non-zero or a configured
-# --fail-on-gate-skip token appears. Other gate skips (first meaningful line
-# matching ^skip:) remain successful and are counted as skipped_gate.
+# Exit status is non-zero if any selected script exits non-zero, outruns the
+# per-script bound, or a configured --fail-on-gate-skip token appears. Other
+# gate skips (first meaningful line matching ^skip:) remain successful and are
+# counted as skipped_gate.
+#
+# The per-script bound is a hang guard, not a performance gate: it is deliberately
+# far above any legitimate script so only a wedged test can reach it. Bounded
+# execution itself is owned by bin/fm-timeout-lib.sh.
 #
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
@@ -73,6 +85,11 @@ set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# Bounded execution has one owner; do not re-derive the coreutils/BSD/perl/bash
+# selection here.
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+
 MODE=
 LIST_ONLY=0
 LIST_FAMILIES=0
@@ -88,6 +105,12 @@ EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
 JOBS=1
 JOBS_MAX=8
+
+# Hard per-script bound. Well above the slowest legitimate script (the whole
+# portable-serial remainder is about 19 minutes across roughly 120 scripts) and
+# below every CI lane's own job timeout, so only a wedged test reaches it.
+SCRIPT_TIMEOUT_DEFAULT=600
+SCRIPT_TIMEOUT=$SCRIPT_TIMEOUT_DEFAULT
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
@@ -767,6 +790,7 @@ lanes = []
 all_scripts = []
 failed = 0
 skipped = 0
+timed_out = 0
 total = 0
 wall_ms = 0
 for path in inputs:
@@ -784,6 +808,7 @@ for path in inputs:
     total += int(summary.get("total") or 0)
     failed += int(summary.get("failed") or 0)
     skipped += int(summary.get("skipped_gate") or 0)
+    timed_out += int(summary.get("timed_out") or 0)
     wall_ms = max(wall_ms, int(summary.get("duration_ms") or 0))
     for s in doc.get("scripts") or []:
         row = dict(s)
@@ -801,13 +826,14 @@ agg = {
         "failed": failed,
         "skipped_gate": skipped,
         "critical_path_duration_ms": wall_ms,
+        "timed_out": timed_out,
     },
     "scripts": all_scripts,
     "slowest": all_scripts[:15],
 }
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps(agg, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-print(f"FM_TEST_AGGREGATE lanes={len(lanes)} total={total} failed={failed} skipped_gate={skipped} critical_path_duration_ms={wall_ms}")
+print(f"FM_TEST_AGGREGATE lanes={len(lanes)} total={total} failed={failed} skipped_gate={skipped} critical_path_duration_ms={wall_ms} timed_out={timed_out}")
 PY
 }
 
@@ -1194,15 +1220,16 @@ write_json_artifact() {
   local selection=$9
   local records_file=${10}
   local families_file=${11}
+  local timed_out=${12}
 
   if ! command -v python3 >/dev/null 2>&1; then
     die "--json requires python3 to emit a valid timing artifact"
   fi
 
-  python3 - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$skipped" "$duration" "$selection" "$records_file" "$families_file" <<'PY'
+  python3 - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$skipped" "$duration" "$selection" "$records_file" "$families_file" "$timed_out" <<'PY'
 import json, sys
 
-out, started, finished, run_id, total, failed, skipped, duration, selection, records_file, families_file = sys.argv[1:]
+out, started, finished, run_id, total, failed, skipped, duration, selection, records_file, families_file, timed_out = sys.argv[1:]
 
 scripts = []
 with open(records_file, encoding="utf-8") as fh:
@@ -1210,7 +1237,7 @@ with open(records_file, encoding="utf-8") as fh:
         line = line.rstrip("\n")
         if not line:
             continue
-        path, family, expected, exit_s, dur_s, gate = line.split("\t")
+        path, family, expected, exit_s, dur_s, gate, timed = line.split("\t")
         scripts.append({
             "path": path,
             "family": family,
@@ -1218,6 +1245,7 @@ with open(records_file, encoding="utf-8") as fh:
             "duration_ms": int(dur_s),
             "exit": int(exit_s),
             "gate_skip": gate == "true",
+            "timed_out": timed == "true",
         })
 
 families = []
@@ -1244,6 +1272,7 @@ doc = {
         "failed": int(failed),
         "skipped_gate": int(skipped),
         "duration_ms": int(duration),
+        "timed_out": int(timed_out),
     },
     "scripts": scripts,
     "families": families,
@@ -1322,6 +1351,15 @@ while [ "$#" -gt 0 ]; do
       ;;
     --jobs=*)
       JOBS=${1#--jobs=}
+      shift
+      ;;
+    --timeout)
+      [ "$#" -gt 1 ] || die "--timeout requires a positive integer number of seconds"
+      SCRIPT_TIMEOUT=$2
+      shift 2
+      ;;
+    --timeout=*)
+      SCRIPT_TIMEOUT=${1#--timeout=}
       shift
       ;;
     --list)
@@ -1425,6 +1463,13 @@ esac
 [ "$JOBS" -ge 1 ] || die "--jobs must be >= 1"
 [ "$JOBS" -le "$JOBS_MAX" ] || die "--jobs is capped at $JOBS_MAX (got $JOBS)"
 
+# fm-timeout-lib.sh: a non-positive bound is not a bound, so refuse one rather
+# than silently running the suite unguarded.
+case "$SCRIPT_TIMEOUT" in
+  ''|*[!0-9]*) die "--timeout must be a positive integer number of seconds" ;;
+esac
+[ "$SCRIPT_TIMEOUT" -ge 1 ] || die "--timeout must be >= 1 second (the bound cannot be disabled)"
+
 case "${MODE:-}" in
   all)
     select_all
@@ -1488,7 +1533,7 @@ if [ "${#SCRIPTS[@]}" -eq 0 ]; then
     : >"$empty_fam"
     started=$(now_iso)
     mkdir -p "$(dirname "$JSON_PATH")"
-    write_json_artifact "$JSON_PATH" "$started" "$started" "empty" 0 0 0 0 "$SELECTION_DESC" "$empty_rec" "$empty_fam"
+    write_json_artifact "$JSON_PATH" "$started" "$started" "empty" 0 0 0 0 "$SELECTION_DESC" "$empty_rec" "$empty_fam" 0
     rm -f "$empty_rec" "$empty_fam"
   fi
   exit 0
@@ -1521,6 +1566,7 @@ RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
 TOTAL=0
 FAILED=0
 SKIPPED_GATE=0
+TIMED_OUT=0
 AGG_RC=0
 
 # Family accumulators as TSV lines updated in-memory via temp files.
@@ -1556,10 +1602,18 @@ family_bump() {
 
 record_script_result() {
   local script=$1 rc=$2 duration=$3 out=$4 end_iso=$5
-  local base family expected gate_skip fail_delta
+  local base family expected gate_skip fail_delta timed_out
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   expected=$(expected_gate_skip_for_family "$family")
+
+  # fm-timeout-lib.sh's convention: 124 means the hard bound was hit.
+  timed_out=false
+  if [ "$rc" -eq 124 ]; then
+    timed_out=true
+    TIMED_OUT=$((TIMED_OUT + 1))
+    log "hard bound hit: $script did not finish within ${SCRIPT_TIMEOUT}s and was killed with its process group"
+  fi
 
   if [ -n "$FAIL_ON_GATE_SKIP" ] && detect_gate_skip_token "$out" "$FAIL_ON_GATE_SKIP"; then
     log "required gate skip token seen in $script: skip: $FAIL_ON_GATE_SKIP"
@@ -1574,6 +1628,9 @@ record_script_result() {
 
   printf 'FM_TEST_END %s %s exit=%s duration_ms=%s gate_skip=%s\n' \
     "$end_iso" "$script" "$rc" "$duration" "$gate_skip"
+  if [ "$timed_out" = true ]; then
+    printf 'FM_TEST_TIMEOUT %s %s bound_s=%s\n' "$end_iso" "$script" "$SCRIPT_TIMEOUT"
+  fi
 
   fail_delta=0
   if [ "$rc" -ne 0 ]; then
@@ -1582,8 +1639,8 @@ record_script_result() {
     AGG_RC=1
   fi
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$script" "$family" "$expected" "$rc" "$duration" "$gate_skip" >>"$RECORDS"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$script" "$family" "$expected" "$rc" "$duration" "$gate_skip" "$timed_out" >>"$RECORDS"
   family_bump "$family" "$duration" "$fail_delta"
   TOTAL=$((TOTAL + 1))
 }
@@ -1603,8 +1660,8 @@ run_one_serial() {
 
   set +e
   # Stream live output while retaining a copy for gate-skip detection.
-  # PIPESTATUS[0] is the test script; tee's exit is ignored for aggregate.
-  bash "$script" 2>&1 | tee "$out"
+  # PIPESTATUS[0] is the bounded test script; tee's exit is ignored for aggregate.
+  fm_run_timed "$SCRIPT_TIMEOUT" bash "$script" 2>&1 | tee "$out"
   rc=${PIPESTATUS[0]}
   set -e
   : "${rc:=1}"
@@ -1711,7 +1768,7 @@ else
         FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
-      bash "$script" >"$work/output" 2>&1
+      fm_run_timed "$SCRIPT_TIMEOUT" bash "$script" >"$work/output" 2>&1
       rc=$?
       end_ms=$(now_ms)
       duration=$((end_ms - begin_ms))
@@ -1739,8 +1796,8 @@ if [ "$RUN_DURATION" -lt 0 ]; then
   RUN_DURATION=0
 fi
 
-printf 'FM_TEST_SUMMARY total=%s failed=%s skipped_gate=%s duration_ms=%s\n' \
-  "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION"
+printf 'FM_TEST_SUMMARY total=%s failed=%s skipped_gate=%s duration_ms=%s timed_out=%s\n' \
+  "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION" "$TIMED_OUT"
 
 if [ -s "$FAMILIES_TSV" ]; then
   # Stable family summary order by name.
@@ -1753,7 +1810,7 @@ fi
 # Slowest scripts (top 15) from records.
 if [ -s "$RECORDS" ]; then
   rank=1
-  sort -t$'\t' -k5,5nr "$RECORDS" | head -n 15 | while IFS=$'\t' read -r path _family _expected _rc duration _gate; do
+  sort -t$'\t' -k5,5nr "$RECORDS" | head -n 15 | while IFS=$'\t' read -r path _family _expected _rc duration _gate _timed_out; do
     printf 'FM_TEST_SLOWEST rank=%s script=%s duration_ms=%s\n' \
       "$rank" "$path" "$duration"
     rank=$((rank + 1))
@@ -1771,7 +1828,7 @@ if [ -n "$JSON_PATH" ]; then
   write_json_artifact "$JSON_PATH" \
     "$RUN_STARTED_ISO" "$RUN_FINISHED_ISO" "$RUN_ID" \
     "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION" \
-    "$SELECTION_DESC" "$RECORDS" "$FAMILIES_TSV"
+    "$SELECTION_DESC" "$RECORDS" "$FAMILIES_TSV" "$TIMED_OUT"
   log "wrote timing artifact: $JSON_PATH"
 fi
 
