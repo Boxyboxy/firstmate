@@ -148,12 +148,17 @@ echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
 # the task names - the one check a ref comparison cannot make.
 #
 # local-only is excluded, and keeps the generic default-branch wording even when
-# a base was recorded. bin/fm-spawn.sh already refuses --base combined with
-# --mode local-only, because bin/fm-merge-local.sh only ever fast-forwards the
-# project's LOCAL default branch, so a local-only task is by contract cut from
-# that default. Naming any other base here would emit as an instruction the exact
-# combination the spawn refuses as a flag, and bin/fm-merge-local.sh would then
-# refuse the promoted branch at merge time.
+# a base was recorded. bin/fm-merge-local.sh only ever fast-forwards the
+# project's LOCAL default branch, which it resolves in the project checkout, so a
+# local-only task is by contract cut from that default. bin/fm-spawn.sh guards
+# the same contract from its own end: it refuses a local-only --base that is not
+# "origin/<default>" for the REMOTE default it re-resolves with `git remote
+# set-head origin --auto`, while accepting one that names that default. Both
+# sides read the project repository's shared refs/remotes/origin/HEAD, and the
+# spawn's set-head refreshes that ref before it runs its check. Naming a scout's
+# recorded base here would therefore emit an instruction the spawn refuses
+# whenever that base is anything other than the remote default, and
+# bin/fm-merge-local.sh would refuse the promoted branch at merge time.
 if [ -n "$SCOUT_BASE" ] && [ "$MODE" != local-only ]; then
   BASE_INSTRUCTION="reset to a clean base on $SCOUT_BASE, the base this scout was cut from, and confirm that base contains the code this task names"
 else

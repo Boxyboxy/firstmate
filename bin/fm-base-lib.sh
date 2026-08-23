@@ -6,9 +6,20 @@
 # fetches it, resolves it and records it). Those two must never disagree about
 # which values are admissible: a base a brief accepts but its spawn refuses
 # leaves a scaffolded brief that can never be launched, and the reverse hands a
-# worker a brief whose stated base its spawn never validated. The rule therefore
-# lives here, in code both scripts source, rather than as a comment in each
-# asking the other to stay in step.
+# worker a brief whose stated base its spawn never validated. The SHAPE rule
+# therefore lives here, in code both scripts source, rather than as a comment in
+# each asking the other to stay in step.
+#
+# One admissibility rule deliberately does NOT live here, and the guarantee above
+# is narrower because of it. A local-only task must be cut from the remote's
+# CURRENT default branch, which bin/fm-spawn.sh checks and bin/fm-brief.sh
+# cannot: resolving that default requires a worktree, and the brief never touches
+# one. So "--mode local-only --base origin/<non-default>" scaffolds here and is
+# refused later by the spawn. That asymmetry is a property of what each script
+# can know, not an oversight, and it is the one admissibility rule the two do not
+# share. It is not the only way a scaffolded brief can fail to launch: the shape
+# rule makes no remote contact, so a base naming a branch that does not exist
+# scaffolds here too and is refused when the spawn's targeted fetch of it fails.
 #
 # --base deliberately accepts ONE shape, a branch on origin written
 # "origin/<branch>", and refuses every other shape before a worktree is touched.

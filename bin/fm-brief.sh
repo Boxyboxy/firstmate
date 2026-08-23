@@ -250,7 +250,9 @@ fi
 # That derivation only yields a branch for a ref on origin, and "origin/<branch>"
 # is in any case the ONE shape a base may take. What is admissible, and why, is
 # owned by bin/fm-base-lib.sh and applied by bin/fm-spawn.sh from that same
-# helper, so a brief and its spawn cannot disagree about what a base may be.
+# helper, so a brief and its spawn cannot disagree about a base's SHAPE. See that
+# header for what is admissible and for the one admissibility rule the two do not
+# share.
 if [ "$BASE_SET" -eq 1 ]; then
   fm_base_shape_check "$BASE" --base || exit 1
 fi

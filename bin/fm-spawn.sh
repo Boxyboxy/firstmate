@@ -465,7 +465,8 @@ fi
 # every other shape is refused here, before the worktree is touched. The rule and
 # the reasons behind its narrowness live in bin/fm-base-lib.sh, which
 # bin/fm-brief.sh applies to the same effect, so a brief and its spawn cannot
-# disagree about what a base may be.
+# disagree about a base's SHAPE. See that header for what is admissible and for
+# the one admissibility rule the two do not share.
 if [ "$BASE_SET" -eq 1 ]; then
   fm_base_shape_check "$BASE_ARG" --base || exit 1
 fi

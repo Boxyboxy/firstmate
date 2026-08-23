@@ -291,9 +291,9 @@ test_promotion_without_a_recorded_base_keeps_the_generic_hint() {
 
 # local-only lands through bin/fm-merge-local.sh, which only ever fast-forwards
 # the project's LOCAL default branch and refuses a branch that default is not an
-# ancestor of. bin/fm-spawn.sh already refuses --base with --mode local-only for
-# that reason, so naming a non-default base here would hand the promoted worker
-# as an instruction the exact combination the spawn refuses as a flag, and the
+# ancestor of. bin/fm-spawn.sh refuses a local-only --base that is not
+# "origin/<remote default>" for that reason, so naming origin/feat/campaigns here
+# would hand the promoted worker an instruction the spawn refuses, and the
 # resulting branch could never land.
 test_promotion_to_local_only_keeps_the_generic_hint_despite_a_recorded_base() {
   local home meta out status
