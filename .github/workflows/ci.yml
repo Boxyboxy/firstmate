@@ -78,7 +78,10 @@ jobs:
         # Explicit per-script bound: the runner's 900s default exceeds this
         # job's 10-minute cap, so without a lane-appropriate bound GitHub would
         # cancel the job before the bound could fire and name the wedged file.
-        # 540s clears the lane's slowest script (323s) and fires 60s early.
+        # 540s clears this lane's whole measured 213s serial sum with room and
+        # still fires before the 600s cap. 540 is the shared portable-parallel
+        # bound; its derivation belongs to SCRIPT_TIMEOUT_DEFAULT in
+        # bin/fm-test-run.sh.
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
@@ -119,7 +122,9 @@ jobs:
         # Explicit per-script bound: the runner's 900s default exceeds this
         # job's 10-minute cap, so without a lane-appropriate bound GitHub would
         # cancel the job before the bound could fire and name the wedged file.
-        # 540s clears the lane's slowest script (323s) and fires 60s early.
+        # 540s clears this lane's slowest script, tests/fm-backend-herdr.test.sh
+        # at 323s, with 1.67x headroom and still fires 60s before the 600s cap.
+        # The derivation belongs to SCRIPT_TIMEOUT_DEFAULT in bin/fm-test-run.sh.
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
@@ -142,10 +147,14 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # Measured whole remainder is ~42 min of serial work; the balanced shards
-    # are ~10.6 min each. Cap is a hang tripwire with roughly 2x margin, not the
-    # expected healthy end of the lane.
-    timeout-minutes: 20
+    # The per-script bound only fires if the job outlives it, so this cap must
+    # clear setup plus the shard wall plus the bound, not merely the bound (the
+    # rule is owned by SCRIPT_TIMEOUT_DEFAULT in bin/fm-test-run.sh). Measured
+    # whole remainder is ~44 min of serial work; the balanced shards are ~11 min
+    # (664s) each, the five setup steps below cost ~90-150s, and the bound is
+    # 900s, so the cap has to clear ~1714s. 30 minutes is a hang tripwire, not
+    # the expected healthy end of the lane.
+    timeout-minutes: 30
     strategy:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
@@ -289,9 +298,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/fm-herdr"
           bin/fm-herdr-ci-cleanup.sh snapshot "$RUNNER_TEMP/fm-herdr/sessions-before.json"
       - name: Run real-Herdr family (serial, required)
-        # Comfortably above the ~7 min healthy wall and far below the 75 min
-        # job backstop. A hang must fail this step so cleanup still runs.
-        timeout-minutes: 20
+        # Same rule as every other lane: this cap must clear the work before the
+        # wedge plus the per-script bound, not merely the bound. The ~7 min
+        # (420s) healthy wall plus the runner's 900s bound is 1320s, so 25
+        # minutes clears it and stays far below the 75 min job backstop. A hang
+        # must fail this step so cleanup still runs.
+        timeout-minutes: 25
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"

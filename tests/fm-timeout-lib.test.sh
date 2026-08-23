@@ -119,10 +119,18 @@ done
 pass "fm_run_timed reports 125, never a bound hit, when the bound cannot be established"
 
 # A hung grandchild must not outlive the bound: the whole process group goes.
+# The bound is 3s, not 1s, because this fixture has to win a race against its own
+# bound before the assertion below can be read at all: fork the mechanism, fork
+# its wrapper, fork the fixture shell, fork the grandchild, and flush the pid
+# file. At 1s a loaded runner could kill it before that write lands and report a
+# fixture failure for a bound that behaved correctly - a false red of exactly the
+# kind tracked by issue 2844. The sibling hang fixtures in
+# tests/fm-test-run.test.sh use 3s for the same reason. The fixture sleeps 300s
+# either way, so the bound-hit assertion proves the same thing.
 for mech in $MECHANISMS; do
   pidfile="$TMP_ROOT/grandchild-$mech.pid"
   # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
-  rc=$(run_under "$mech" 1 bash -c '
+  rc=$(run_under "$mech" 3 bash -c '
     bash -c "exec sleep 300" &
     printf "%s\n" "$!" > "$1"
     sleep 300

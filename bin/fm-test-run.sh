@@ -129,14 +129,33 @@ JOBS_MAX=8
 # stated against a loaded machine rather than an idle one. The CI timing
 # artifact's slowest is fm-pr-check-security at 250s.
 #
-# Coverage of this default is per lane, not universal, because the bound only
-# gets to fire if the CI job outlives it. 900s sits under the 20-minute
-# portable-serial shard cap (.github/workflows/ci.yml, tests-portable-serial)
-# and under the 20-minute real-Herdr family step cap, so in those lanes it fires
-# and names the wedged file instead of the job dying anonymously. It EXCEEDS the
-# 10-minute job caps of tests-portable-parallel-1 and tests-portable-parallel-2,
-# where GitHub would cancel the job first and no file would ever be named, so
-# those two steps pass an explicit --timeout 540 instead of taking this default.
+# Whether this bound can fire at all is a property of the CI lane, not of the
+# bound. The rule any lane has to satisfy, now and when the next one is added:
+#
+#   job (or step) cap > setup + the work that runs before the wedge + the bound
+#
+# because the job clock starts at checkout, not at the wedged script. A bound
+# smaller than the cap is necessary but not sufficient: under a 20-minute cap a
+# 900s bound only fires for a wedge that starts early in the lane, and a later
+# one is cancelled by GitHub first with no FM_TEST_TIMEOUT marker, no file
+# named, and timed_out still 0. How each lane in .github/workflows/ci.yml
+# satisfies the rule:
+#
+# - tests-portable-serial: each balanced shard's wall is about 664s, summed from
+#   this script's own portable_serial_weight_hints table (about 44 min of serial
+#   work split four ways), and the five steps ahead of the test step (checkout at
+#   fetch-depth 0, pinned ShellCheck, pinned actionlint, the tmux probe, and the
+#   tasks-axi install) cost roughly 90-150s. 150 + 664 + 900 = 1714s, so that job
+#   caps at 30 minutes (1800s). It capped at 20 (1200s), which left the bound
+#   blind for most of every shard's timeline, in the lane that holds the stateful
+#   hang-prone scripts: watcher, lock, AFK, tmux, daemon.
+# - tests-herdr's family-run step: about a 420s healthy wall plus the 900s bound
+#   is 1320s, so that step caps at 25 minutes (1500s), still far below the lane's
+#   75-minute job backstop so cleanup and artifact upload still run.
+# - tests-portable-parallel-1 and -2 satisfy the same rule from the other side.
+#   Their job caps stay at 10 minutes and their steps pass an explicit
+#   --timeout 540, a bound small enough that the cap still clears setup plus
+#   wall plus bound.
 #
 # 540s for the portable-parallel lanes is derived from the slowest single script
 # either lane can run, not from the lane wall, because the bound is per script:
