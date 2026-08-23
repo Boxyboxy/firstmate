@@ -254,7 +254,7 @@ test_promotion_drops_the_scout_base_record() {
   printf 'window=fm-promote-base-d2\nkind=scout\nworktree=/tmp/wt\nbase=origin/feat/campaigns\nbase_commit=%s\nbase_source=requested\n' \
     '0123456789abcdef0123456789abcdef01234567' > "$meta"
 
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-base-d2 --mode local-only --yolo off 2>&1)
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-base-d2 --mode direct-PR --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "promotion carrying both flags should succeed (got: $out)"
   assert_grep 'kind=ship' "$meta" "promotion did not restore ship teardown protection"
@@ -281,12 +281,38 @@ test_promotion_without_a_recorded_base_keeps_the_generic_hint() {
   meta="$home/state/promote-nobase-d3.meta"
   printf 'window=fm-promote-nobase-d3\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
 
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-nobase-d3 --mode local-only --yolo off 2>&1)
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-nobase-d3 --mode direct-PR --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "promotion of a scout with no recorded base should succeed (got: $out)"
   assert_contains "$out" 'reset to a clean default-branch base' \
     "promotion of a baseless scout lost the generic default-branch instruction"
   pass "fm-promote: a scout with no recorded base keeps the generic default-branch instruction"
+}
+
+# local-only lands through bin/fm-merge-local.sh, which only ever fast-forwards
+# the project's LOCAL default branch and refuses a branch that default is not an
+# ancestor of. bin/fm-spawn.sh already refuses --base with --mode local-only for
+# that reason, so naming a non-default base here would hand the promoted worker
+# as an instruction the exact combination the spawn refuses as a flag, and the
+# resulting branch could never land.
+test_promotion_to_local_only_keeps_the_generic_hint_despite_a_recorded_base() {
+  local home meta out status
+  home="$TMP_ROOT/promote-local-only-base/home"
+  mkdir -p "$home/state"
+  meta="$home/state/promote-lob-d4.meta"
+  printf 'window=fm-promote-lob-d4\nkind=scout\nworktree=/tmp/wt\nbase=origin/feat/campaigns\nbase_commit=%s\nbase_source=requested\n' \
+    '0123456789abcdef0123456789abcdef01234567' > "$meta"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-lob-d4 --mode local-only --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "promotion to local-only should still succeed (got: $out)"
+  assert_contains "$out" 'reset to a clean default-branch base' \
+    "a local-only promotion lost the generic default-branch instruction its merge requires"
+  case "$out" in
+    *'origin/feat/campaigns'*)
+      fail "a local-only promotion named a base bin/fm-merge-local.sh can never fast-forward" ;;
+  esac
+  pass "fm-promote: a local-only promotion keeps the generic default-branch instruction its merge requires"
 }
 
 # A local-only brief and bin/fm-merge-local.sh have to agree about one branch:
@@ -395,6 +421,7 @@ test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promotion_drops_the_scout_base_record
 test_promotion_without_a_recorded_base_keeps_the_generic_hint
+test_promotion_to_local_only_keeps_the_generic_hint_despite_a_recorded_base
 test_local_only_rebase_target_lands_when_local_default_is_ahead
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

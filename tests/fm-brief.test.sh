@@ -439,6 +439,48 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
+# The generated brief is the interface the worker reasons from, so a PR target it
+# states has to be qualified by what the delivery mode actually does with it.
+# Under mode=no-mistakes the worker never opens the PR: the pipeline does, from a
+# base it resolves off the remote default rather than off this task's base. That
+# limitation is stated rather than refused, because a non-default base is exactly
+# what this contract exists to serve on the primary delivery mode.
+test_no_mistakes_brief_states_the_pipeline_pr_target_limitation() {
+  local home brief
+  home="$TMP_ROOT/base-nm-limit-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" nm-limit firstmate \
+    --mode no-mistakes --base origin/feat/campaigns >/dev/null 2>&1
+  brief="$home/data/nm-limit/brief.md"
+  assert_grep "Your PR must target \`feat/campaigns\`" "$brief" \
+    "a no-mistakes brief lost the PR target derived from its base"
+  assert_grep 'you do not open the PR, the no-mistakes pipeline does' "$brief" \
+    "a no-mistakes brief asserts a PR target without saying who actually opens it"
+  assert_grep "resolves its own base from the remote's default branch" "$brief" \
+    "a no-mistakes brief did not say the pipeline resolves its own base"
+  assert_grep 'deliver such a task as direct-PR, or open the PR by hand' "$brief" \
+    "a no-mistakes brief stated the limitation without naming what to do about it"
+
+  # direct-PR has no such gap: the worker opens the PR itself, so the target it
+  # is given is the target it uses.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" dpr-limit firstmate \
+    --mode direct-PR --base origin/feat/campaigns >/dev/null 2>&1
+  brief="$home/data/dpr-limit/brief.md"
+  assert_grep "Your PR must target \`feat/campaigns\`" "$brief" \
+    "a direct-PR brief lost the PR target derived from its base"
+  assert_no_grep 'the no-mistakes pipeline does' "$brief" \
+    "a direct-PR brief carries a pipeline limitation that does not apply to it"
+
+  # An unrecorded base states no target to qualify, so nothing is appended.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" nm-unrecorded firstmate \
+    --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/nm-unrecorded/brief.md"
+  assert_no_grep 'the no-mistakes pipeline does' "$brief" \
+    "a brief with no recorded base qualified a PR target it never stated"
+  pass "fm-brief.sh: a no-mistakes brief states who opens the PR and off which base"
+}
+
 test_base_contract_states_actual_base_and_pr_target() {
   local home brief
   home="$TMP_ROOT/base-contract-home"
@@ -921,6 +963,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_base_contract_states_actual_base_and_pr_target
+test_no_mistakes_brief_states_the_pipeline_pr_target_limitation
 test_base_omission_is_loud_for_ship_and_scout
 test_ship_asserts_its_base_contains_the_named_code
 test_scout_base_contract_carries_no_pr_target

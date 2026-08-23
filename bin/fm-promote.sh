@@ -145,9 +145,16 @@ HOME_Q=$(printf '%q' "$FM_HOME")
 echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
 # A scout that recorded a base was cut from it for a reason, so the promoted
 # worker is sent back to that same base and asked to confirm it carries the code
-# the task names - the one check a ref comparison cannot make. Only a scout that
-# genuinely recorded no base gets the generic default-branch wording.
-if [ -n "$SCOUT_BASE" ]; then
+# the task names - the one check a ref comparison cannot make.
+#
+# local-only is excluded, and keeps the generic default-branch wording even when
+# a base was recorded. bin/fm-spawn.sh already refuses --base combined with
+# --mode local-only, because bin/fm-merge-local.sh only ever fast-forwards the
+# project's LOCAL default branch, so a local-only task is by contract cut from
+# that default. Naming any other base here would emit as an instruction the exact
+# combination the spawn refuses as a flag, and bin/fm-merge-local.sh would then
+# refuse the promoted branch at merge time.
+if [ -n "$SCOUT_BASE" ] && [ "$MODE" != local-only ]; then
   BASE_INSTRUCTION="reset to a clean base on $SCOUT_BASE, the base this scout was cut from, and confirm that base contains the code this task names"
 else
   BASE_INSTRUCTION="reset to a clean default-branch base"
