@@ -570,31 +570,43 @@ test_base_assertion_does_not_contradict_a_recorded_base() {
   pass "fm-brief.sh: the base assertion states a reason that matches the base the brief recorded"
 }
 
-test_ship_base_must_name_a_branch_on_origin() {
-  local home out status brief ref
+# A base has to be provable as current against origin, and only a branch on
+# origin can be, so this scaffold accepts that one shape for every kind of brief.
+# The form check is the same one bin/fm-spawn.sh applies, so a brief cannot record
+# a base its spawn would refuse.
+test_base_must_name_a_branch_on_origin() {
+  local home out status brief ref slug kind
   home="$TMP_ROOT/base-form-home"
   mkdir -p "$home/data"
 
-  for ref in main upstream/main v1.2.3; do
-    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "base-form-${ref//\//-}" firstmate \
-      --mode no-mistakes --base "$ref" 2>&1); status=$?
-    [ "$status" -ne 0 ] || fail "a ship brief guessed a PR target from the base '$ref'"
-    assert_contains "$out" "must name a branch on origin" \
-      "a ship brief did not say why the base '$ref' cannot yield a PR target"
-    [ -e "$home/data/base-form-${ref//\//-}/brief.md" ] \
-      && fail "a ship brief was scaffolded for a base it refused"
+  for ref in main 'main~1' 'main^' 'HEAD^' 'origin/main~1' refs/heads/main upstream/main \
+    v1.2.3 0123456789abcdef0123456789abcdef01234567; do
+    for kind in ship scout; do
+      slug="base-form-$kind-$(printf '%s' "$ref" | tr -c 'a-z0-9' '-')"
+      if [ "$kind" = scout ]; then
+        out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$slug" firstmate \
+          --scout --base "$ref" 2>&1); status=$?
+      else
+        out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$slug" firstmate \
+          --mode no-mistakes --base "$ref" 2>&1); status=$?
+      fi
+      [ "$status" -ne 0 ] || fail "a $kind brief accepted the base '$ref', which cannot be proven current"
+      assert_contains "$out" "$ref" "the $kind refusal of base '$ref' did not name the value that was passed"
+      assert_contains "$out" "must name a branch on origin" \
+        "the $kind refusal of base '$ref' did not say what a base must be"
+      [ -e "$home/data/$slug/brief.md" ] \
+        && fail "a $kind brief was scaffolded for a base it refused"
+    done
   done
 
-  # A scout never pushes, merges, or opens a PR, so no branch is derived from its
-  # base and any ref the spawn accepts is recordable.
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-form-scout firstmate \
-    --scout --base v1.2.3 >/dev/null 2>&1
-  brief="$home/data/base-form-scout/brief.md"
-  grep -qx 'Base contract: base=v1.2.3' "$brief" \
-    || fail "a scout brief refused a base it derives no branch from"
-  assert_no_grep 'Your PR must target' "$brief" \
-    "a scout brief derived a PR target from a base that has no branch"
-  pass "fm-brief.sh: a ship base must name a branch on origin, and a scout base need not"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-form-accepted firstmate \
+    --mode no-mistakes --base origin/feat/campaigns >/dev/null 2>&1
+  brief="$home/data/base-form-accepted/brief.md"
+  grep -qx 'Base contract: base=origin/feat/campaigns' "$brief" \
+    || fail "a branch on origin was not accepted as a base"
+  assert_grep "Your PR must target \`feat/campaigns\`" "$brief" \
+    "an accepted base did not yield the PR target derived from it"
+  pass "fm-brief.sh: only a branch on origin is accepted as a base, for ship and scout alike"
 }
 
 test_secondmate_no_projects_charter() {
@@ -895,5 +907,5 @@ test_ship_asserts_its_base_contains_the_named_code
 test_scout_base_contract_carries_no_pr_target
 test_base_is_refused_where_it_does_not_apply
 test_base_assertion_does_not_contradict_a_recorded_base
-test_ship_base_must_name_a_branch_on_origin
+test_base_must_name_a_branch_on_origin
 test_scout_and_secondmate_scaffold

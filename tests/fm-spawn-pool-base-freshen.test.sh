@@ -243,39 +243,6 @@ publish_feature_branch() {  # <branch> <marker-file>
   git -C "$publisher" rev-parse HEAD
 }
 
-# Tag origin at the publisher's current tip, so a test can request a base that is
-# a tag rather than a branch. An annotated tag resolves to a TAG OBJECT rather
-# than a commit, which is the case that separates a peeled comparison from a raw
-# one, so it is published on request.
-publish_tag() {  # <tag> [annotated]
-  local tag=$1 annotated=${2:-} publisher="$CASE_DIR/publisher"
-  if [ -n "$annotated" ]; then
-    git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
-      tag -a "$tag" -m "$tag"
-  else
-    git -C "$publisher" tag "$tag"
-  fi
-  git -C "$publisher" push --quiet origin "$tag"
-  git -C "$publisher" rev-parse "$tag^{commit}"
-}
-
-# Publish a tag on origin whose commit is on no branch at all, so the pool's
-# plain `git fetch origin` cannot pick it up by following the branch refspec.
-# This is the shape a clone that does not already carry the tag presents.
-publish_unreachable_tag() {  # <tag> <marker-file>
-  local tag=$1 marker=$2 publisher="$CASE_DIR/publisher" sha
-  git -C "$publisher" checkout --quiet --detach
-  printf 'reachable only through the tag\n' > "$publisher/$marker"
-  git -C "$publisher" add "$marker"
-  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
-    commit -qm "$tag"
-  git -C "$publisher" tag "$tag"
-  sha=$(git -C "$publisher" rev-parse HEAD)
-  git -C "$publisher" push --quiet origin "refs/tags/$tag"
-  git -C "$publisher" checkout --quiet -
-  printf '%s\n' "$sha"
-}
-
 test_explicit_base_cuts_from_requested_branch() {
   local rec id out status feature_sha meta
   id='pool-explicit-base-r7'
@@ -426,82 +393,46 @@ test_batch_dispatch_forwards_the_requested_base() {
   pass "batch dispatch forwards the requested base to every pair it spawns"
 }
 
-test_ship_base_must_name_a_branch_on_origin() {
-  local rec id out status before ref
+# A base must be provable as current against origin, and only a branch on origin
+# can be, so every other shape is refused before the worktree is touched. The
+# revision expressions matter most: they resolve through whatever local ref they
+# name, which `git fetch origin` never refreshes, so accepting one would land a
+# task on a stale tree and record it as intended.
+test_base_shape_is_restricted_to_a_branch_on_origin() {
+  local rec id out status before ref stale
   id='pool-base-form-r14'
   rec=$(make_case base-form "$id")
   read_case_record "$rec"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  git -C "$POOL_DIR" fetch --quiet origin
+  stale=$(git -C "$PROJECT_DIR" rev-parse main)
+  [ "$stale" != "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
+    || fail "fixture did not prove refs/heads/main lags origin/main"
 
-  for ref in main upstream/main v1.2.3 "$INITIAL_SHA"; do
+  for ref in main 'main~1' 'main^' 'HEAD^' 'HEAD~1' 'origin/main~1' refs/heads/main \
+    upstream/main v1.2.3 "$INITIAL_SHA"; do
     out=$(run_spawn "$id" --mode no-mistakes --yolo off --base "$ref")
     status=$?
-    [ "$status" -ne 0 ] || fail "a ship spawn accepted the base '$ref', which names no branch on origin"
+    [ "$status" -ne 0 ] || fail "a ship spawn accepted the base '$ref', which cannot be proven current"
+    assert_contains "$out" "$ref" "the refusal of base '$ref' did not name the value that was passed"
     assert_contains "$out" "must name a branch on origin" \
-      "a ship spawn did not say why the base '$ref' cannot be a ship base"
+      "the refusal of base '$ref' did not say what a base must be"
+
+    out=$(run_spawn "$id" --scout --base "$ref")
+    status=$?
+    [ "$status" -ne 0 ] || fail "a scout spawn accepted the base '$ref', which cannot be proven current"
+    assert_contains "$out" "$ref" "the scout refusal of base '$ref' did not name the value that was passed"
+
     [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
       || fail "spawn moved HEAD after refusing the base '$ref'"
+    [ -f "$HOME_DIR/state/$id.meta" ] \
+      && fail "spawn recorded metadata for the task it refused with base '$ref'"
   done
-  [ -f "$HOME_DIR/state/$id.meta" ] \
-    && fail "spawn recorded metadata for a task it refused to launch"
-  pass "a ship base that names no branch on origin is refused before the worktree moves"
-}
-
-test_stale_local_branch_base_is_refused() {
-  local rec id out status before stale current
-  id='pool-stale-local-base-r15'
-  rec=$(make_case stale-local-base "$id")
-  read_case_record "$rec"
-  before=$(git -C "$POOL_DIR" rev-parse HEAD)
-  stale=$(git -C "$PROJECT_DIR" rev-parse main)
-
-  # A scout may name a ref that is not origin/<branch>, so this is the path where
-  # a bare branch name could still reach the worktree. refs/heads/main is exactly
-  # what `git fetch origin` never updates.
-  out=$(run_spawn "$id" --scout --base main)
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn accepted a local branch that git fetch origin never refreshes"
-  assert_contains "$out" "refs/heads/main" \
-    "spawn did not name the stale local ref it refused to resolve through"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "spawn moved HEAD after refusing a stale local base"
-  [ -f "$HOME_DIR/state/$id.meta" ] \
-    && fail "spawn recorded metadata for a task it refused to launch"
-  current=$(git -C "$POOL_DIR" rev-parse origin/main)
-  [ "$stale" != "$current" ] \
-    || fail "fixture did not prove refs/heads/main lags origin/main"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
-    printf '# observed stale-local refusal: %s (refs/heads/main=%s origin/main=%s)\n' \
-      "$(printf '%s\n' "$out" | tail -n 1)" "$stale" "$current"
+    printf '# observed shape refusals with stale refs/heads/main=%s vs origin/main=%s\n' \
+      "$stale" "$(git -C "$POOL_DIR" rev-parse origin/main)"
   fi
-  pass "a base resolving through a local branch is refused instead of silently launched stale"
-}
-
-test_scout_base_may_be_a_tag_or_a_commit() {
-  local rec id out status tag_sha meta
-  id='pool-scout-tag-base-r16'
-  rec=$(make_case scout-tag-base "$id")
-  read_case_record "$rec"
-  tag_sha=$(publish_tag release-candidate)
-  meta="$HOME_DIR/state/$id.meta"
-
-  out=$(run_spawn "$id" --scout --base release-candidate)
-  status=$?
-  expect_code 0 "$status" "a scout spawn should accept a tag published on origin"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$tag_sha" ] \
-    || fail "a scout spawn did not cut its worktree from the requested tag"
-  grep -qx 'base=release-candidate' "$meta" || fail "metadata did not record the requested tag base"
-  grep -qx 'base_source=requested' "$meta" || fail "a tag base was not recorded as requested"
-
-  id='pool-scout-commit-base-r16'
-  mkdir -p "$HOME_DIR/data/$id"
-  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
-  out=$(run_spawn "$id" --scout --base "$tag_sha")
-  status=$?
-  expect_code 0 "$status" "a scout spawn should accept an immutable commit as a base"
-  grep -qx "base_commit=$tag_sha" "$HOME_DIR/state/$id.meta" \
-    || fail "a commit base was not recorded as the resolved base commit"
-  pass "a scout base may be a tag or a commit the spawn can still prove current"
+  pass "only a branch on origin is accepted as a base; every other shape is refused before the worktree moves"
 }
 
 test_local_only_base_must_be_the_branch_the_merge_fast_forwards() {
@@ -531,73 +462,6 @@ test_local_only_base_must_be_the_branch_the_merge_fast_forwards() {
   pass "a local-only base is constrained to the branch its guarded merge fast-forwards"
 }
 
-test_annotated_tag_base_records_the_commit_it_cut() {
-  local rec id out status tag_commit meta
-  id='pool-annotated-tag-r18'
-  rec=$(make_case annotated-tag "$id")
-  read_case_record "$rec"
-  tag_commit=$(publish_tag v9.9.9 annotated)
-  meta="$HOME_DIR/state/$id.meta"
-
-  out=$(run_spawn "$id" --scout --base v9.9.9)
-  status=$?
-  expect_code 0 "$status" "a scout spawn should accept an annotated tag published on origin"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$tag_commit" ] \
-    || fail "an annotated tag base did not cut the worktree from the tag's commit"
-  grep -qx "base_commit=$tag_commit" "$meta" \
-    || fail "metadata recorded something other than the commit the worktree was cut from"
-  [ "$(git -C "$POOL_DIR" rev-parse v9.9.9)" != "$tag_commit" ] \
-    || fail "fixture did not produce a real annotated tag object"
-  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
-    printf '# observed annotated tag base: %s (tag object %s)\n' \
-      "$tag_commit" "$(git -C "$POOL_DIR" rev-parse v9.9.9)"
-  fi
-  pass "an annotated tag base records the commit the worktree was cut from, not the tag object"
-}
-
-test_tag_missing_locally_is_fetched_from_origin() {
-  local rec id out status tag_sha meta
-  id='pool-unfetched-tag-r19'
-  rec=$(make_case unfetched-tag "$id")
-  read_case_record "$rec"
-  tag_sha=$(publish_unreachable_tag release-cut off-branch.txt)
-  meta="$HOME_DIR/state/$id.meta"
-  [ -z "$(git -C "$POOL_DIR" rev-parse --verify --quiet release-cut 2>/dev/null || true)" ] \
-    || fail "fixture did not produce a tag the pooled worktree is missing"
-
-  out=$(run_spawn "$id" --scout --base release-cut)
-  status=$?
-  expect_code 0 "$status" "a base tag published on origin should be fetched rather than refused"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$tag_sha" ] \
-    || fail "the fetched tag base did not cut the worktree from the tag's commit"
-  [ -f "$POOL_DIR/off-branch.txt" ] \
-    || fail "the worktree is missing content that only the requested tag carries"
-  grep -qx 'base=release-cut' "$meta" || fail "metadata did not record the fetched tag base"
-  pass "a base tag origin publishes but the worktree lacks is fetched by name"
-}
-
-test_unresolvable_base_is_reported_as_missing_not_stale() {
-  local rec id out status before
-  id='pool-missing-base-r20'
-  rec=$(make_case missing-base "$id")
-  read_case_record "$rec"
-  before=$(git -C "$POOL_DIR" rev-parse HEAD)
-
-  out=$(run_spawn "$id" --scout --base v1.2.4)
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn accepted a base that exists nowhere"
-  assert_contains "$out" "is not a tag on origin" \
-    "spawn did not report a missing base as missing"
-  case "$out" in
-    *'resolves through'*) fail "spawn diagnosed a missing base as a stale local ref" ;;
-  esac
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "spawn moved HEAD after refusing a base it could not resolve"
-  [ -f "$HOME_DIR/state/$id.meta" ] \
-    && fail "spawn recorded metadata for a task it refused to launch"
-  pass "a base that resolves nowhere is refused as missing rather than as stale"
-}
-
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
@@ -611,12 +475,7 @@ test_brief_base_contract_mismatch_refuses
 test_unrecorded_brief_base_refuses_explicit_base
 test_base_refused_on_secondmate_spawn
 test_batch_dispatch_forwards_the_requested_base
-test_ship_base_must_name_a_branch_on_origin
-test_stale_local_branch_base_is_refused
-test_scout_base_may_be_a_tag_or_a_commit
+test_base_shape_is_restricted_to_a_branch_on_origin
 test_local_only_base_must_be_the_branch_the_merge_fast_forwards
-test_annotated_tag_base_records_the_commit_it_cut
-test_tag_missing_locally_is_fetched_from_origin
-test_unresolvable_base_is_reported_as_missing_not_stale
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

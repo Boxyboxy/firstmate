@@ -41,12 +41,12 @@
 #   filled in after scaffolding. Omitting it is never silent - the Setup section
 #   then declares the base unrecorded and requires the worker to establish it
 #   before branching, rather than claiming a default branch.
-#   A ship base must name a branch on origin ("origin/<branch>"), because the PR
-#   target is derived from it and a tag, a raw commit, or another remote's ref has
-#   no such branch; a scout, whose brief derives no branch, records any ref the
-#   spawn accepts. Nothing else is derived from the base: local-only lands on the
-#   project's local default branch, which is bin/fm-merge-local.sh's business and
-#   never this base's.
+#   A base must name a branch on origin ("origin/<branch>"); every other shape is
+#   refused, because a base has to be provable as current against the remote and
+#   a tag, a raw commit, a revision expression, a local branch, or another
+#   remote's ref cannot be. Nothing but the PR target is derived from the base:
+#   local-only lands on the project's local default branch, which is
+#   bin/fm-merge-local.sh's business and never this base's.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
@@ -206,20 +206,30 @@ fi
 # that same base. Stripping a leading "origin/" turns the remote-tracking ref the
 # spawn resolves into the branch name a forge expects as a PR base.
 #
-# That derivation only yields a branch for a ref on origin, so a ship base is
-# restricted to that form rather than guessed at: a tag or a raw commit has no
-# branch a PR can target, and a ref on another remote names a branch on the wrong
-# forge. Either would render a confident but wrong target, which is the concrete
-# harm this contract exists to prevent. A scout brief derives no branch at all
-# (it never pushes, merges, or opens a PR), so it still records whatever ref the
-# spawn accepts.
-if [ "$KIND" = ship ] && [ "$BASE_SET" -eq 1 ]; then
+# That derivation only yields a branch for a ref on origin, and "origin/<branch>"
+# is in any case the ONE shape a base may take. Everything else is refused here,
+# for the reason bin/fm-spawn.sh refuses it: a base has to be provable as current
+# against the remote, and a tag, a raw commit, a revision expression (main~1,
+# main^, main@{0}, HEAD~1), a local branch, an explicit refs/heads/* ref, or
+# another remote's ref cannot be, because `git fetch origin` refreshes none of
+# them. The narrowness is deliberate rather than an oversight: every real
+# dispatch names a branch, so a caller with a genuine need for another shape
+# should reopen this decision rather than find it pre-supported and unprovable.
+# The form check is identical to the spawn's, so a brief and its spawn cannot
+# disagree about what a base may be.
+if [ "$BASE_SET" -eq 1 ]; then
+  base_shape_ok=0
   case "$BASE" in
-    origin/?*) ;;
-    *)
-      echo "error: --base for a ship brief must name a branch on origin as 'origin/<branch>' (got '$BASE'); this brief derives the PR target from it, and a tag, a raw commit, or a ref on another remote has no such branch" >&2
-      exit 1 ;;
+    origin/?*)
+      case "$BASE" in
+        *'~'*|*'^'*|*':'*|*'?'*|*'*'*|*'['*|*'@{'*|*' '*) ;;
+        *) base_shape_ok=1 ;;
+      esac ;;
   esac
+  [ "$base_shape_ok" -eq 1 ] || {
+    echo "error: --base must name a branch on origin as 'origin/<branch>' (got '$BASE'); a base must be provable as current against origin, and a tag, a raw commit, a revision expression, a local branch, or another remote's ref cannot be - pass the branch as 'origin/<branch>'" >&2
+    exit 1
+  }
 fi
 BASE_BRANCH=${BASE#origin/}
 
