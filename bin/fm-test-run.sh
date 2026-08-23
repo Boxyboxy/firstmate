@@ -138,26 +138,42 @@ JOBS_MAX=8
 # smaller than the cap is necessary but not sufficient: under a 20-minute cap a
 # 900s bound only fires for a wedge that starts early in the lane, and a later
 # one is cancelled by GitHub first with no FM_TEST_TIMEOUT marker, no file
-# named, and timed_out still 0. How each lane in .github/workflows/ci.yml
-# satisfies the rule:
+# named, and timed_out still 0.
 #
-# - tests-portable-serial: each balanced shard's wall is about 664s, summed from
-#   this script's own portable_serial_weight_hints table (about 44 min of serial
-#   work split four ways), and the five steps ahead of the test step (checkout at
-#   fetch-depth 0, pinned ShellCheck, pinned actionlint, the tmux probe, and the
-#   tasks-axi install) cost roughly 90-150s. 150 + 664 + 900 = 1714s, so that job
-#   caps at 30 minutes (1800s). It capped at 20 (1200s), which left the bound
-#   blind for most of every shard's timeline, in the lane that holds the stateful
-#   hang-prone scripts: watcher, lock, AFK, tmux, daemon.
-# - tests-herdr's family-run step: about a 420s healthy wall plus the 900s bound
-#   is 1320s, so that step caps at 25 minutes (1500s), still far below the lane's
-#   75-minute job backstop so cleanup and artifact upload still run.
-# - tests-portable-parallel-1 and -2: their CI wall is about 1 min of serial sum
-#   because the Herdr suite gate-skips there, their four setup steps cost the
-#   same roughly 90-150s, and their steps pass an explicit --timeout 540, so each
-#   cap has to clear 150 + 60 + 540 = 750s. Both cap at 15 minutes (900s). They
-#   capped at 10 (600s), which failed the rule even for a wedge on the lane's
-#   first script, where 90 + 0 + 540 = 630s already exceeds the cap.
+# The per-lane figures below are measured rather than estimated: the worst
+# observation per lane across three green CI runs on Boxyboxy/firstmate
+# (32629214566, 32624889561, 32409653841), read from each job's own step
+# timings. Setup is cheap on these runners - checkout at fetch-depth 0 takes
+# about 2s and each pinned install 0-6s - so it costs 5-8s on the parallel
+# lanes, 6-10s on the serial lanes, and 4-5s ahead of the Herdr family step.
+# An earlier estimate here recorded 90-150s of setup, which was roughly twenty
+# times the real cost; do not reintroduce an estimate where a green run can be
+# read. How each lane in .github/workflows/ci.yml satisfies the rule:
+#
+# - tests-portable-parallel-1 and -2: worst measured wall 149s, because the
+#   Herdr suite gate-skips on a runner without the CLI, worst setup 8s, and the
+#   steps pass an explicit --timeout 540. 8 + 149 + 540 = 697s, so both cap at
+#   15 minutes (900s). They capped at 10 (600s), which failed the rule even for
+#   a wedge on the lane's first script, where 0 + 540 already leaves under 60s
+#   of room.
+# - tests-herdr's family-run step: a step cap's clock starts at the step, so
+#   setup falls outside it. Worst measured family wall 411s plus the 900s bound
+#   is 1311s, so that step caps at 25 minutes (1500s), still far below the
+#   lane's 75-minute job backstop so cleanup and artifact upload still run.
+# - tests-portable-serial: worst setup 10s, and worst measured shard walls of
+#   649s, 695s, 943s and 617s for shards 1 through 4. Shards 1, 2 and 4 need
+#   1557s, 1602s and 1527s and clear the 30-minute (1800s) cap. Shard 3 needs
+#   10 + 943 + 900 = 1853s and does not: with 1800s the wedge has to start
+#   within the shard's first ~890s to be named, so a wedge in the last ~53s of
+#   that shard's healthy timeline is still cancelled by GitHub with no
+#   FM_TEST_TIMEOUT marker and no file named. Closing that needs the cap raised
+#   above 1853s, which is a workflow change rather than a documentation one.
+#   30 minutes was itself a raise from 20 (1200s), which left the bound blind
+#   for most of every shard's timeline in the lane that holds the stateful
+#   hang-prone scripts: watcher, lock, AFK, tmux, daemon. Shard 3 is also the
+#   shard portable_serial_weight_hints most understates - it estimates 664s
+#   against 693-943s observed - so refreshing those hints from a green run is
+#   part of the same gap.
 #
 # 540s for the portable-parallel lanes is derived from the slowest single script
 # either lane can run, not from the lane wall, because the bound is per script:
@@ -165,8 +181,8 @@ JOBS_MAX=8
 # an earlier full run on the same macOS Apple M5 host, both full --all runs with
 # no competing work). That figure comes from a host where the Herdr CLI is
 # installed and the gated suite really executes; on a CI runner without it the
-# suite gate-skips, which is why the shard wall there is roughly 1 minute of
-# serial sum. The bound has to be safe on both, so it is derived from the host
+# suite gate-skips, which is why the measured shard wall there is only 87-149s.
+# The bound has to be safe on both, so it is derived from the host
 # where the suite runs. Whole-lane serial sums on that host, for context:
 # portable-parallel-1 213s across 11 scripts, portable-parallel-2 469s across 13.
 # 540s leaves 1.67x headroom over the 323s worst case, and the 15-minute lane cap
