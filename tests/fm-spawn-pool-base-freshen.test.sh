@@ -73,15 +73,19 @@ $1
 EOF
 }
 
-run_spawn() {
-  local id=$1
-  shift
+run_spawn_argv() {
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
+    "$SPAWN" "$@" 2>&1
+}
+
+run_spawn() {
+  local id=$1
+  shift
+  run_spawn_argv "$id" "$PROJECT_DIR" "$@"
 }
 
 test_stale_pool_base_refreshes_before_branching() {
@@ -239,6 +243,15 @@ publish_feature_branch() {  # <branch> <marker-file>
   git -C "$publisher" rev-parse HEAD
 }
 
+# Tag origin at the publisher's current tip, so a test can request a base that is
+# a tag rather than a branch.
+publish_tag() {  # <tag>
+  local tag=$1 publisher="$CASE_DIR/publisher"
+  git -C "$publisher" tag "$tag"
+  git -C "$publisher" push --quiet origin "$tag"
+  git -C "$publisher" rev-parse HEAD
+}
+
 test_explicit_base_cuts_from_requested_branch() {
   local rec id out status feature_sha meta
   id='pool-explicit-base-r7'
@@ -361,6 +374,139 @@ test_base_refused_on_secondmate_spawn() {
   pass "a secondmate spawn refuses a task base"
 }
 
+test_batch_dispatch_forwards_the_requested_base() {
+  local rec id out status feature_sha meta
+  id='pool-batch-base-r13'
+  rec=$(make_case batch-base "$id")
+  read_case_record "$rec"
+  feature_sha=$(publish_feature_branch feat/campaigns campaigns.txt)
+  meta="$HOME_DIR/state/$id.meta"
+
+  out=$(run_spawn_argv "$id=$PROJECT_DIR" --mode no-mistakes --yolo off --base origin/feat/campaigns)
+  status=$?
+  expect_code 0 "$status" "batch dispatch should spawn the pair"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$feature_sha" ] \
+    || fail "batch dispatch dropped the requested base and cut from somewhere else"
+  [ -f "$POOL_DIR/campaigns.txt" ] \
+    || fail "the batched pair is missing the feature content its requested base carries"
+  grep -qx 'base=origin/feat/campaigns' "$meta" \
+    || fail "batch dispatch did not record the requested base for its pair"
+  grep -qx 'base_source=requested' "$meta" \
+    || fail "batch dispatch recorded the base as defaulted rather than requested"
+  case "$out" in
+    *'no --base given'*) fail "batch dispatch announced a defaulted base despite an explicit --base" ;;
+  esac
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed batched base: %s\n' "$(grep '^base' "$meta" | tr '\n' ' ')"
+  fi
+  pass "batch dispatch forwards the requested base to every pair it spawns"
+}
+
+test_ship_base_must_name_a_branch_on_origin() {
+  local rec id out status before ref
+  id='pool-base-form-r14'
+  rec=$(make_case base-form "$id")
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  for ref in main upstream/main v1.2.3 "$INITIAL_SHA"; do
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off --base "$ref")
+    status=$?
+    [ "$status" -ne 0 ] || fail "a ship spawn accepted the base '$ref', which names no branch on origin"
+    assert_contains "$out" "must name a branch on origin" \
+      "a ship spawn did not say why the base '$ref' cannot be a ship base"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+      || fail "spawn moved HEAD after refusing the base '$ref'"
+  done
+  [ -f "$HOME_DIR/state/$id.meta" ] \
+    && fail "spawn recorded metadata for a task it refused to launch"
+  pass "a ship base that names no branch on origin is refused before the worktree moves"
+}
+
+test_stale_local_branch_base_is_refused() {
+  local rec id out status before stale current
+  id='pool-stale-local-base-r15'
+  rec=$(make_case stale-local-base "$id")
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  stale=$(git -C "$PROJECT_DIR" rev-parse main)
+
+  # A scout may name a ref that is not origin/<branch>, so this is the path where
+  # a bare branch name could still reach the worktree. refs/heads/main is exactly
+  # what `git fetch origin` never updates.
+  out=$(run_spawn "$id" --scout --base main)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a local branch that git fetch origin never refreshes"
+  assert_contains "$out" "refs/heads/main" \
+    "spawn did not name the stale local ref it refused to resolve through"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after refusing a stale local base"
+  [ -f "$HOME_DIR/state/$id.meta" ] \
+    && fail "spawn recorded metadata for a task it refused to launch"
+  current=$(git -C "$POOL_DIR" rev-parse origin/main)
+  [ "$stale" != "$current" ] \
+    || fail "fixture did not prove refs/heads/main lags origin/main"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed stale-local refusal: %s (refs/heads/main=%s origin/main=%s)\n' \
+      "$(printf '%s\n' "$out" | tail -n 1)" "$stale" "$current"
+  fi
+  pass "a base resolving through a local branch is refused instead of silently launched stale"
+}
+
+test_scout_base_may_be_a_tag_or_a_commit() {
+  local rec id out status tag_sha meta
+  id='pool-scout-tag-base-r16'
+  rec=$(make_case scout-tag-base "$id")
+  read_case_record "$rec"
+  tag_sha=$(publish_tag release-candidate)
+  meta="$HOME_DIR/state/$id.meta"
+
+  out=$(run_spawn "$id" --scout --base release-candidate)
+  status=$?
+  expect_code 0 "$status" "a scout spawn should accept a tag published on origin"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$tag_sha" ] \
+    || fail "a scout spawn did not cut its worktree from the requested tag"
+  grep -qx 'base=release-candidate' "$meta" || fail "metadata did not record the requested tag base"
+  grep -qx 'base_source=requested' "$meta" || fail "a tag base was not recorded as requested"
+
+  id='pool-scout-commit-base-r16'
+  mkdir -p "$HOME_DIR/data/$id"
+  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  out=$(run_spawn "$id" --scout --base "$tag_sha")
+  status=$?
+  expect_code 0 "$status" "a scout spawn should accept an immutable commit as a base"
+  grep -qx "base_commit=$tag_sha" "$HOME_DIR/state/$id.meta" \
+    || fail "a commit base was not recorded as the resolved base commit"
+  pass "a scout base may be a tag or a commit the spawn can still prove current"
+}
+
+test_local_only_base_must_be_the_branch_the_merge_fast_forwards() {
+  local rec id out status before meta
+  id='pool-local-only-base-r17'
+  rec=$(make_case local-only-base "$id")
+  read_case_record "$rec"
+  publish_feature_branch feat/campaigns campaigns.txt >/dev/null
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off --base origin/feat/campaigns)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a local-only task was cut from a base its guarded merge can never fast-forward"
+  assert_contains "$out" "cannot be combined with --mode local-only" \
+    "spawn did not explain why a local-only task cannot use a non-default base"
+  assert_contains "$out" "fm-merge-local.sh" \
+    "spawn did not name the landing path that makes the default branch authoritative"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after refusing a local-only base"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off --base "origin/$DEFAULT_BRANCH")
+  status=$?
+  expect_code 0 "$status" "a local-only task based on the default branch should still launch"
+  meta="$HOME_DIR/state/$id.meta"
+  grep -qx "base=origin/$DEFAULT_BRANCH" "$meta" \
+    || fail "a local-only task did not record the default branch it was based on"
+  pass "a local-only base is constrained to the branch its guarded merge fast-forwards"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
@@ -373,5 +519,10 @@ test_unknown_explicit_base_refuses
 test_brief_base_contract_mismatch_refuses
 test_unrecorded_brief_base_refuses_explicit_base
 test_base_refused_on_secondmate_spawn
+test_batch_dispatch_forwards_the_requested_base
+test_ship_base_must_name_a_branch_on_origin
+test_stale_local_branch_base_is_refused
+test_scout_base_may_be_a_tag_or_a_commit
+test_local_only_base_must_be_the_branch_the_merge_fast_forwards
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

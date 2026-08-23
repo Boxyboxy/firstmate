@@ -9,6 +9,14 @@
 # auto-approves), and only as a clean fast-forward - it refuses a diverged branch
 # and tells you to have the crewmate rebase. See AGENTS.md prime directives,
 # project management, and task lifecycle.
+#
+# This script is AUTHORITATIVE for where a local-only task lands: the project's
+# local default branch, resolved below. It is the guarded path that actually
+# performs the merge, so nothing else may send a worker somewhere it would then
+# refuse. bin/fm-brief.sh names this same branch as the local-only rebase and
+# merge target instead of a hardcoded `main`, and bin/fm-spawn.sh refuses a
+# local-only spawn whose --base is not the remote default branch, so a
+# local-only branch is always a fast-forward candidate for the branch merged here.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 

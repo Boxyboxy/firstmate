@@ -304,7 +304,7 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   id="brief-local-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path." "$brief" \
+  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local this project's default branch through the guarded fast-forward path." "$brief" \
     "local-only brief lost configured merge authority and guarded landing"
   assert_no_grep "The captain approves the ready branch" "$brief" \
     "local-only brief hard-coded captain-only authority"
@@ -553,6 +553,92 @@ test_base_is_refused_where_it_does_not_apply() {
   assert_contains "$out" '--base requires a non-empty value' \
     "an empty --base did not name the missing value"
   pass "fm-brief.sh: --base is refused where it cannot describe a task worktree"
+}
+
+test_base_assertion_does_not_contradict_a_recorded_base() {
+  local home brief
+  home="$TMP_ROOT/base-assert-recorded-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-assert-recorded firstmate \
+    --mode no-mistakes --base origin/feat/campaigns >/dev/null 2>&1
+  brief="$home/data/base-assert-recorded/brief.md"
+
+  assert_grep 'Confirm your base contains the code this task names' "$brief" \
+    "a recorded base dropped the premise assertion instead of restating its reason"
+  assert_grep 'blocked: base does not contain' "$brief" \
+    "a recorded base dropped the instruction for reporting a base missing the named code"
+  assert_grep "Your base \`origin/feat/campaigns\` was chosen for this task" "$brief" \
+    "the assertion did not explain itself in terms of the base the brief actually recorded"
+  # The Setup section already told this worker its base is origin/feat/campaigns.
+  # Restating the remote-default premise here would contradict that line and
+  # invite the worker to "correct" itself back onto the default branch.
+  assert_no_grep "base comes from the repository's remote default branch" "$brief" \
+    "a brief with a recorded base still claims its base came from the remote default"
+
+  home="$TMP_ROOT/base-assert-unrecorded-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-assert-unrecorded firstmate \
+    --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/base-assert-unrecorded/brief.md"
+  assert_grep 'Confirm your base contains the code this task names' "$brief" \
+    "an unrecorded base dropped the premise assertion"
+  assert_grep "an unrecorded base comes from the repository's remote default branch" "$brief" \
+    "an unrecorded base lost the reason the assertion matters"
+  pass "fm-brief.sh: the base assertion states a reason that matches the base the brief recorded"
+}
+
+test_local_only_names_the_branch_its_merge_fast_forwards() {
+  local home brief
+  home="$TMP_ROOT/base-local-landing-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-local-landing firstmate \
+    --mode local-only --base origin/staging >/dev/null 2>&1
+  brief="$home/data/base-local-landing/brief.md"
+
+  # bin/fm-merge-local.sh fast-forwards the project's default branch, so every
+  # place this brief names a landing branch must name that same branch.
+  assert_grep "firstmate handles the merge into local \`staging\`" "$brief" \
+    "local-only rule 1 still names a branch other than the one it was based on"
+  assert_grep "merges it into local \`staging\` through the guarded fast-forward path" "$brief" \
+    "the local-only definition of done still names a branch other than the one it was based on"
+  assert_no_grep "into local \`main\`" "$brief" \
+    "local-only still hardcodes main as the branch firstmate merges into"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-local-landing-unrecorded firstmate \
+    --mode local-only >/dev/null 2>&1
+  brief="$home/data/base-local-landing-unrecorded/brief.md"
+  assert_grep "firstmate handles the merge into local this project's default branch" "$brief" \
+    "an unrecorded local-only base still hardcodes a landing branch it cannot know"
+  assert_no_grep "into local \`main\`" "$brief" \
+    "an unrecorded local-only base still hardcodes main as the landing branch"
+  pass "fm-brief.sh: local-only names the branch its guarded merge fast-forwards, never a hardcoded main"
+}
+
+test_ship_base_must_name_a_branch_on_origin() {
+  local home out status brief ref
+  home="$TMP_ROOT/base-form-home"
+  mkdir -p "$home/data"
+
+  for ref in main upstream/main v1.2.3; do
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "base-form-${ref//\//-}" firstmate \
+      --mode no-mistakes --base "$ref" 2>&1); status=$?
+    [ "$status" -ne 0 ] || fail "a ship brief guessed a PR target from the base '$ref'"
+    assert_contains "$out" "must name a branch on origin" \
+      "a ship brief did not say why the base '$ref' cannot yield a PR target"
+    [ -e "$home/data/base-form-${ref//\//-}/brief.md" ] \
+      && fail "a ship brief was scaffolded for a base it refused"
+  done
+
+  # A scout never pushes, merges, or opens a PR, so no branch is derived from its
+  # base and any ref the spawn accepts is recordable.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-form-scout firstmate \
+    --scout --base v1.2.3 >/dev/null 2>&1
+  brief="$home/data/base-form-scout/brief.md"
+  grep -qx 'Base contract: base=v1.2.3' "$brief" \
+    || fail "a scout brief refused a base it derives no branch from"
+  assert_no_grep 'Your PR must target' "$brief" \
+    "a scout brief derived a PR target from a base that has no branch"
+  pass "fm-brief.sh: a ship base must name a branch on origin, and a scout base need not"
 }
 
 test_secondmate_no_projects_charter() {
@@ -853,4 +939,7 @@ test_ship_asserts_its_base_contains_the_named_code
 test_scout_base_contract_carries_no_pr_target
 test_local_only_fast_forward_names_the_recorded_base
 test_base_is_refused_where_it_does_not_apply
+test_base_assertion_does_not_contradict_a_recorded_base
+test_local_only_names_the_branch_its_merge_fast_forwards
+test_ship_base_must_name_a_branch_on_origin
 test_scout_and_secondmate_scaffold

@@ -20,7 +20,14 @@
 #   A ship or scout brief records the same value as a fixed
 #   "Base contract: base=<ref>" line, and this script refuses a spawn that
 #   contradicts it, so a worker is never handed a brief naming a base it is not
-#   standing on.
+#   standing on. Batch dispatch forwards it to every pair exactly like --mode and
+#   --yolo, so the multi-task route cannot be the one that still defaults.
+#   A ship base must be a branch on origin ("origin/<branch>"), because the PR
+#   target and the local-only merge target are derived from it; a scout, which
+#   never pushes or merges, may also name a tag or a commit. Whatever the form,
+#   the ref must be one this spawn can prove current against the remote: a local
+#   branch or another remote's ref is refused rather than silently accepted,
+#   since `git fetch origin` never refreshes either.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -431,6 +438,22 @@ fi
 if [ "$KIND" = secondmate ] && [ "$BASE_SET" -eq 1 ]; then
   echo "error: --base applies only to crewmate ship or scout spawns; a secondmate home is a persistent lease, not a worktree cut from a task base" >&2
   exit 1
+fi
+
+# A ship brief derives the branch its PR must target - and, for local-only, the
+# branch firstmate fast-forwards - by stripping "origin/" from the base, so a
+# ship base has to name a branch on origin. A tag or a raw commit has no branch a
+# PR can target, and a ref on another remote is one `git fetch origin` never
+# refreshes, so both are refused here rather than allowed to label a PR with a
+# target that cannot exist. A scout brief derives no branch (it never pushes or
+# merges) and so still accepts any ref the spawn can prove current.
+if [ "$KIND" = ship ] && [ "$BASE_SET" -eq 1 ]; then
+  case "$BASE_ARG" in
+    origin/?*) ;;
+    *)
+      echo "error: --base for a ship spawn must name a branch on origin as 'origin/<branch>' (got '$BASE_ARG'); the PR target and the local-only merge target are derived from it, and a tag, a raw commit, or another remote's ref has no such branch" >&2
+      exit 1 ;;
+  esac
 fi
 
 spawn_remote_secondmate() {
@@ -905,6 +928,11 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  # The base is forwarded for the same reason and re-validated the same way. A
+  # batch that dropped it would fall back to the remote's default branch for
+  # every pair - the precise "identical flags, different bases" outcome this
+  # contract exists to close, on the very dispatch shape that produced it.
+  [ "$BASE_SET" -eq 0 ] || shared_args+=(--base "$BASE_ARG")
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -1798,7 +1826,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 # SPAWN_BASE/SPAWN_BASE_COMMIT so state/<id>.meta records the base as durable
 # fact instead of leaving it to later `git merge-base` archaeology.
 freshen_spawn_worktree_base() {  # <worktree> [<base-ref>]
-  local worktree=$1 requested=${2:-} default target expected actual status branch
+  local worktree=$1 requested=${2:-} default target expected actual status branch full tag
   SPAWN_BASE=""
   SPAWN_BASE_COMMIT=""
   if ! git -C "$worktree" fetch --quiet origin; then
@@ -1807,9 +1835,33 @@ freshen_spawn_worktree_base() {  # <worktree> [<base-ref>]
   fi
   if [ -n "$requested" ]; then
     target=$requested
-    # A single-branch clone may not carry the requested branch yet, so fetch it
-    # by name before resolving. A ref that is not a remote-tracking branch (a
-    # tag or raw commit) needs no such fetch and is verified as-is below.
+    # bin/fm-merge-local.sh is the AUTHORITATIVE landing path for a local-only
+    # task: it fast-forwards the project's local default branch and refuses a
+    # branch that is not a fast-forward of it. A worktree cut from any other base
+    # can never satisfy that gate, so a local-only base is constrained to the
+    # default branch here rather than allowed to produce a brief that instructs
+    # the worker toward a state the guarded merge refuses.
+    if [ "$MODE" = local-only ]; then
+      if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+        echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch a local-only task whose base cannot be checked against the branch its merge fast-forwards" >&2
+        return 1
+      fi
+      default=$(default_branch "$worktree") || {
+        echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch a local-only task whose base cannot be checked against the branch its merge fast-forwards" >&2
+        return 1
+      }
+      if [ "$target" != "origin/$default" ]; then
+        echo "error: --base $target cannot be combined with --mode local-only: the guarded local merge (bin/fm-merge-local.sh) fast-forwards this project's default branch '$default', so a local-only task must be cut from 'origin/$default'; ship work based on another branch as direct-PR or no-mistakes instead" >&2
+        return 1
+      fi
+    fi
+    # Every accepted base must be one this spawn can prove is current, not only
+    # an origin/* one: `git fetch origin` writes refs/remotes/origin/* and
+    # nothing else, so a local branch or another remote's ref resolves cleanly
+    # while sitting arbitrarily far behind the remote. A branch on origin and a
+    # tag are therefore re-fetched by name (which also lets a single-branch clone
+    # resolve a branch it does not carry yet), a raw commit is immutable and only
+    # has to exist, and anything else is refused.
     case "$target" in
       origin/*)
         branch=${target#origin/}
@@ -1817,6 +1869,24 @@ freshen_spawn_worktree_base() {  # <worktree> [<base-ref>]
           echo "error: could not fetch requested base '$target' for pooled worktree '$worktree'; refusing to launch from a base this spawn cannot verify" >&2
           return 1
         fi ;;
+      *)
+        full=$(git -C "$worktree" rev-parse --symbolic-full-name "$target" 2>/dev/null || true)
+        case "$full" in
+          refs/tags/*)
+            tag=${full#refs/tags/}
+            if ! git -C "$worktree" fetch --quiet origin "+refs/tags/$tag:refs/tags/$tag"; then
+              echo "error: could not fetch requested base tag '$target' from origin for pooled worktree '$worktree'; refusing to launch from a base this spawn cannot verify" >&2
+              return 1
+            fi ;;
+          "")
+            if ! git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" >/dev/null 2>&1; then
+              echo "error: requested base '$target' is not a branch on origin, a tag, or a commit in pooled worktree '$worktree'; refusing to launch from a base this spawn cannot verify" >&2
+              return 1
+            fi ;;
+          *)
+            echo "error: requested base '$target' resolves through '$full', which 'git fetch origin' never refreshes, so this spawn cannot prove it is current; pass the base as 'origin/<branch>', a tag, or a commit sha" >&2
+            return 1 ;;
+        esac ;;
     esac
   else
     if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then

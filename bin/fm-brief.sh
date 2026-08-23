@@ -41,6 +41,10 @@
 #   filled in after scaffolding. Omitting it is never silent - the Setup section
 #   then declares the base unrecorded and requires the worker to establish it
 #   before branching, rather than claiming a default branch.
+#   A ship base must name a branch on origin ("origin/<branch>"), because the PR
+#   target and the local-only merge target are derived from it and a tag, a raw
+#   commit, or another remote's ref has no such branch; a scout, whose brief
+#   derives no branch, records any ref the spawn accepts.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
@@ -199,6 +203,22 @@ fi
 # the two can never disagree: a branch cut from a base belongs in a PR against
 # that same base. Stripping a leading "origin/" turns the remote-tracking ref the
 # spawn resolves into the branch name a forge expects as a PR base.
+#
+# That derivation only yields a branch for a ref on origin, so a ship base is
+# restricted to that form rather than guessed at: a tag or a raw commit has no
+# branch a PR can target or a local merge can fast-forward, and a ref on another
+# remote names a branch on the wrong forge. Either would render a confident but
+# wrong target, which is the concrete harm this contract exists to prevent. A
+# scout brief derives no branch at all (it never pushes, merges, or opens a PR),
+# so it still records whatever ref the spawn accepts.
+if [ "$KIND" = ship ] && [ "$BASE_SET" -eq 1 ]; then
+  case "$BASE" in
+    origin/?*) ;;
+    *)
+      echo "error: --base for a ship brief must name a branch on origin as 'origin/<branch>' (got '$BASE'); this brief derives the PR target and the local-only merge target from it, and a tag, a raw commit, or a ref on another remote has no such branch" >&2
+      exit 1 ;;
+  esac
+fi
 BASE_BRANCH=${BASE#origin/}
 
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
@@ -367,13 +387,23 @@ fi
 
 # Ship-only base premise assertion. Worktree isolation and base correctness are
 # independent premises, so proving one never proves the other.
-IFS= read -r -d '' BASE_ASSERT <<'EOF' || true
-**Confirm your base contains the code this task names.** A task worktree's base comes from the repository's remote default branch rather than from your task, so a base that lacks the very feature you were asked to change is a routine outcome, not a rare one.
+#
+# The instruction is the same either way; only the reason it is worth doing
+# varies. A recorded base must NOT be explained as the remote default, which
+# would contradict the Setup section's own Base contract line and invite a worker
+# standing on the recorded base to "correct" itself back toward the default.
+if [ "$BASE_SET" -eq 1 ]; then
+  BASE_ASSERT_WHY='Your base `'"$BASE"'` was chosen for this task, but choosing a base is not the same as verifying it: a base that lacks the very feature you were asked to change is a routine outcome, not a rare one.'
+else
+  BASE_ASSERT_WHY="This brief does not know your base, and an unrecorded base comes from the repository's remote default branch rather than from your task, so a base that lacks the very feature you were asked to change is a routine outcome, not a rare one."
+fi
+IFS= read -r -d '' BASE_ASSERT_BODY <<'EOF' || true
 Before implementing anything, prove the code the `# Task` section names is present in your base: search for the symbols, files, or behavior it names, for example `git grep <symbol> HEAD -- <path>` or `git log --oneline -1 HEAD -- <path>`.
 If the named code is absent, or present only in a form the task does not describe, STOP - do not implement - append `blocked: base does not contain {the named code}` to the status file and stop.
 A diff and a test written on a base that lacks the feature measure the wrong tree, however careful the change itself is.
 EOF
-BASE_ASSERT=${BASE_ASSERT%$'\n'}
+BASE_ASSERT="**Confirm your base contains the code this task names.** $BASE_ASSERT_WHY
+${BASE_ASSERT_BODY%$'\n'}"
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
@@ -446,7 +476,20 @@ EOF
     SETUP2=""
     # local-only never opens a PR, so the Setup section carries no PR target.
     BASE_PR_TARGET=
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    # bin/fm-merge-local.sh is AUTHORITATIVE for where a local-only task lands:
+    # it fast-forwards the project's local default branch and refuses a branch
+    # that is not a fast-forward of it, so a brief that named any other target
+    # would send the worker toward a state the guarded merge rejects. The two are
+    # kept in agreement from both ends - bin/fm-spawn.sh refuses a local-only
+    # spawn whose --base is not the remote default branch, so the recorded base
+    # and the landing branch are the same branch, and the brief names it in every
+    # place it used to hardcode `main`.
+    if [ "$BASE_SET" -eq 1 ]; then
+      LOCAL_LANDING='`'"$BASE_BRANCH"'`'
+    else
+      LOCAL_LANDING="this project's default branch"
+    fi
+    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local $LOCAL_LANDING."
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=local-only
@@ -454,7 +497,7 @@ This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto $BASE_DESC - if it has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
+The configured merge authority approves the ready branch, then firstmate merges it into local $LOCAL_LANDING through the guarded fast-forward path.
 EOF
     ;;
   *)  # no-mistakes
