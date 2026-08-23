@@ -366,22 +366,24 @@ fi
 # "Base contract: base=<ref>" line is the machine-readable record bin/fm-spawn.sh
 # reads back and refuses to contradict.
 #
-# The recorded-base check has two arms because the same brief is re-delivered
-# verbatim to a replacement agent on relaunch, and a relaunch deliberately does
-# NOT re-cut the worktree (bin/fm-spawn.sh skips freshen_spawn_worktree_base when
-# RELAUNCH=1). A resumed worktree therefore stands on committed work rather than
-# on the base commit itself, so demanding equality there would tell an in-progress
-# task to block on a premise nothing violated. Ancestry is the check that stays
-# true for a resume and still fails for a worktree cut from a different branch,
-# which is the premise this contract exists to protect.
+# This section deliberately carries NO instruction for the worker to verify its
+# own base commit, and one must not be re-added. The brief is rendered before the
+# spawn resolves the base, so any check it could write compares against a MOVING
+# ref rather than the commit the worktree was cut to. Both settings of that dial
+# were tried and each is wrong in an opposite direction: a strict equality
+# comparison blocks a legitimately resumed worker as soon as the ref advances
+# (relaunch re-delivers this same brief and deliberately does not re-cut the
+# worktree), while a lenient ancestry comparison accepts any descendant, which is
+# precisely the wrong-base case this contract exists to prevent. Base
+# verification therefore belongs to bin/fm-spawn.sh, which resets the worktree to
+# the resolved base and refuses to launch unless HEAD matches it, and to the
+# ship assertion below that the base must CONTAIN THE CODE THE TASK NAMES, which
+# is semantic rather than ref-based and so does not depend on a moving ref.
 if [ "$BASE_SET" -eq 1 ]; then
-# shellcheck disable=SC2016  # single quotes are deliberate: the backtick-wrapped git commands below are literal brief text for the reading agent and must not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
+# shellcheck disable=SC2016  # single quotes are deliberate: the backticked ref below is literal brief markup for the reading agent and must not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
 BASE_SETUP=$(printf '%s\n' \
 'Base contract: base='"$BASE" \
-'You are in a disposable git worktree of '"$REPO"', at a detached HEAD cut from `'"$BASE"'`.' \
-'Confirm that base before you branch: `git rev-parse HEAD` must equal `git rev-parse '"'$BASE^{commit}'"'`, which peels an annotated tag to the commit the worktree was actually reset to.' \
-'If HEAD has already moved on, you are a replacement agent resuming work this worktree already carries, so the recorded base must still be an ancestor of it instead: `git merge-base --is-ancestor '"'$BASE^{commit}'"' HEAD` must succeed.' \
-'If whichever of those two checks applies to you fails, this worktree was not cut from the recorded base - append `blocked: base is {the actual commit}, not the recorded '"$BASE"'` to the status file and stop.')
+'You are in a disposable git worktree of '"$REPO"', at a detached HEAD cut from `'"$BASE"'`.')
 # The PR target is ship-only language: a scout never pushes or opens one.
 BASE_PR_TARGET='Your PR must target `'"$BASE_BRANCH"'`, which is NOT necessarily this repository'"'"'s default branch; confirm the target rather than accepting the forge'"'"'s default.'
 else
