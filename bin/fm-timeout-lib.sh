@@ -13,7 +13,9 @@
 #   fm_run_timed <seconds> <command> [args...]
 #       Runs the command with a hard bound. Exit status is the command's own,
 #       except 124, which means the bound was hit (GNU timeout's convention,
-#       reproduced by the perl and bash fallbacks).
+#       reproduced by the perl and bash fallbacks). A command killed by a
+#       signal reports the shell's own 128+signal encoding under every
+#       mechanism, so a crash is never reported as a clean exit.
 #
 # A non-positive bound is not a bound: `timeout 0` and the perl fallback's
 # `alarm 0` both disable the deadline, so callers must reject 0 before calling.
@@ -132,7 +134,10 @@ fm_run_timed() {  # <seconds> <command...>
     timeout) fm_run_external_timeout timeout "$seconds" "$@" ;;
     gtimeout) fm_run_external_timeout gtimeout "$seconds" "$@" ;;
     perl)
-      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
+      # `$? >> 8` alone reports 0 for a command killed by a signal, which would
+      # turn a crash into a success. Reproduce the shell's own 128+signal
+      # encoding so a segfaulting command cannot be mistaken for a clean exit.
+      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; my $st = $?; exit(($st & 127) ? 128 + ($st & 127) : ($st >> 8))' \
         "$seconds" "$@"
       ;;
     bash) fm_run_bash_timeout "$seconds" "$@" ;;
