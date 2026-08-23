@@ -23,8 +23,8 @@
 #   standing on. Batch dispatch forwards it to every pair exactly like --mode and
 #   --yolo, so the multi-task route cannot be the one that still defaults.
 #   A ship base must be a branch on origin ("origin/<branch>"), because the PR
-#   target and the local-only merge target are derived from it; a scout, which
-#   never pushes or merges, may also name a tag or a commit. Whatever the form,
+#   target is derived from it; a scout, which never pushes or merges, may also
+#   name a tag or a commit. Whatever the form,
 #   the ref must be one this spawn can prove current against the remote: a local
 #   branch or another remote's ref is refused rather than silently accepted,
 #   since `git fetch origin` never refreshes either.
@@ -440,18 +440,18 @@ if [ "$KIND" = secondmate ] && [ "$BASE_SET" -eq 1 ]; then
   exit 1
 fi
 
-# A ship brief derives the branch its PR must target - and, for local-only, the
-# branch firstmate fast-forwards - by stripping "origin/" from the base, so a
-# ship base has to name a branch on origin. A tag or a raw commit has no branch a
-# PR can target, and a ref on another remote is one `git fetch origin` never
-# refreshes, so both are refused here rather than allowed to label a PR with a
-# target that cannot exist. A scout brief derives no branch (it never pushes or
-# merges) and so still accepts any ref the spawn can prove current.
+# A ship brief derives the branch its PR must target by stripping "origin/" from
+# the base, so a ship base has to name a branch on
+# origin. A tag or a raw commit has no branch a PR can target, and a ref on
+# another remote is one `git fetch origin` never refreshes, so both are refused
+# here rather than allowed to label a PR with a target that cannot exist. A scout
+# brief derives no branch (it never pushes or merges) and so still accepts any
+# ref the spawn can prove current.
 if [ "$KIND" = ship ] && [ "$BASE_SET" -eq 1 ]; then
   case "$BASE_ARG" in
     origin/?*) ;;
     *)
-      echo "error: --base for a ship spawn must name a branch on origin as 'origin/<branch>' (got '$BASE_ARG'); the PR target and the local-only merge target are derived from it, and a tag, a raw commit, or another remote's ref has no such branch" >&2
+      echo "error: --base for a ship spawn must name a branch on origin as 'origin/<branch>' (got '$BASE_ARG'); the PR target is derived from it, and a tag, a raw commit, or another remote's ref has no such branch" >&2
       exit 1 ;;
   esac
 fi
@@ -1835,12 +1835,13 @@ freshen_spawn_worktree_base() {  # <worktree> [<base-ref>]
   fi
   if [ -n "$requested" ]; then
     target=$requested
-    # bin/fm-merge-local.sh is the AUTHORITATIVE landing path for a local-only
-    # task: it fast-forwards the project's local default branch and refuses a
-    # branch that is not a fast-forward of it. A worktree cut from any other base
-    # can never satisfy that gate, so a local-only base is constrained to the
-    # default branch here rather than allowed to produce a brief that instructs
-    # the worker toward a state the guarded merge refuses.
+    # A local-only task lands through bin/fm-merge-local.sh, which only ever
+    # fast-forwards the project's LOCAL default branch and refuses a branch that
+    # is not an ancestor of it. A worktree cut from any other base could never
+    # satisfy that gate, so the one base a local-only task may request is the
+    # default branch, refused here rather than at merge time. Nothing about the
+    # local-only landing branch is derived from this base: that branch stays
+    # bin/fm-merge-local.sh's own business.
     if [ "$MODE" = local-only ]; then
       if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
         echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch a local-only task whose base cannot be checked against the branch its merge fast-forwards" >&2
@@ -1851,7 +1852,7 @@ freshen_spawn_worktree_base() {  # <worktree> [<base-ref>]
         return 1
       }
       if [ "$target" != "origin/$default" ]; then
-        echo "error: --base $target cannot be combined with --mode local-only: the guarded local merge (bin/fm-merge-local.sh) fast-forwards this project's default branch '$default', so a local-only task must be cut from 'origin/$default'; ship work based on another branch as direct-PR or no-mistakes instead" >&2
+        echo "error: --base $target cannot be combined with --mode local-only: the guarded local merge (bin/fm-merge-local.sh) only ever fast-forwards this project's local default branch '$default', so a local-only task must be cut from 'origin/$default'; ship work based on another branch as direct-PR or no-mistakes instead" >&2
         return 1
       fi
     fi

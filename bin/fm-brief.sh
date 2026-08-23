@@ -44,17 +44,16 @@
 #   A ship base must name a branch on origin ("origin/<branch>"), because the PR
 #   target is derived from it and a tag, a raw commit, or another remote's ref has
 #   no such branch; a scout, whose brief derives no branch, records any ref the
-#   spawn accepts. A local-only brief derives nothing from the base: its landing
-#   branch is the project's default branch, which only bin/fm-merge-local.sh can
-#   resolve.
+#   spawn accepts. Nothing else is derived from the base: local-only lands on the
+#   project's local default branch, which is bin/fm-merge-local.sh's business and
+#   never this base's.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
-#                the configured merge authority approves, then firstmate fast-forwards
-#                the project's default branch through bin/fm-merge-local.sh
+#                the configured merge authority approves, firstmate merges to local main
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
 # The generated ship brief records the chosen mode as a fixed machine-readable
@@ -209,16 +208,16 @@ fi
 #
 # That derivation only yields a branch for a ref on origin, so a ship base is
 # restricted to that form rather than guessed at: a tag or a raw commit has no
-# branch a PR can target or a local merge can fast-forward, and a ref on another
-# remote names a branch on the wrong forge. Either would render a confident but
-# wrong target, which is the concrete harm this contract exists to prevent. A
-# scout brief derives no branch at all (it never pushes, merges, or opens a PR),
-# so it still records whatever ref the spawn accepts.
+# branch a PR can target, and a ref on another remote names a branch on the wrong
+# forge. Either would render a confident but wrong target, which is the concrete
+# harm this contract exists to prevent. A scout brief derives no branch at all
+# (it never pushes, merges, or opens a PR), so it still records whatever ref the
+# spawn accepts.
 if [ "$KIND" = ship ] && [ "$BASE_SET" -eq 1 ]; then
   case "$BASE" in
     origin/?*) ;;
     *)
-      echo "error: --base for a ship brief must name a branch on origin as 'origin/<branch>' (got '$BASE'); this brief derives the PR target and the local-only merge target from it, and a tag, a raw commit, or a ref on another remote has no such branch" >&2
+      echo "error: --base for a ship brief must name a branch on origin as 'origin/<branch>' (got '$BASE'); this brief derives the PR target from it, and a tag, a raw commit, or a ref on another remote has no such branch" >&2
       exit 1 ;;
   esac
 fi
@@ -477,26 +476,25 @@ EOF
     SETUP2=""
     # local-only never opens a PR, so the Setup section carries no PR target.
     BASE_PR_TARGET=
-    # bin/fm-merge-local.sh is AUTHORITATIVE for where a local-only task lands:
-    # it resolves the project's default branch from origin/HEAD and only ever
-    # fast-forwards that branch, refusing anything that is not a fast-forward of
-    # it. That is the single target named here, and it is deliberately NOT
-    # derived from --base: this scaffold cannot resolve a project's default
-    # branch (its repo argument is a caller-supplied string, not a path), so
-    # deriving it would let a brief render a landing claim the spawn refuses to
-    # produce. bin/fm-spawn.sh closes the loop from the other side by refusing a
-    # local-only spawn whose --base is not the remote default branch, so the
-    # base, this target, and the guarded merge are the same branch.
-    LOCAL_LANDING="this project's local default branch"
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into $LOCAL_LANDING."
+    # This section names the project's LOCAL default branch, and that is
+    # deliberate: it is NOT an instance of the remote-default defect --base
+    # exists to fix, so do not make it base-explicit or resolve it through
+    # origin/HEAD. bin/fm-merge-local.sh lands a local-only task by
+    # fast-forwarding the LOCAL default branch and refuses a branch that is not
+    # an ancestor of it, and that local branch routinely sits AHEAD of its remote
+    # because a previous local-only landing fast-forwarded it and never pushed.
+    # A worker sent to any remote-tracking ref would then rebase onto an older
+    # commit and be refused at the merge gate, so the literal local branch is the
+    # correct target here.
+    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto $LOCAL_LANDING, which is the branch your worktree was cut from and the only branch firstmate fast-forwards - resolve its name with \`git rev-parse --abbrev-ref origin/HEAD\`, and if it has advanced, rebase onto it so the eventual merge stays a fast-forward.
+Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into $LOCAL_LANDING through the guarded fast-forward path.
+The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;
   *)  # no-mistakes

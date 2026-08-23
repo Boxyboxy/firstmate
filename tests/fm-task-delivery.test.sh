@@ -260,6 +260,70 @@ test_promotion_drops_the_scout_base_record() {
   pass "fm-promote: promotion leaves a promoted task with no recorded base rather than a stale one"
 }
 
+# A local-only brief and bin/fm-merge-local.sh have to agree about one branch:
+# the project's LOCAL default branch, which routinely sits ahead of its remote
+# because a previous local-only landing fast-forwarded it and never pushed. This
+# drives both real scripts end to end in that state - generate the brief, follow
+# the rebase target it names, then run the guarded merge - so a brief that ever
+# points the worker at a remote-tracking ref is refused here rather than at some
+# operator's merge gate.
+test_local_only_rebase_target_lands_when_local_default_is_ahead() {
+  local case_dir home origin project pool id meta brief target out status
+  case_dir="$TMP_ROOT/local-only-landing"
+  home="$case_dir/home"
+  origin="$case_dir/origin.git"
+  project="$case_dir/project"
+  pool="$case_dir/pool"
+  id=local-only-landing-e1
+  mkdir -p "$home/data" "$home/state"
+
+  git init --quiet --bare -b main "$origin"
+  git clone --quiet "$origin" "$case_dir/seed" 2>/dev/null
+  printf 'seed\n' > "$case_dir/seed/seed.txt"
+  git -C "$case_dir/seed" add seed.txt
+  git -C "$case_dir/seed" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm seed
+  git -C "$case_dir/seed" push --quiet origin main
+  git clone --quiet "$origin" "$project"
+
+  # The steady state fm-merge-local.sh itself creates: local main carries an
+  # earlier local-only landing that was never pushed, so it is ahead of origin/main.
+  printf 'landed earlier\n' > "$project/earlier.txt"
+  git -C "$project" add earlier.txt
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'earlier local-only landing'
+  [ "$(git -C "$project" rev-parse main)" != "$(git -C "$project" rev-parse origin/main)" ] \
+    || fail "fixture did not put the local default branch ahead of its remote"
+  git -C "$project" worktree add --quiet --detach "$pool" origin/main
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016 # The backticks are literal brief markup, not a substitution.
+  target=$(sed -n 's/^Keep your branch a clean fast-forward .*`\([^`]*\)`.*$/\1/p' "$brief" | head -n 1)
+  [ -n "$target" ] || fail "the local-only brief prescribed no branch to stay a fast-forward of"
+
+  git -C "$pool" checkout --quiet -b "fm/$id"
+  printf 'task work\n' > "$pool/task.txt"
+  git -C "$pool" add task.txt
+  git -C "$pool" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'task work'
+  git -C "$pool" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    rebase --quiet "$target" >/dev/null 2>&1 \
+    || fail "the branch could not be rebased onto '$target', the target the brief names"
+
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=ship\nmode=local-only\nproject=%s\n' "$id" "$project" > "$meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-merge-local.sh" "$id" 2>&1)
+  status=$?
+  expect_code 0 "$status" "the guarded merge refused a branch that followed the brief (target '$target'): $out"
+  git -C "$project" merge-base --is-ancestor "fm/$id" main \
+    || fail "the guarded merge did not land the task branch on the local default branch"
+  git -C "$project" show main:earlier.txt >/dev/null 2>&1 \
+    || fail "landing discarded the earlier unpushed local-only merge"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed local-only landing: target=%s local main=%s origin/main=%s\n' \
+      "$target" "$(git -C "$project" rev-parse --short main)" "$(git -C "$project" rev-parse --short origin/main)"
+  fi
+  pass "fm-brief/fm-merge-local: a local-only branch rebased onto the brief's target lands when local default is ahead"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -301,5 +365,6 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promotion_drops_the_scout_base_record
+test_local_only_rebase_target_lands_when_local_default_is_ahead
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"
