@@ -1748,7 +1748,9 @@ fi
 # different ref would hand the worker a brief that names a base it is not
 # standing on - the precise false premise this contract exists to prevent.
 # "unrecorded" is the scaffold's honest declaration that no base was given, so it
-# is the one value that never contradicts a flag.
+# agrees only with the ABSENCE of the flag: an explicit --base against such a
+# brief is refused too, precisely so a worker is never handed a brief that says
+# its base was never recorded while this spawn cut the worktree from one.
 if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
   BRIEF_BASE=$(sed -n 's/^Base contract: base=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ -z "$BRIEF_BASE" ]; then

@@ -524,7 +524,7 @@ test_scout_base_contract_carries_no_pr_target() {
 # (reset to <base>^{commit}). An annotated tag is the case that separates the two
 # readings: `git rev-parse <tag>` is the tag object, not the commit.
 test_recorded_base_check_holds_for_an_annotated_tag() {
-  local home repo wt brief check head resolved moved
+  local home repo wt brief check head resolved moved unrelated
   home="$TMP_ROOT/base-annotated-home"
   repo="$TMP_ROOT/base-annotated-repo"
   wt="$TMP_ROOT/base-annotated-wt"
@@ -551,16 +551,61 @@ test_recorded_base_check_holds_for_an_annotated_tag() {
   [ "$resolved" != "$(git -C "$wt" rev-parse v9.9.9)" ] \
     || fail "fixture did not prove an annotated tag object differs from its commit"
 
-  printf 'later\n' > "$repo/later.txt"
-  git -C "$repo" add later.txt
-  git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm later
-  git -C "$wt" checkout --quiet --detach main
+  unrelated=$(git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit-tree -m unrelated "$(git -C "$repo" hash-object -t tree /dev/null)")
+  git -C "$wt" checkout --quiet --detach "$unrelated"
   moved=$(git -C "$wt" rev-parse HEAD)
   [ "$moved" != "$resolved" ] \
     || fail "fixture did not move the worktree off the recorded base"
   [ "$(cd "$wt" && eval "$check")" != "$moved" ] \
     || fail "the brief's base check no longer catches a worktree cut from the wrong base"
   pass "fm-brief.sh: the recorded-base check passes on an annotated tag and still catches a real mismatch"
+}
+
+# A relaunch re-delivers this same brief verbatim to a replacement agent and
+# deliberately does not re-cut the worktree, so the replacement stands on the work
+# already committed there. The resume arm of the base check is executed here in
+# exactly that state: it must not tell a worker whose base is intact to block, and
+# it must still refuse a worktree whose history never contained the recorded base.
+test_recorded_base_check_does_not_block_a_resumed_worktree() {
+  local home repo wt brief resume unrelated
+  home="$TMP_ROOT/base-resume-home"
+  repo="$TMP_ROOT/base-resume-repo"
+  wt="$TMP_ROOT/base-resume-wt"
+  mkdir -p "$home/data"
+  git init --quiet --bare -b main "$repo.git"
+  git clone --quiet "$repo.git" "$repo.seed" 2>/dev/null
+  printf 'seed\n' > "$repo.seed/seed.txt"
+  git -C "$repo.seed" add seed.txt
+  git -C "$repo.seed" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm seed
+  git -C "$repo.seed" push --quiet origin main
+  git clone --quiet "$repo.git" "$repo"
+  git -C "$repo" worktree add --quiet --detach "$wt" origin/main
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-resume firstmate \
+    --mode no-mistakes --base origin/main >/dev/null 2>&1
+  brief="$home/data/base-resume/brief.md"
+  # shellcheck disable=SC2016 # The backticks are literal brief markup, not a substitution.
+  resume=$(sed -n 's/^If HEAD has already moved on.* instead: `\(.*\)` must succeed.*$/\1/p' "$brief")
+  [ -n "$resume" ] || fail "the brief prescribed no check for a worktree whose HEAD has moved on"
+
+  # The state a relaunched worker actually finds: its branch exists and carries commits.
+  git -C "$wt" checkout --quiet -b fm/base-resume
+  printf 'work in progress\n' > "$wt/wip.txt"
+  git -C "$wt" add wip.txt
+  git -C "$wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm wip
+  [ "$(git -C "$wt" rev-parse HEAD)" != "$(git -C "$wt" rev-parse 'origin/main^{commit}')" ] \
+    || fail "fixture did not move HEAD past the recorded base"
+  (cd "$wt" && eval "$resume") \
+    || fail "a resumed worktree standing on its own committed work is told its base is wrong"
+
+  unrelated=$(git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit-tree -m unrelated "$(git -C "$repo" hash-object -t tree /dev/null)")
+  git -C "$wt" checkout --quiet --detach "$unrelated"
+  if (cd "$wt" && eval "$resume"); then
+    fail "the resume check accepted a worktree whose history never contained the recorded base"
+  fi
+  pass "fm-brief.sh: a resumed worktree passes the base check while a wrong base still fails it"
 }
 
 test_base_is_refused_where_it_does_not_apply() {
@@ -938,6 +983,7 @@ test_base_omission_is_loud_for_ship_and_scout
 test_ship_asserts_its_base_contains_the_named_code
 test_scout_base_contract_carries_no_pr_target
 test_recorded_base_check_holds_for_an_annotated_tag
+test_recorded_base_check_does_not_block_a_resumed_worktree
 test_base_is_refused_where_it_does_not_apply
 test_base_assertion_does_not_contradict_a_recorded_base
 test_ship_base_must_name_a_branch_on_origin
