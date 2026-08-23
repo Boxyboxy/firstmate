@@ -116,9 +116,14 @@ JOBS_MAX=8
 # performance gate. The slowest scripts measured in isolation on 2026-08-22
 # (macOS, Apple M5) were fm-pr-check-security 387s, fm-secondmate-safety 306s,
 # fm-session-start 220s, and fm-bootstrap 215s, so this leaves better than 2x
-# headroom over the slowest one. It also stays under the 20-minute
-# portable-serial shard job timeout, so the bound fires and names the file
-# instead of the CI job dying anonymously.
+# headroom over the slowest one. fm-remote-secondmate-lifecycle-e2e joined that
+# group on 2026-08-23 at 289s isolated, once its stdin block stopped making it
+# unmeasurable; it reached 572s in a full run competing with other work, which
+# is the closest any script has come to this bound and the reason the margin is
+# stated against a loaded machine rather than an idle one. The CI timing
+# artifact's slowest is fm-pr-check-security at 250s. The bound also stays under
+# the 20-minute portable-serial shard job timeout, so it fires and names the
+# file instead of the CI job dying anonymously.
 SCRIPT_TIMEOUT_DEFAULT=900
 SCRIPT_TIMEOUT=$SCRIPT_TIMEOUT_DEFAULT
 
