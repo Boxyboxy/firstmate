@@ -42,7 +42,7 @@
 #                   selected script is in the proven-isolated set
 #                   (bin/fm-test-isolation-proof.sh --list). Cap is 8. Stateful
 #                   families never schedule under --jobs.
-#   --timeout S     hard per-script bound in seconds (default 600). A script
+#   --timeout S     hard per-script bound in seconds (default 900). A script
 #                   that outruns it is killed with its whole process group,
 #                   recorded as exit=124, and named on a FM_TEST_TIMEOUT
 #                   marker, so a hung test reports instead of consuming the
@@ -112,10 +112,14 @@ FAIL_ON_GATE_SKIP=
 JOBS=1
 JOBS_MAX=8
 
-# Hard per-script bound. Well above the slowest legitimate script (the whole
-# portable-serial remainder is about 19 minutes across roughly 120 scripts) and
-# below every CI lane's own job timeout, so only a wedged test reaches it.
-SCRIPT_TIMEOUT_DEFAULT=600
+# Hard per-script bound, calibrated as a hang tripwire rather than a
+# performance gate. The slowest scripts measured in isolation on 2026-08-22
+# (macOS, Apple M5) were fm-pr-check-security 387s, fm-secondmate-safety 306s,
+# fm-session-start 220s, and fm-bootstrap 215s, so this leaves better than 2x
+# headroom over the slowest one. It also stays under the 20-minute
+# portable-serial shard job timeout, so the bound fires and names the file
+# instead of the CI job dying anonymously.
+SCRIPT_TIMEOUT_DEFAULT=900
 SCRIPT_TIMEOUT=$SCRIPT_TIMEOUT_DEFAULT
 
 # How many separate-runner shards the portable serial remainder splits into.
