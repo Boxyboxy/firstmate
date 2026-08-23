@@ -9,6 +9,8 @@
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
 #     base_mode is that local commit, with NO fetch and no origin dependency.
+# Project-clone refresh in bin/fm-fleet-sync.sh has separate recovery rules and
+# does not source this library; its off-default clones remain reported STUCK.
 #
 # A linked-worktree secondmate home already holds the primary's commit in the
 # shared object store, so its local-HEAD sync is a purely local fast-forward that
@@ -20,9 +22,22 @@
 # The seeded .fm-secondmate-home identity marker is gitignored too; the local
 # sync tolerates only that marker during the one-time upgrade of pre-ignore
 # linked-worktree homes.
-# Homes are leased at a detached HEAD on the
-# default branch, so the fast-forward advances HEAD only and never moves the
-# shared default branch or any other worktree's checkout.
+# Homes are leased at a detached HEAD on the default branch, so their
+# fast-forward advances HEAD only and never moves the shared default branch or
+# any other worktree's checkout. A checkout on another named branch is handled
+# separately: its free default-branch ref may advance without moving that
+# checkout, but a ref held by another worktree is left alone. Advancing that ref
+# never silences the off-branch condition itself - the checkout is still running
+# whatever its own branch holds - so every off-branch outcome also reports a
+# skip that names the branch to repair.
+# A linked worktree shares its ref store with the whole repository, so a default
+# ref there is not private to that home: moving it moves the repository's
+# branch. That shared movement is OWNED BY THE PRIMARY sync path, which alone
+# passes owns_shared_ref=yes; a secondmate convergence sweep advances only its
+# own detached HEAD or a default ref its own repository owns outright, and
+# reports a shared ref as skipped instead of moving the primary's branch under
+# it. When the owner does move a shared ref, the outcome names the repository
+# the branch actually belongs to rather than implying it is private.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -255,8 +270,12 @@ live_secondmate_meta_records() {
 
 # Fast-forward one target to a base. Prints its status line. Sets globals for the
 # caller:
-#   FF_STATUS = updated|current|skipped
-#   FF_INSTR  = comma list of changed instruction paths (only when updated)
+#   FF_STATUS = updated|ref-updated|current|ref-current|skipped
+#     `current` means this target's own checkout is at the base and needs
+#     nothing. `ref-current` is the off-branch sibling: only the default REF was
+#     level, while the checkout is still stranded on another branch, so a caller
+#     must not read it as "this target is up to date".
+#   FF_INSTR  = comma list of changed instruction paths (only when HEAD updated)
 #
 # base_mode selects where the fast-forward base comes from:
 #   origin       - fetch origin and advance to origin/<default> (the /updatefirstmate
@@ -266,12 +285,176 @@ live_secondmate_meta_records() {
 #                  already exist in the target's object store, which it always does
 #                  for a worktree of this same repo; a standalone clone that lacks
 #                  it is skipped rather than fetched.
-# Guards are identical in both modes: ff-only (never force/merge/stash); skip a
-# dirty, diverged, or wrong-branch target and leave its work untouched.
+# The checked-out-default and detached-HEAD guards are unchanged: ff-only,
+# clean-tree-only, and never force/merge/stash. When another named branch is
+# checked out, only the free default-branch ref may advance by strict
+# fast-forward; HEAD, the index, and the working tree remain untouched. A
+# default ref shared with a wider repository advances only for the caller that
+# owns it (owns_shared_ref=yes, the primary sync path).
 FF_STATUS=""
 FF_INSTR=""
+# Echo the branch an interrupted rebase or bisect in <git-dir> will restore, if
+# any. Such a worktree reports a detached HEAD in the worktree inventory, yet
+# git still refuses to force-update that branch under it - and update-ref's
+# compare-and-swap does NOT apply that refusal, so the ref-only path has to make
+# the same check itself. Mirrors git's own is_worktree_being_rebased /
+# is_worktree_being_bisected sources: a `git am` in progress writes no head-name
+# and holds no branch.
+worktree_operation_branch() {
+  local gitdir=$1 file value
+  for file in rebase-merge/head-name rebase-apply/head-name; do
+    [ -f "$gitdir/$file" ] || continue
+    value=$(sed -n '1p' "$gitdir/$file" 2>/dev/null || true)
+    case "$value" in
+      refs/heads/?*)
+        printf '%s\n' "${value#refs/heads/}"
+        return 0
+        ;;
+    esac
+  done
+  if [ -f "$gitdir/BISECT_START" ]; then
+    value=$(sed -n '1p' "$gitdir/BISECT_START" 2>/dev/null || true)
+    if [ -n "$value" ]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# Print the worktree holding refs/heads/<default>, if any - either by having it
+# checked out, or by an interrupted rebase or bisect that will restore it while
+# the inventory still reports the worktree as detached. Returns 0 when found,
+# 1 when the branch is free, and 2 when the worktree inventory cannot be read.
+default_branch_worktree() {
+  local dir=$1 default=$2 line worktree="" inventory opgit
+  inventory=$(git -C "$dir" worktree list --porcelain 2>/dev/null) || return 2
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *) worktree=${line#worktree } ;;
+      "branch refs/heads/$default")
+        printf '%s\n' "$worktree"
+        return 0
+        ;;
+      detached)
+        if [ -n "$worktree" ] && [ -d "$worktree" ]; then
+          opgit=$(git -C "$worktree" rev-parse --absolute-git-dir 2>/dev/null) || return 2
+          if [ "$(worktree_operation_branch "$opgit" || true)" = "$default" ]; then
+            printf '%s\n' "$worktree"
+            return 0
+          fi
+        fi
+        ;;
+      '') worktree="" ;;
+    esac
+  done <<< "$inventory"
+  return 1
+}
+
+# Echo a git-reported directory as an absolute physical path, resolving it
+# against <dir> when git reported it relative. `rev-parse --path-format=absolute`
+# would do this in one call, but it only exists from git 2.31 and this repo
+# pins no minimum git version; on an older git that flag fails outright and a
+# shared ref store would be silently misreported as private.
+git_reported_dir() {  # <dir> <git-reported-path>
+  local dir=$1 path=$2
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /*) (cd "$path" 2>/dev/null && pwd -P) ;;
+    *) (cd "$dir" 2>/dev/null && cd "$path" 2>/dev/null && pwd -P) ;;
+  esac
+}
+
+# Echo the repository that owns refs/heads/<default> for this checkout, when
+# that repository is not the checkout itself. A linked worktree shares one ref
+# store with its main worktree, so advancing the default ref there moves the
+# whole repository's branch rather than anything private to this home, and the
+# report has to name it. Returns 1 for a standalone clone or a main worktree,
+# whose default ref is its own.
+shared_ref_repo() {
+  local dir=$1 gitdir common main
+  gitdir=$(git_reported_dir "$dir" "$(git -C "$dir" rev-parse --git-dir 2>/dev/null || true)") || return 1
+  common=$(git_reported_dir "$dir" "$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null || true)") || return 1
+  [ -n "$gitdir" ] && [ -n "$common" ] || return 1
+  [ "$gitdir" != "$common" ] || return 1
+  main=$(git -C "$dir" worktree list --porcelain 2>/dev/null | sed -n '1s|^worktree ||p')
+  [ -n "$main" ] || return 1
+  printf '%s\n' "$main"
+}
+
+# Advance only refs/heads/<default> while a different named branch remains
+# checked out. The compare-and-swap update-ref is the final ancestry/race guard.
+#
+# Every outcome names the off-branch checkout, because that - not whichever git
+# obstacle stopped the ref - is what an operator has to repair before this
+# target follows the fleet again. Even a successful ref advance therefore still
+# emits its own `skipped:` line, carrying the ref outcome, so callers that
+# surface skips keep seeing an off-branch target: bin/fm-bootstrap.sh relays
+# `secondmate <id>: skipped:` lines as startup diagnostics and bin/fm-spawn.sh
+# warns on the first line. That skip line comes FIRST for exactly that reason,
+# with the plain ref-advance fact on the line after it.
+# ff_target owns proving the base exists and passes its resolved commit in, so
+# there is exactly one place that reports a missing base.
+#
+# owns_shared_ref decides who may move a default ref that is NOT private to this
+# checkout. A linked worktree shares one ref store with its main worktree, so its
+# refs/heads/<default> is the whole repository's branch - the primary's. Only the
+# primary sync path passes yes; a secondmate convergence sweep reports that ref
+# as skipped rather than moving the primary's branch under it. A standalone clone
+# owns its own default ref outright, so it is unaffected either way.
+ff_default_ref_while_off_branch() {
+  local dir=$1 label=$2 default=$3 base=$4 cur=$5 base_rev=$6 owns_shared_ref=${7:-no}
+  local default_ref holder holder_rc local_rev before after out shared refname
+  default_ref="refs/heads/$default"
+  refname="$default ref"
+  if shared=$(shared_ref_repo "$dir"); then
+    if [ "$owns_shared_ref" != yes ]; then
+      echo "$label: skipped: on $cur, expected $default; $default ref belongs to $shared and moves only with that primary checkout, checkout not advanced"
+      return 0
+    fi
+    refname="$default ref (shared with $shared)"
+  fi
+
+  if holder=$(default_branch_worktree "$dir" "$default"); then
+    echo "$label: skipped: $default is checked out in another worktree (${holder:-unknown}); checkout stayed on $cur"
+    return 0
+  else
+    holder_rc=$?
+    if [ "$holder_rc" -eq 2 ]; then
+      echo "$label: skipped: cannot inspect worktrees before updating $default; checkout stayed on $cur"
+      return 0
+    fi
+  fi
+
+  local_rev=$(git -C "$dir" rev-parse --verify "$default_ref^{commit}" 2>/dev/null) || {
+    echo "$label: skipped: cannot read $refname; checkout stayed on $cur"
+    return 0
+  }
+  if [ "$local_rev" = "$base_rev" ]; then
+    FF_STATUS="ref-current"
+    echo "$label: skipped: on $cur, expected $default; $refname already current, checkout not advanced"
+    echo "$label: $refname already current; checkout stayed on $cur"
+    return 0
+  fi
+  if ! git -C "$dir" merge-base --is-ancestor "$local_rev" "$base_rev" 2>/dev/null; then
+    echo "$label: skipped: $refname diverged from $base; checkout stayed on $cur"
+    return 0
+  fi
+
+  before=$(git -C "$dir" rev-parse --short "$local_rev")
+  if ! out=$(git -C "$dir" update-ref "$default_ref" "$base_rev" "$local_rev" 2>&1); then
+    echo "$label: skipped: $refname fast-forward failed: $(first_line "$out"); checkout stayed on $cur"
+    return 0
+  fi
+  after=$(git -C "$dir" rev-parse --short "$base_rev")
+  FF_STATUS="ref-updated"
+  echo "$label: skipped: on $cur, expected $default; $refname advanced $before..$after, checkout not advanced"
+  echo "$label: advanced $refname $before..$after; checkout stayed on $cur"
+}
+
 ff_target() {
   local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
+  local owns_shared_ref=${6:-no}
   FF_STATUS="skipped"
   FF_INSTR=""
 
@@ -305,7 +488,7 @@ ff_target() {
     base="$base_mode"
   fi
 
-  if ! git -C "$dir" rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
+  if ! base_rev=$(git -C "$dir" rev-parse --verify --quiet "$base^{commit}"); then
     echo "$label: skipped: $base does not exist"
     return 0
   fi
@@ -316,7 +499,8 @@ ff_target() {
     return 0
   fi
   if [ -n "$cur" ] && [ "$cur" != "$default" ]; then
-    echo "$label: skipped: on $cur, expected $default"
+    ff_default_ref_while_off_branch "$dir" "$label" "$default" "$base" "$cur" "$base_rev" \
+      "$owns_shared_ref"
     return 0
   fi
 
@@ -375,6 +559,9 @@ FF_SEEN_HOMES=""
 # whose only change was non-instruction tracked files, is left undisturbed. The
 # firstmate repo itself (FM_ROOT) is never processed as its own secondmate, and
 # each resolved home is processed at most once.
+# This is secondmate convergence, so it never claims ownership of a shared
+# default ref: a linked-worktree home off its default branch reports the ref as
+# skipped instead of moving the primary repository's branch under it.
 process_secondmate() {
   local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
   [ -n "$id" ] || return 0

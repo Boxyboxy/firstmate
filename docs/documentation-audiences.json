@@ -161,6 +161,14 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/housekeeping/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/omp-firstmate-leverage/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/process-event-sources/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -325,6 +333,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/supervision-protocols/omp.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/opencode.md",
       "audience": "agent-runtime"
     },
@@ -395,6 +407,14 @@
     {
       "path": "docs/zellij-backend.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "skills/diagnosing-bugs/SKILL.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/resolving-merge-conflicts/SKILL.md",
+      "audience": "public-product"
     },
     {
       "path": "skills/stow/SKILL.md",

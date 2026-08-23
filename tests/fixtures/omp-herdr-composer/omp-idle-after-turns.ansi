@@ -1,0 +1,144 @@
+
+[0m[38;2;107;114;128m╭───[0m[38;2;156;163;176m omp v17.2.2 [0m[38;2;107;114;128m─────────────────────────────────╮[0m
+[0m[38;2;107;114;128m│[0m                [0m[38;2;107;114;128m│[0m [0m[38;2;0;180;255mTips[0m                           [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m Welcome back!  [0m[38;2;107;114;128m│[0m [0m[38;2;107;114;128m#[0m[38;2;156;163;176m for prompt actions[0m           [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m                [0m[38;2;107;114;128m│[0m [0m[38;2;107;114;128m/[0m[38;2;156;163;176m for commands[0m                 [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m  [0m[38;2;68;190;255m▀[0m[38;2;67;206;251m█[0m[38;2;82;220;242m█[0m[38;2;97;233;234m█[0m[38;2;112;247;225m█[0m[38;2;254;240;251m█[0m[38;2;246;187;240m█[0m[38;2;229;138;238m█[0m[38;2;208;107;247m█[0m[38;2;191;112;255m█[0m[38;2;171;117;255m█[0m[38;2;151;122;255m▀[0m  [0m[38;2;107;114;128m│[0m [0m[38;2;107;114;128m![0m[38;2;156;163;176m to run bash[0m                  [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m   [0m[38;2;68;190;255m╘[0m[38;2;67;206;251m█[0m[38;2;82;220;242m█[0m    [0m[38;2;229;138;238m█[0m[38;2;208;107;247m█[0m    [0m[38;2;107;114;128m│[0m [0m[38;2;107;114;128m$[0m[38;2;156;163;176m to run python[0m                [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m    [0m[38;2;68;190;255m█[0m[38;2;67;206;251m█[0m    [0m[38;2;246;187;240m█[0m[38;2;229;138;238m█[0m    [0m[38;2;107;114;128m│[0m [0m[38;2;107;114;128m──────────────────────────────[0m [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m    [0m[38;2;83;173;255m█[0m[38;2;68;190;255m█[0m    [0m[38;2;254;240;251m█[0m[38;2;246;187;240m█[0m    [0m[38;2;107;114;128m│[0m [0m[38;2;0;180;255mLSP Servers[0m                    [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m   [0m[38;2;241;97;214m▄[0m[38;2;228;101;228m█[0m[38;2;214;106;241m█[0m[38;2;200;110;255m▄[0m  [0m[38;2;140;125;255m▄[0m[38;2;120;130;255m█[0m[38;2;105;148;255m█[0m[38;2;90;165;255m▄[0m   [0m[38;2;107;114;128m│[0m [0m[38;2;107;114;128mNo LSP servers[0m                 [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m                [0m[38;2;107;114;128m│[0m                                [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m[38;2;156;163;176mClaude Haiku 4.5[0m[38;2;107;114;128m│[0m                                [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m   [0m[38;2;31;37;45manthropic[0m    [0m[38;2;107;114;128m│[0m                                [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m                [0m[38;2;107;114;128m│[0m [0m[38;2;107;114;128m──────────────────────────────[0m [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m                [0m[38;2;107;114;128m│[0m [0m[38;2;0;180;255mRecent sessions[0m                [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m                [0m[38;2;107;114;128m│[0m [0m[38;2;107;114;128mNo recent sessions[0m             [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m                [0m[38;2;107;114;128m│[0m                                [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m                [0m[38;2;107;114;128m│[0m                                [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m                [0m[38;2;107;114;128m│[0m                                [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m│[0m                [0m[38;2;107;114;128m│[0m                                [0m[38;2;107;114;128m│[0m
+[0m[38;2;107;114;128m╰────────────────┴────────────────────────────────╯[0m
+ [0m[38;2;212;192;144mTip: [0m[38;2;156;163;176mPress alt+p (or /switch) to switch provider,[0m
+      [0m[38;2;156;163;176mand ctrl+p to cycle role models smol -> slow[0m
+      [0m[38;2;156;163;176m-> etc[0m
+
+ [0m[38;2;107;114;128mMCP finished with failures. Connected:              [0m
+ [0m[38;2;107;114;128mcompound-engineering:context7, node_repl. Failed:   [0m
+ [0m[38;2;107;114;128mcomputer-use: ENOENT: no such file or directory,    [0m
+ [0m[38;2;107;114;128mposix_spawn '~/.codex/Codex Computer Use.app…[0m       
+
+[0m[48;2;15;18;22m                                                     [0m
+[0m[48;2;15;18;22m CAPTAIN HALF TYPED SENTENCE                         [0m
+[0m[48;2;15;18;22m                                                     [0m
+
+ I'm ready to help! It looks like you started typing 
+ a message but didn't finish. Could you complete     
+ your request? I'm here to assist with:              
+                                                     
+ [0m[38;2;0;180;255m- [0mCode changes, refactoring, or debugging           
+ [0m[38;2;0;180;255m- [0mBuilding features or fixing bugs                  
+ [0m[38;2;0;180;255m- [0mReviewing or analyzing code                       
+ [0m[38;2;0;180;255m- [0mExploring a codebase                              
+ [0m[38;2;0;180;255m- [0mRunning tests or validating changes               
+ [0m[38;2;0;180;255m- [0mOr anything else you need                         
+                                                     
+ Just let me know what you're working on, and I'll   
+ get started.                                        
+
+[0m[48;2;15;18;22m                                                     [0m
+[0m[48;2;15;18;22m Count slowly from 1 to 40, one number per line.     [0m
+[0m[48;2;15;18;22m                                                     [0m
+
+ 1                                                   
+ 2                                                   
+ 3                                                   
+ 4                                                   
+ 5                                                   
+ 6                                                   
+ 7                                                   
+ 8                                                   
+ 9                                                   
+ 10                                                  
+ 11                                                  
+ 12                                                  
+ 13                                                  
+ 14                                                  
+ 15                                                  
+ 16                                                  
+ 17                                                  
+ 18                                                  
+ 19                                                  
+ 20                                                  
+ 21                                                  
+ 22                                                  
+ 23                                                  
+ 24                                                  
+ 25                                                  
+ 26                                                  
+ 27                                                  
+ 28                                                  
+ 29                                                  
+ 30                                                  
+ 31                                                  
+ 32                                                  
+ 33                                                  
+ 34                                                  
+ 35                                                  
+ 36                                                  
+ 37                                                  
+ 38                                                  
+ 39                                                  
+ 40                                                  
+
+[0m[48;2;15;18;22m                                                     [0m
+[0m[48;2;15;18;22m Write a haiku about tide charts, then explain it in [0m
+[0m[48;2;15;18;22m three sentences.                                    [0m
+[0m[48;2;15;18;22m                                                     [0m
+
+ Tides rise and fall slow,                           
+ Moon pulls the ocean's great breath,                
+ Time marks the rhythm.                              
+                                                     
+ This haiku captures the cyclical nature of tides,   
+ which are governed by the gravitational pull of the 
+ moon on Earth's oceans. The "great breath" metaphor 
+ suggests the rhythmic, almost living quality of     
+ tidal movements as water rises and falls in         
+ predictable patterns. Tide charts document this     
+ ancient celestial dance, allowing us to read and    
+ predict the ocean's movements across time.          
+
+[0m[48;2;15;18;22m                                                     [0m
+[0m[48;2;15;18;22m List ten coastal towns with a one-line note each.   [0m
+[0m[48;2;15;18;22m                                                     [0m
+
+ [0m[38;2;0;180;255m1. [0mMonterey, California - Home to the iconic        
+    Monterey Bay Aquarium and dramatic rocky         
+    coastline.                                       
+ [0m[38;2;0;180;255m2. [0mAcadia, Maine - Features rugged cliffs,          
+    lighthouses, and some of the earliest sunrise    
+    views on the East Coast.                         
+ [0m[38;2;0;180;255m3. [0mSanta Monica, California - Famous for its pier,  
+    beach culture, and Mediterranean-like climate.   
+ [0m[38;2;0;180;255m4. [0mCharleston, South Carolina - Historic port city  
+    with antebellum architecture and Spanish         
+    moss-draped oaks.                                
+ [0m[38;2;0;180;255m5. [0mCornish Coast, England - Dramatic granite cliffs 
+    and charming fishing villages beloved by         
+    surfers.                                         
+ [0m[38;2;0;180;255m6. [0mSydney, Australia - Iconic harbor with the Opera 
+    House and Bondi Beach as global landmarks.       
+ [0m[38;2;0;180;255m7. [0mCinque Terre, Italy - Five colorful villages     
+    perched on cliffsides above the Ligurian Sea.    
+ [0m[38;2;0;180;255m8. [0mCape Town, South Africa - Nestled between Table  
+    Mountain and the Atlantic, with striking natural 
+    beauty.                                          
+ [0m[38;2;0;180;255m9. [0mOkinawa, Japan - Tropical island with pristine   
+    beaches and rich coral reef ecosystems.          
+ [0m[38;2;0;180;255m10. [0mDubrovnik, Croatia - Medieval walled city on    
+     the Adriatic with terracotta rooftops and       
+     turquoise waters.                               
+
+[0m[38;2;248;233;119m╭──[0m[48;2;15;18;22m [0m[38;2;0;180;255m[48;2;15;18;22mπ [0m[48;2;15;18;22m [0m[38;2;42;48;56m[48;2;15;18;22m>[0m[48;2;15;18;22m [0m[38;2;0;180;255m[48;2;15;18;22m⬢ Haiku 4.5[0m[38;2;0;255;136m[48;2;15;18;22m++[0m[48;2;15;18;22m [0m[38;2;42;48;56m[48;2;15;18;22m>[0m[48;2;15;18;22m [0m[38;2;232;236;244m[48;2;15;18;22m🗑 …r/tmp[0m[48;2;15;18;22m [0m[38;2;15;18;22m▶[0m[38;2;248;233;119m─────────────────╮[0m
+[0m[38;2;248;233;119m╰─ [0m                                               [0m[38;2;248;233;119m ─╯[0m

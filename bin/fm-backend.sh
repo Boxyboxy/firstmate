@@ -595,6 +595,13 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 fm_backend_source() {  # <name>
   local name=$1
   fm_backend_validate "$name" || return 1
+  # `.` is a special builtin, so under `set -e` a MISSING adapter file aborts the
+  # CALLING shell outright - the `|| return 1` below never runs, and neither does
+  # a caller's own "restore the adapter and rerun" refusal. Prove the file is
+  # readable first so a missing adapter comes back as an ordinary failed return.
+  # fm_backend_validate has already constrained the name to the known backends,
+  # each of which is bin/backends/<name>.sh.
+  [ -r "$FM_BACKEND_LIB_DIR/backends/$name.sh" ] || return 1
   case "$name" in
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then

@@ -187,7 +187,7 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 ## 4. Harness and runtime dispatch
 
 Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
-The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, and `cursor`, plus `muse` for crewmates and scouts only; never dispatch on an unverified adapter.
+The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, `cursor`, and `omp`, plus `muse` for crewmates and scouts only; never dispatch on an unverified adapter.
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.
@@ -249,6 +249,9 @@ Route durable knowledge to its most specific owner:
 - Knowledge useful to almost every contributor to one project belongs in that project's committed `AGENTS.md`.
 - Knowledge general to every firstmate user belongs in this repo's shared tracked surface.
 
+An initiative whose plan the captain maintains outside firstmate, in their own planning documents, outranks every firstmate-derived record of that initiative; `data/captain.md` records where this home's planning sources live and which initiatives they cover.
+A backlog hold, task note, or report is a derived observation from one moment, so a hold that contradicts its initiative's planning source is stale by definition: re-verify a hold against that source before presenting it to the captain or briefing work from it, and correct or close the hold rather than the source.
+
 Firstmate never writes a project's `AGENTS.md` directly.
 A crewmate creates or updates it lazily through the project's selected delivery path, using `bin/fm-ensure-agents-md.sh` and preferring pointers to authoritative sources over copied detail.
 Keep fleet delivery posture and captain-private strategy out of project memory.
@@ -308,6 +311,7 @@ After spawning, confirm the worker is processing the brief, handle any trust dia
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
 Steer a worker with short single-line messages through fail-closed `fm-send`; put long instructions in a file.
+A steer long enough to carry the instruction body is refused before any send, so append the body to the worker's `data/<id>/brief.md` and point at it with that brief's ABSOLUTE path, telling the worker to READ it rather than find it, because `data/` is gitignored and a worker searching from its own worktree structurally cannot reach it.
 When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--resolve-key` so the answer itself closes that decision record at answer time, identically for local and remote workers (contract: `bin/fm-send.sh` header).
 `fm-send` is the data plane for text the worker should read; never use its key or text paths for interrupt, exit, or other lifecycle control, because routing-marked lifecycle text becomes chat the worker reasons about instead of executing.
 Drive a worker's lifecycle through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which owns the per-runtime mechanics, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](docs/agent-control.md)).
@@ -334,6 +338,7 @@ Never merge a red PR under either setting; destructive, irreversible, and securi
 Without a current explicit captain instruction that states the concrete merge, that default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
 Load `ask-user-authority` before deciding any ask-user finding; the implementation worker never answers its own finding.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
+`fm-pr-merge` enforces the red-PR rule itself and also refuses a check state it cannot read; its override needs the captain's explicit word, is never covered by standing `yolo` authority, and is recorded durably in the task's metadata.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
 ### Validate
@@ -372,6 +377,7 @@ Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
+When the captain invokes `/housekeeping` or asks to reclaim disk left by finished work, load the `housekeeping` skill.
 
 A secondmate is persistent and an empty queue is healthy.
 Retire one only on an explicit captain or main-firstmate decision, after loading `secondmate-provisioning`; its home must contain no work under way, and forced discard still requires explicit captain authority.
@@ -530,6 +536,12 @@ Firstmate's shared instruction surface reaches running homes only after it lands
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are loaded by a running firstmate; public `skills/` is an installer-facing surface.
 When the captain invokes `/updatefirstmate` or asks to update firstmate, load the `/updatefirstmate` skill.
 It performs guarded fast-forward updates of firstmate and registered secondmate homes, refreshes instructions, and never touches anything under `projects/`.
+Moving a default branch shared with the wider repository belongs to the primary checkout alone; a secondmate sweep reports that ref and leaves it where it is.
+The same run also refreshes the machine-wide `omp` executable through the channel `which omp` already resolves, reporting that channel plus the before and after versions.
+That swap is the one part of `/updatefirstmate` that reaches beyond this repo, so it installs only when every worker recorded here and in every registered local secondmate home is confirmed stopped; a live worker, an endpoint it cannot classify, or a home or registry it cannot read is a refusal to relay, never a reason to proceed, and workers on a remote secondmate's own machine never block it.
+The unattended overnight run stays detect-only (`--check`) and can never install.
+When the captain invokes `/omp-firstmate-leverage`, asks to update omp and firstmate together, asks whether firstmate is leveraging omp, or when that recurring sweep comes due, load the `omp-firstmate-leverage` skill.
+It owns the omp update, the fast-forward, the merge into the omp adapter branch and its publication, and the audit of which omp capabilities firstmate never uses.
 
 ## 13. Agent-only reference skills
 

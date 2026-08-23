@@ -1,10 +1,15 @@
 name: CI
 
+# `pull_request.branches` filters a PR's BASE branch, so a base missing from
+# this list gets zero checks - which the PR UI cannot distinguish from passing
+# checks. Add every long-lived base we open PRs into, here and in
+# no-mistakes-required.yml, on the day that branch is created.
+# bin/fm-lint-workflows.sh owns that rule and fails the lint on a mismatch.
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, feat/omp-adaptor]
 
 permissions:
   contents: read
@@ -385,8 +390,13 @@ jobs:
           bearings_output=$(/bin/bash tests/fm-bearings-snapshot.test.sh)
           printf '%s\n' "$bearings_output"
           bearings_count=$(printf '%s\n' "$bearings_output" | grep -c '^ok - ')
-          [ "$bearings_count" -eq 42 ] || {
-            echo "::error::expected 42 Bearings tests, got $bearings_count"
+          # Branch-specific by construction: this line carries one more test
+          # than main, from 9b51347's test_open_decisions_carry_hold_age. The
+          # guard asserts an exact count to catch a suite that silently stops
+          # emitting tests, so it is bumped on the branch whose count it
+          # describes rather than loosened.
+          [ "$bearings_count" -eq 43 ] || {
+            echo "::error::expected 43 Bearings tests, got $bearings_count"
             exit 1
           }
 

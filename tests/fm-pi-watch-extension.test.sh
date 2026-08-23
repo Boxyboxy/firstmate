@@ -1429,8 +1429,10 @@ await hooks.event(event);
 // The hook starts its attempt without awaiting it, and the plugin answers a
 // second attempt from the one already in flight. Join that attempt through the
 // coordinator rather than waiting a fixed span: refusing an unowned lock walks
-// git and ps probes that can outlast any such span, and the owned-lock event
-// below would then be answered from the refusal instead of arming.
+// git and `ps` probes, one `ps` per ancestry level, which can outlast any such
+// span on a slow or deeply nested host. Joining makes the foreign-lock verdict
+// final before the lock is rewritten underneath it, and keeps the owned-lock
+// event below from being answered out of this refusal instead of arming.
 const refusal = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
 if (refusal !== "read-only") {
   console.error(`expected a read-only refusal without the session lock, got ${refusal}`);

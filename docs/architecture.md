@@ -74,7 +74,7 @@ The default path remains local-only; live GitHub enrichment exists only behind t
 Optional Relay integrates with the watcher only after explicit opt-in; [configuration.md](configuration.md#relay-env) owns its generated-artifact and dispatch mechanics.
 
 At session start, `bin/fm-session-start.sh` emits exactly one primary-harness supervision block rendered by `bin/fm-supervision-instructions.sh` from `docs/supervision-protocols/`.
-That block owns the live wait shape for the running primary harness: Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Cursor's stop hook parks on the watcher, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, and OpenCode uses its TUI plugin.
+That block owns the live wait shape for the running primary harness: Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Cursor's stop hook parks on the watcher, Grok and omp use background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, and OpenCode uses its TUI plugin.
 `bin/fm-watch-arm.sh` remains the verified arm wrapper for protocols that call it; it forks the watcher as a tracked child, verifies it is genuinely alive with a fresh liveness beacon, and prints an honest `started`, `attached`, or nonzero `FAILED` status.
 [`watcher-continuity.md`](watcher-continuity.md#arm-layer-cycle-contract) owns the arm layer's successor, terminal-delivery, re-arm recovery, and typed clean-close failure contract.
 The arm layer records one bounded lifecycle row per observed cycle in `state/.watch-cycle-exits.log`; `state/.watch-triage.log` remains exclusively the absorbed-wake debug log.
@@ -109,6 +109,9 @@ Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
 `fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
+An over-long steer is refused rather than sent, because a steer that long is dropped by a busy pane instead of landing.
+The refusal names the sanctioned pattern: append the content to the task's `data/<id>/brief.md` and steer a short absolute-path pointer to it.
+The cap is a constant in [`bin/fm-send.sh`](../bin/fm-send.sh) with a per-call `--allow-long` opt-out rather than an environment tunable, so raising it is never the quiet escape from a lost steer; `--key` sends and submit verification are unaffected.
 
 Text for a worker to read and commands that drive a worker's process are separate planes.
 `fm-send.sh` is the data plane and always routing-marks a `kind=secondmate` target, which is right for a message and wrong for a lifecycle command, because a marked exit command arrives as chat the agent reasons about instead of executing.
@@ -120,7 +123,7 @@ Text for a worker to read and commands that drive a worker's process are separat
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means, and `bin/fm-busy-event.sh` is the only writer of the per-task records it reads.
 Every classification returns a verdict of busy, idle, unknown, or dead together with the source that produced it, so a consumer or a diagnostic can never confuse semantic state with a fallback.
 
-Each converted adapter reports its own turn lifecycle through a machine-readable contract the vendor already exposes, rather than through rendered footer text: Pi and pi-signed through the Firstmate-owned extension's `agent_start` and `agent_settled` confirmed by `ctx.isIdle()`, OpenCode through its plugin's semantic `session.status`, Claude through owned `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` hooks, Muse through its session log, and Cursor through its conversation transcript.
+Each converted adapter reports its own turn lifecycle through a machine-readable contract the vendor already exposes, rather than through rendered footer text: Pi and pi-signed through the Firstmate-owned extension's `agent_start` and `agent_settled` confirmed by `ctx.isIdle()`, omp through the same extension contract carried by its own event set because omp emits no `agent_settled`, OpenCode through its plugin's semantic `session.status`, Claude through owned `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` hooks, Muse through its session log, and Cursor through its conversation transcript.
 Kimi behind Pi inherits Pi's lifecycle.
 Codex and standalone Kimi classify unknown behind explicit probes until a semantic source is live-verified for them, and Grok keeps one clearly isolated rendered-tail fallback that can only ever classify a Grok task.
 
@@ -177,6 +180,11 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 `fm-guard.sh` prints the repair command on the next mutable fleet action, while `bin/fm-session-start.sh` reports the same condition through bootstrap as a `TANGLE:` line at session start.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
+Because a freshly cut worktree has no gitignored environments such as `.venv` or `node_modules`, every ship brief then requires installing the project's dependencies right after branch creation, before any tooling or tests, so language servers and test runs work from the start.
+
+Because that worktree is disposable, every firstmate path a brief hands a crewmate is baked in as a resolved absolute path: the firstmate root whose skills and helpers it is told to read, the status file it appends to, and the report or evidence file it is asked for.
+A relative `data/...` path would resolve inside the worktree and be destroyed at cleanup, and the scaffold says so where it names the path; `bin/fm-brief.sh` refuses to scaffold at all rather than bake in a root, data, or state directory it could not resolve to a real absolute path.
+Ship briefs keep worktree isolation as the default and permit that one outside write only when the task section explicitly asks for a report or evidence file, and never over the brief itself, which is also the channel firstmate amends to hand the crewmate a decision.
 
 ## No-mistakes gate authority boundary
 
@@ -200,7 +208,7 @@ The session-start bootstrap step keeps valid dispatch configuration silent unles
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
-That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse while preserving the requested profile for later audit.
+That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, muse, and omp while preserving the requested profile for later audit.
 
 ## Optional secondmates
 
@@ -258,8 +266,13 @@ This repo uses that setting, and its own `.no-mistakes/` directory remains local
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling the forge CLI.
 The helper requires a full canonical URL and rejects malformed URLs or repo override flags before recording merge state.
 A `https://github.com/<owner>/<repo>/pull/<n>` URL invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, and preserves explicit merge-method flags.
+A pull request whose checks are failing is refused rather than merged, and so is one whose check state cannot be read at all, because "not red" has to be an established finding rather than the absence of evidence.
+A repository with no checks configured, checks that are still pending, and a rollup whose every check was skipped or cancelled are all deliberately not red; the last two merge with a note on stderr rather than silently.
+`--allow-red-checks` is the captain-authorized exception to that check state, and it records `merge_checks_override=<reason>` in the task's metadata before merging so the decision stays durable.
 A `https://<host>/<path>/-/merge_requests/<n>` URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) invokes `glab mr merge <n> -R https://<host>/<path>`, so the instance comes from the URL, and adds no merge-method flag because the project's own merge method applies.
 That path merges only after one live read of the merge request confirms it is open, mergeable, conflict-free, with blocking discussions resolved and a successful pipeline at the current head, and it binds the merge to that verified head; recorded metadata is never the authority for those conditions because a rebase leaves it stale.
+Those merge-request conditions are absolute, so `--allow-red-checks` grants no exception to them.
+[`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh)'s header owns the exact rollup classification, the reason each non-failing state is treated as it is, and why the override line is written above the canonical `pr=` block.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
@@ -337,8 +350,14 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 
 `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
-The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
+The update is fast-forward only: dirty, diverged, and offline targets are reported and left untouched.
+A target sitting on another named branch keeps that checkout untouched, and its default branch still catches up when the branch is free and the move is a strict fast-forward; a default branch held by another worktree, or one that has diverged, is reported and left alone.
+Either way the off-default condition itself is still reported, because the checkout keeps running whatever its own branch holds.
+Moving a default branch that a secondmate home shares with the wider firstmate repository belongs to the primary checkout alone; a secondmate sweep reports that ref and leaves it where it is, so convergence never moves the primary's branch under it.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
+The same live update path also refreshes the `omp` harness executable through `bin/fm-omp-update.sh`.
+Because `omp` is a single machine-wide executable, that swap happens only once every worker recorded in this home and in every registered local secondmate home is confirmed stopped; a live worker, an endpoint that cannot be classified, or a home or registry the sweep cannot read is a refusal rather than a reason to proceed, and workers on a remote secondmate's own machine never block the local channel.
+The unattended overnight run stays detect-only (`--check`) and never installs.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
 ## Restart-proof

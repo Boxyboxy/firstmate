@@ -238,9 +238,9 @@ A human-blocked permission dialog has no busy banner and still surfaces.
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.
-The adapter is a thin capture: it hands a bounded ANSI tail plus Herdr's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape - bordered boxes, bare agent-glyph rows (including muse's `⟩`, which the adapter's retired local pattern silently omitted), opencode's left bar, and the Pi separator region this adapter pioneered, admitted only when native `agent get` identity is exactly Pi and state is idle, done, or blocked.
-A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
-Identity stays a lazy second read, consulted only when a separator pair could change the verdict.
+The adapter is a thin capture: it hands a bounded ANSI tail plus Herdr's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape - bordered boxes, bare agent-glyph rows (including muse's `⟩`, which the adapter's retired local pattern silently omitted), opencode's left bar, the Pi separator region this adapter pioneered, admitted only when native `agent get` identity is exactly Pi and state is idle, done, or blocked, and omp's adjacent rounded-arc pair, admitted on the same conjunction with identity exactly omp.
+A working Pi or omp, pending middle row, missing identity, incomplete separator pair, non-adjacent arc pair, or over-tall candidate remains unknown or pending.
+Identity stays a lazy second read, consulted only when a separator pair or arc pair could change the verdict.
 
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.

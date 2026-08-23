@@ -50,10 +50,15 @@
 #     PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
-#     Buffered escalation delivery also has a max-defer alarm: if a digest stays
-#     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
-#     writes state/.subsuper-inject-wedged and attempts a configurable active
-#     alert if submit still cannot be confirmed.
+#     Buffered escalation delivery also has a max-defer escape: if a digest stays
+#     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and,
+#     when submit still cannot be confirmed, escalates the CHANNEL instead of
+#     repeating itself - it publishes the digest to the durable wake queue, which
+#     needs no idle composer, then writes state/.subsuper-inject-wedged and
+#     attempts a configurable active alert. A primary whose supervision IS an
+#     in-turn background job can never present an idle composer while it is
+#     armed, so that durable channel is the only one it has; see
+#     "injection-independent durable delivery" below.
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
@@ -106,8 +111,11 @@
 #                                   docs/configuration.md for its safety gates
 #          FM_MAX_DEFER_SECS        max seconds a buffered escalation may sit
 #                                   undelivered before one normal flush attempt;
-#                                   if that cannot confirm a submit, a wedge
-#                                   alarm fires (default 300; 0 disables)
+#                                   if that cannot confirm a submit, the digest is
+#                                   published to the durable wake queue and a
+#                                   wedge alarm fires (default 300; 0 disables).
+#                                   Doubles as the minimum interval between
+#                                   durable publications.
 #          FM_WEDGE_ALARM_CHANNEL   override config/wedge-alarm with a single
 #                                   active-alert directive for that wedge alarm
 #                                   (off|auto|osascript|herdr|command:<cmd>). An
@@ -183,6 +191,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
 
+# The fleet's shared per-line cap and truncation marker, reused to bound the
+# durable-delivery queue payload below.
+# shellcheck source=bin/fm-line-cap-lib.sh
+. "$FM_DAEMON_DIR/fm-line-cap-lib.sh"
+
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
 # and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
@@ -204,6 +217,31 @@ MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
+# --- injection-independent durable delivery ---------------------------------
+# Pane injection is not a universally available channel. On a primary whose
+# supervision IS an in-turn background job - omp's parked background arm task,
+# per docs/supervision-protocols/omp.md - the supervisor pane is genuinely
+# mid-turn for as long as supervision is armed, so the busy guard correctly
+# refuses every injection and a captain-relevant digest has nowhere left to go.
+# The 2026-08-14 overnight incident sat on three actionable events for 8.2h that
+# way, behind repeated undelivered alarm lines nothing reads.
+#
+# The busy and composer guards are right and stay untouched. What was missing is
+# a second delivery channel that needs no idle composer, and the durable wake
+# queue (bin/fm-wake-lib.sh) already is one: firstmate drains it at the start of
+# every wake-handling turn, a record survives until post-handling
+# acknowledgement, and re-handling is idempotent. A `check` record is the exact
+# fit - a poll result firstmate should wake for, which classification always
+# escalates - so this needs no new queue kind and no second presentation surface.
+#
+# This changes DELIVERY only. Classification is untouched, so every approval
+# boundary in AGENTS.md section 7 is untouched with it: the same digest reaches
+# the same firstmate, which applies the same configured authority to it.
+FM_DURABLE_DELIVERY_KEY="away-undelivered"
+# The queue row is a pre-read pointer, not the record of truth - the escalation
+# buffer and the alarm marker both keep the full text - so a long digest is cut
+# with the fleet's shared truncation marker instead of entering the queue whole.
+DURABLE_PAYLOAD_CAP=800
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
@@ -658,8 +696,70 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  if inject_msg "$msg" "$state"; then
+    : > "$buf"
+    # A confirmed injection ends this undelivered episode: drop the alarm marker
+    # and the durable-publication record so the next episode publishes afresh.
+    rm -f "${buf}.since" "$state/.subsuper-inject-wedged" "$state/.subsuper-durable-published"
+    return 0
+  fi
   return 1
+}
+
+# The wake library resolves its queue paths at SOURCE time from FM_STATE_OVERRIDE,
+# while every function here takes <state> as an argument. Run each queue primitive
+# in a subshell scoped to the requested state so the two conventions can never
+# disagree about which home's queue is being read or written.
+_durable_queue_call() {  # <state> <wake-lib-function> [args...]
+  local state=$1
+  shift
+  FM_STATE_OVERRIDE="$state" bash -c '
+    lib=$1
+    shift
+    . "$lib" || exit 1
+    "$@"
+  ' _ "$FM_DAEMON_DIR/fm-wake-lib.sh" "$@"
+}
+
+# Publish the buffered digest onto the durable wake queue - the delivery channel
+# that needs no idle composer (see "injection-independent durable delivery").
+#
+# Bounded by construction, so a talkative fleet cannot turn one undeliverable
+# digest into hundreds of overnight firstmate turns:
+#   - called only from housekeeping's max-defer escape, which the alarm marker
+#     already throttles to once per FM_MAX_DEFER_SECS window (default 300s), so
+#     this can never fire per poll;
+#   - coalesced into ONE record carrying the whole batched digest, so N buffered
+#     events cost one record rather than N;
+#   - re-published only when the digest CONTENT changed since the last
+#     publication, and the queue's own kind+key dedup (fm_wake_print_deduped)
+#     then presents firstmate exactly one record however many were appended.
+# Returns 0 while a record is queued for firstmate (freshly appended, or already
+# present and current) and 1 when the durable channel itself is unavailable -
+# the one case where the alarm marker and active alert are all that is left.
+escalate_publish_durable() {  # <state> <age-seconds>
+  local state=$1 age=$2 buf n digest hash published payload
+  buf="$state/.subsuper-escalations"
+  [ -s "$buf" ] || return 0
+  n=$(wc -l < "$buf" 2>/dev/null | tr -d '[:space:]') || n=0
+  digest=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
+  hash=$(_hash_text "$digest")
+  published="$state/.subsuper-durable-published"
+  if [ "$(cat "$published" 2>/dev/null || true)" = "$hash" ] \
+    && _durable_queue_call "$state" fm_wake_queued_keys check 2>/dev/null \
+      | grep -qxF "$FM_DURABLE_DELIVERY_KEY"; then
+    return 0
+  fi
+  fm_cap_line_var "$(printf 'check: away-mode escalation undelivered %ss - the supervisor pane could not accept it; %s pre-read event(s): %s (reconcile current state before acting)' \
+    "$age" "$n" "$digest")" "$DURABLE_PAYLOAD_CAP"
+  payload=$FM_LINE_CAP_LINE
+  if ! _durable_queue_call "$state" fm_wake_append check "$FM_DURABLE_DELIVERY_KEY" "$payload"; then
+    log "ERROR: away-mode escalation undelivered ${age}s AND the durable wake queue could not accept it; the alarm marker and active alert are the only remaining signals"
+    return 1
+  fi
+  printf '%s\n' "$hash" > "$published" 2>/dev/null || true
+  log "away-mode escalation routed to the durable wake queue (${n} event(s), undelivered ${age}s); firstmate presents it on its next wake-handling drain"
+  return 0
 }
 
 # --- backend-independent active wedge alert ---------------------------------
@@ -900,8 +1000,20 @@ wedge_alarm_notify() {  # <summary> <marker>
 # configurable backend-independent active alert (wedge_alarm_notify). Nothing
 # is lost - the buffer and the
 # wake-queue both survive - but the stall stops being invisible.
-inject_wedge_alarm() {  # <state> <age-seconds>
-  local state=$1 age=$2 marker target backend max_defer now notify=1
+#
+# <durable-delivery-status> is escalate_publish_durable's verdict: 0 when the
+# digest is queued for firstmate's next drain, 1 (the default, for callers with
+# no durable attempt to report) when this pane's alarm channels are all that is
+# left. It only shapes what the alarm SAYS, so the repeated line names an
+# escalating channel instead of repeating itself for hours.
+inject_wedge_alarm() {  # <state> <age-seconds> [<durable-delivery-status>]
+  local state=$1 age=$2 durable=${3:-1} marker target backend max_defer now notify=1
+  local channel
+  if [ "$durable" -eq 0 ]; then
+    channel="Buffer preserved and the digest is queued on the durable wake queue for firstmate's next wake-handling drain."
+  else
+    channel="Buffer + wake-queue preserved; alarm marker written, and no durable delivery channel is holding this digest."
+  fi
   marker="$state/.subsuper-inject-wedged"
   max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
   # Re-alarm at most once per max-defer window so a long wedge does not spam.
@@ -913,11 +1025,11 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     notify=0
   else
     WEDGE_ALARM_LAST_EPOCH=$now
-    log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
+    log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). $channel"
   fi
   {
     printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
-    printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
+    printf 'The supervisor pane could not accept an escalation. %s Buffered items:\n' "$channel"
     cat "$state/.subsuper-escalations" 2>/dev/null
   } 2>/dev/null > "$marker" || true
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
@@ -935,7 +1047,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.
   if [ "$notify" -eq 1 ]; then
-    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - see $marker" "$marker"
+    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - $channel See $marker" "$marker"
   fi
 }
 
@@ -955,8 +1067,9 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  1) batch flush: if the escalation buffer's oldest content is older than
 #     ESCALATE_BATCH_SECS (or batching is disabled), inject one digest.
 #  1b) max-defer escape: if the buffer is STILL undelivered past MAX_DEFER_SECS,
-#     attempt one normal delivery; if it cannot confirm, raise the wedge alarm.
-#     Never silently defer forever.
+#     attempt one normal delivery; if it cannot confirm, publish the digest to the
+#     durable wake queue and raise the wedge alarm. Never silently defer forever,
+#     and never leave injection as the only channel.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
 #  2b) pause re-surface: for each declared-wait marker past PAUSE_RESURFACE_SECS,
@@ -967,6 +1080,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local durable_status
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -981,21 +1095,25 @@ housekeeping() {  # <state>
   fi
 
   # (1b) max-defer escape. If anything is still buffered past MAX_DEFER_SECS,
-  # retry the normal delivery path. If that still cannot confirm, raise a loud
-  # wedge alarm while preserving the buffer.
+  # retry the normal delivery path. If that still cannot confirm, injection has
+  # demonstrably failed for a whole window, so escalate the CHANNEL - publish to
+  # the durable wake queue, which needs no idle composer - and keep the loud alarm
+  # for the case where even that is unavailable.
   max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
   if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
     oldest=$(_oldest_line_age "$state/.subsuper-escalations")
     # Throttle the alarm to once per max-defer window (the wedge marker doubles
-    # as the throttle). A successful flush clears the buffer; a failed one alarms
-    # and waits.
+    # as the throttle, and so bounds durable publication to the same window). A
+    # successful flush clears the buffer; a failed one publishes, alarms, and waits.
     if [ "$oldest" -ge "$max_defer" ] \
        && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
       if escalate_flush "$state"; then
         log "inject recovered: max-defer flush succeeded after ${oldest}s undelivered"
-        rm -f "$state/.subsuper-inject-wedged"
+        rm -f "$state/.subsuper-inject-wedged" "$state/.subsuper-durable-published"
       else
-        inject_wedge_alarm "$state" "$oldest"
+        durable_status=0
+        escalate_publish_durable "$state" "$oldest" || durable_status=1
+        inject_wedge_alarm "$state" "$oldest" "$durable_status"
       fi
     fi
   fi
@@ -1295,7 +1413,7 @@ handle_wake() {  # <reason> <state>
 
 handle_durable_wakes() {  # <watcher-reason> <state>
   local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest
-  local handled=0 ack_through ack_generation
+  local handled=0 ack_through ack_generation reensure_durable=0 ack_status=0
   out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
   if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
@@ -1309,6 +1427,15 @@ handle_durable_wakes() {  # <watcher-reason> <state>
     case "$epoch" in ''|*[!0-9]*) continue ;; esac
     case "$sequence" in ''|*[!0-9]*) continue ;; esac
     case "$kind" in signal|stale|check|heartbeat) ;; *) continue ;; esac
+    # This daemon's OWN durable delivery record is addressed to firstmate, not to
+    # this classifier. Re-classifying it would copy the digest straight back into
+    # the escalation buffer on every cycle, and the sequence-watermark
+    # acknowledgement below would then consume the one record firstmate is meant
+    # to read. Skip it here and re-publish it after that acknowledgement instead.
+    if [ "$kind" = check ] && [ "$key" = "$FM_DURABLE_DELIVERY_KEY" ]; then
+      reensure_durable=1
+      continue
+    fi
     handle_wake "$payload" "$state"
     handled=$((handled + 1))
   done < "$out"
@@ -1323,7 +1450,15 @@ handle_durable_wakes() {  # <watcher-reason> <state>
     return 1
   fi
   "$FM_DAEMON_DIR/fm-wake-drain.sh" --ack-through "$ack_through" \
-    --recovery-generation "$ack_generation"
+    --recovery-generation "$ack_generation" || ack_status=$?
+  # The acknowledgement above consumed this daemon's own durable delivery record.
+  # Re-ensure it while the digest is still undelivered, so exactly one record for
+  # it survives every daemon cycle rather than being acknowledged into nothing.
+  if [ "$reensure_durable" -eq 1 ] && [ "$ack_status" -eq 0 ] \
+    && [ -s "$state/.subsuper-escalations" ]; then
+    escalate_publish_durable "$state" "$(_oldest_line_age "$state/.subsuper-escalations")" || true
+  fi
+  return "$ack_status"
 }
 
 # --- log --------------------------------------------------------------------

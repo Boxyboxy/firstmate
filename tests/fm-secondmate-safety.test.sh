@@ -48,11 +48,16 @@ SH
 }
 
 test_fm_home_parameterization() {
-  local brief home_one home_two out
+  local brief home_one home_two out state_one
   home_one="$TMP_ROOT/home one"
   home_two="$TMP_ROOT/home-two"
   mkdir -p "$home_one/data" "$home_one/state" "$home_two/data" "$home_two/state"
   printf '%s\n' '- app [local-only +yolo] - test app (added 2026-06-22)' > "$home_one/data/projects.md"
+  # fm-brief.sh resolves every firstmate path it bakes into a scaffold, so the
+  # status file it names is the resolved state dir rather than the literal one
+  # assembled here; the subject of these assertions is the shell quoting of a
+  # home path containing a space.
+  state_one=$(cd "$home_one/state" && pwd)
 
   out=$(FM_HOME="$home_one" "$ROOT/bin/fm-project-mode.sh" app)
   [ "$out" = "local-only on" ] || fail "fm-project-mode did not read projects.md from FM_HOME"
@@ -62,16 +67,16 @@ test_fm_home_parameterization() {
   FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-a app --mode no-mistakes >/dev/null || fail "brief scaffold failed under FM_HOME"
   brief="$home_one/data/task-a/brief.md"
   [ -f "$brief" ] || fail "brief was not written under FM_HOME/data"
-  grep -F ">> '$home_one/state/task-a.status'" "$brief" >/dev/null || fail "brief did not shell-quote FM_HOME state path"
+  grep -F ">> '$state_one/task-a.status'" "$brief" >/dev/null || fail "brief did not shell-quote FM_HOME state path"
 
   FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-b app --scout >/dev/null || fail "scout brief scaffold failed under FM_HOME"
   brief="$home_one/data/task-b/brief.md"
-  grep -F ">> '$home_one/state/task-b.status'" "$brief" >/dev/null || fail "scout brief did not shell-quote FM_HOME state path"
+  grep -F ">> '$state_one/task-b.status'" "$brief" >/dev/null || fail "scout brief did not shell-quote FM_HOME state path"
 
   FM_HOME="$home_one" FM_SECONDMATE_CHARTER='ops domain' "$ROOT/bin/fm-brief.sh" task-c --secondmate app >/dev/null \
     || fail "secondmate brief scaffold failed under FM_HOME"
   brief="$home_one/data/task-c/brief.md"
-  grep -F ">> '$home_one/state/task-c.status'" "$brief" >/dev/null || fail "secondmate brief did not shell-quote FM_HOME state path"
+  grep -F ">> '$state_one/task-c.status'" "$brief" >/dev/null || fail "secondmate brief did not shell-quote FM_HOME state path"
 
   printf 'project=x\n' > "$home_one/state/task-a.meta"
   FM_HOME="$home_one" FM_GUARD_GRACE=999999 "$ROOT/bin/fm-pr-check.sh" task-a https://github.com/example/repo/pull/1 >/dev/null 2>/dev/null \

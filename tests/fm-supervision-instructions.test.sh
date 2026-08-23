@@ -108,6 +108,16 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_contains "$out" "Grok tracked background task" "grok recovery line lost its tracked background repair"
   assert_contains "$out" "bin/fm-watch-arm.sh" "grok recovery line lost the arm command"
 
+  out=$("$RENDER" --harness omp)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "re-arm" "omp ordinary-wake line does not tell the model to re-arm"
+  assert_contains "$ordinary" "omp background async job" "omp ordinary-wake line fell through to the generic continuation"
+  assert_contains "$ordinary" "bin/fm-watch-arm.sh" "omp ordinary-wake line lost the background arm command"
+  assert_contains "$ordinary" "command deadline disabled" "omp ordinary-wake line lost the deadline-disabled arm requirement"
+  out=$("$RENDER" --harness omp --repair-line)
+  assert_contains "$out" "omp background async job" "omp recovery line lost its background async repair"
+  assert_contains "$out" "command deadline disabled" "omp recovery line lost the deadline-disabled arm requirement"
+
   out=$("$RENDER" --harness codex)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
   assert_contains "$ordinary" "next foreground" "codex ordinary-wake line lost its foreground checkpoint"
@@ -176,6 +186,39 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
+test_omp_is_background_notify() {
+  local out
+  out=$("$RENDER" --harness omp)
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: omp" "omp heading missing"
+  assert_contains "$out" "Mode: omp background-notify supervision." "omp snippet missing background-notify mode line"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "omp snippet missing the watcher arm step"
+  assert_contains "$out" "command deadline is disabled" \
+    "omp snippet does not require arming with the command deadline disabled, so a quiet fleet loses the wake delivery path"
+  assert_not_contains "$out" "Mode: Unknown harness fallback." "omp resolved the unknown fallback instead of omp.md"
+  assert_not_contains "$out" "__FM_X_MODE_ENV" "renderer leaked an x-mode path placeholder when x-mode is off"
+  pass "omp supervision is background-notify (fm-watch-arm.sh), not the unknown fallback, no x-mode leak"
+}
+
+test_omp_command_sources_effective_config() {
+  local home config out
+  home="$TMP_ROOT/omp-home"
+  config="$TMP_ROOT/omp-config"
+  mkdir -p "$home/state" "$config"
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness omp --x-mode 1)
+  assert_contains "$out" "$config/x-mode.env" "omp x-mode snippet did not render the effective config path"
+  pass "omp supervision snippet substitutes the effective x-mode config path"
+}
+
+test_omp_repair_line_is_background_notify() {
+  local home out
+  home="$TMP_ROOT/omp-repair-home"
+  mkdir -p "$home/state" "$home/config"
+  out=$(FM_HOME="$home" "$RENDER" --harness omp --repair-line)
+  assert_contains "$out" "bin/fm-watch-arm.sh" "omp repair line missing the background-notify watcher arm"
+  assert_not_contains "$out" "session-start block for this harness" "omp repair line fell through to the generic fallback"
+  pass "omp repair line is the tailored background-notify arm, not the generic fallback"
+}
+
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
@@ -185,3 +228,6 @@ test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path
+test_omp_is_background_notify
+test_omp_command_sources_effective_config
+test_omp_repair_line_is_background_notify
