@@ -73,11 +73,11 @@ Refresh the hints whenever the serial lane gains scripts, rather than waiting fo
 
 | Lane | Script count | Estimated duration |
 |---|---:|---:|
-| `portable-serial-1of4` | 29 | 638602 ms (~638.6 s) |
-| `portable-serial-2of4` | 28 | 638594 ms (~638.6 s) |
-| `portable-serial-3of4` | 30 | 638607 ms (~638.6 s) |
-| `portable-serial-4of4` | 30 | 638591 ms (~638.6 s) |
-| imbalance | | 16 ms |
+| `portable-serial-1of4` | 31 | 663607 ms (~663.6 s) |
+| `portable-serial-2of4` | 31 | 663604 ms (~663.6 s) |
+| `portable-serial-3of4` | 30 | 663589 ms (~663.6 s) |
+| `portable-serial-4of4` | 30 | 663594 ms (~663.6 s) |
+| imbalance | | 18 ms |
 
 The single longest script, `tests/fm-pr-check-security.test.sh` at 250417 ms, is the floor for any shard count.
 
@@ -108,11 +108,13 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 
 ## Timeouts
 
-| Lane | Bound | Rationale |
-|---|---|---|
-| portable parallel 1/2 | job `timeout-minutes: 10` | The measured shard sums are about three minutes and the timeout is a hang tripwire. |
-| portable serial 1-4 | job `timeout-minutes: 20` | Each balanced shard is about eleven minutes of measured script time, leaving roughly 2x hang-tripwire margin for job setup and runner-speed spread. |
-| Herdr | family-run step `timeout-minutes: 20`; job `timeout-minutes: 75` backstop | Healthy runs finish around 7 minutes, so the step bound is the hang tripwire (cleanup and timing artifacts still upload) while the job cap stays a last-resort backstop. |
+| Lane | Bound |
+|---|---|
+| portable parallel 1/2 | job `timeout-minutes: 15`; per-script `--timeout 540` passed by the step |
+| portable serial 1-4 | job `timeout-minutes: 35`; per-script bound 900s (the runner default) |
+| Herdr | family-run step `timeout-minutes: 25`; job `timeout-minutes: 75` backstop; per-script bound 900s (the runner default) |
 
 Timeouts are hang tripwires rather than expected healthy durations.
+A job or step cap only lets the per-script bound name a wedged file when the cap outlives setup plus the work before the wedge plus the bound, so a bound smaller than the cap is necessary but not sufficient.
 `.github/workflows/ci.yml` owns the exact numbers.
+`SCRIPT_TIMEOUT_DEFAULT` in `bin/fm-test-run.sh` owns the per-script bound, that rule, and each lane's derivation against measured CI walls, including which lane's measured wall binds each cap.

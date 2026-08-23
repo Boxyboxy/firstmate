@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Contract tests for bin/fm-test-run.sh - the single owner of behavior suite
-# selection, portable lane composition, proven-isolated --jobs, timing markers,
-# JSON artifacts, coverage guard, and aggregate exit status.
+# selection, portable lane composition, proven-isolated --jobs, the hard
+# per-script bound, timing markers, JSON artifacts, coverage guard, and
+# aggregate exit status.
 #
 # These tests intentionally exercise the runner with fixtures, --list, and
 # focused scheduler checks, not the complete Firstmate suite.
@@ -9,6 +10,10 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# The hang tests bound the runner itself, so a broken per-script bound reports
+# here instead of wedging this suite.
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 RUNNER="$ROOT/bin/fm-test-run.sh"
 
@@ -93,6 +98,9 @@ init_changed_fixture_repo() {
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
+  # The runner sources the shared bounded-execution owner; a fixture repo
+  # without it cannot start.
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   for script in \
     fm-brief.test.sh \
     fm-ask-user-authority.test.sh \
@@ -190,13 +198,13 @@ test_empty_selection_emits_summary() {
   printf 'documentation only\n' >"$repo/README.md"
   out=$(cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --json "$tmp/artifacts/timing.json" 2>"$tmp/err") \
     || fail "empty valid changed selection must pass"
-  [ "$out" = "FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0" ] \
+  [ "$out" = "FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0 timed_out=0" ] \
     || fail "empty selection summary is missing or non-deterministic: $out"
   json="$tmp/artifacts/timing.json"
   python3 -c '
 import json, sys
 doc = json.load(open(sys.argv[1]))
-assert doc["summary"] == {"duration_ms": 0, "failed": 0, "skipped_gate": 0, "total": 0}
+assert doc["summary"] == {"duration_ms": 0, "failed": 0, "skipped_gate": 0, "timed_out": 0, "total": 0}
 assert doc["scripts"] == []
 assert doc["families"] == []
 ' "$json" || { rm -rf "$tmp"; fail "empty selection JSON summary is wrong"; }
@@ -507,6 +515,7 @@ test_jobs_parallel_scheduler_and_failure_propagation() {
   d=tests/fm-supervision-instructions.test.sh
   mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
   cp "$RUNNER" "$runner"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   cat >"$fake_bin/stat" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "-c" ] && [ "$2" = "%a" ]; then
@@ -629,7 +638,9 @@ SH
 
 test_herdr_ci_family_run_has_a_step_timeout() {
   # The required Herdr lane's hang tripwire is the family-run *step* bound, not
-  # the 75-minute job cap. Parse the workflow as YAML so nested `with.name`
+  # the 75-minute job cap. The step cap has to clear the lane's healthy wall plus
+  # the runner's per-script bound, so the bound can fire and name the wedged file
+  # before the step is cancelled. Parse the workflow as YAML so nested `with.name`
   # artifact keys cannot masquerade as the step contract.
   command -v ruby >/dev/null 2>&1 \
     || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
@@ -654,11 +665,11 @@ puts JSON.generate(
     || fail "could not read step timeout from parsed workflow"
   [ "$job_timeout" = 75 ] \
     || fail "tests-herdr job backstop must stay 75 minutes, got $job_timeout"
-  [ "$step_timeout" = 20 ] \
-    || fail "family-run step timeout must be 20 minutes, got $step_timeout"
+  [ "$step_timeout" = 25 ] \
+    || fail "family-run step timeout must be 25 minutes, got $step_timeout"
   [ "$step_timeout" -lt "$job_timeout" ] \
     || fail "family-run step timeout must be below the job backstop"
-  pass "Herdr CI family-run step times out at 20 min under a 75 min job backstop"
+  pass "Herdr CI family-run step times out at 25 min under a 75 min job backstop"
 }
 
 test_aggregate_json() {
@@ -703,6 +714,248 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+# The 2026-08-22 defect: a wedged test file consumed a whole run silently. The
+# fixtures below block the way a real hang does - a read on a fifo nobody ever
+# writes - rather than sleeping, so neither a loaded machine nor a kill that
+# only knows how to stop `sleep` can make these pass vacuously.
+write_hang_fixture() {  # <path>
+  cat >"$1" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fixture reached its block"
+mkfifo "$FIXTURE_FIFO"
+# A grandchild in its own right: it must not outlive the bound either.
+bash -c 'exec cat "$FIXTURE_FIFO"' &
+printf '%s\n' "$!" > "$FIXTURE_CHILD_PID"
+IFS= read -r _ < "$FIXTURE_FIFO"
+echo "not reached"
+SH
+  chmod +x "$1"
+}
+
+test_per_script_timeout_reports_a_hang_instead_of_absorbing_it() {
+  local tmp fixture out json rc child bound=3 outer=90 waited=0
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-hang.XXXXXX")
+  fixture="$tmp/hang.test.sh"
+  out="$tmp/out.txt"
+  json="$tmp/timing.json"
+  write_hang_fixture "$fixture"
+  set +e
+  # The outer bound only exists so a broken guard reports here instead of
+  # wedging this suite the same way it wedged the run being fixed.
+  FIXTURE_FIFO="$tmp/block.fifo" FIXTURE_CHILD_PID="$tmp/child.pid" \
+    fm_run_timed "$outer" "$RUNNER" --timeout "$bound" --json "$json" "$fixture" \
+    >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 124 ] || { rm -rf "$tmp"; fail "the runner itself outran ${outer}s: the per-script bound did not fire"; }
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "a timed-out script must make the run fail, got exit 0"; }
+  grep -Fq 'ok - fixture reached its block' "$out" \
+    || { rm -rf "$tmp"; fail "the fixture never reached its block, so nothing was bounded: $(cat "$out")"; }
+  grep -Eq "^FM_TEST_END .+ $fixture exit=124 duration_ms=[0-9]+ gate_skip=false\$" "$out" \
+    || { rm -rf "$tmp"; fail "END must record exit=124 for a bounded script: $(grep '^FM_TEST_END' "$out")"; }
+  grep -Eq "^FM_TEST_TIMEOUT .+ $fixture bound_s=$bound\$" "$out" \
+    || { rm -rf "$tmp"; fail "the timed-out file was not named on a FM_TEST_TIMEOUT marker: $(cat "$out")"; }
+  grep -q 'FM_TEST_SUMMARY total=1 failed=1 skipped_gate=0' "$out" \
+    || { rm -rf "$tmp"; fail "hang must be counted as a failure: $(grep FM_TEST_SUMMARY "$out")"; }
+  grep -Eq 'FM_TEST_SUMMARY .* timed_out=1$' "$out" \
+    || { rm -rf "$tmp"; fail "summary must count the timed-out script: $(grep FM_TEST_SUMMARY "$out")"; }
+  grep -Fq 'hard bound hit' "$tmp/err.txt" \
+    || { rm -rf "$tmp"; fail "the bound was not reported on stderr: $(cat "$tmp/err.txt")"; }
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["scripts"][0]["exit"] == 124, doc["scripts"]
+assert doc["scripts"][0]["timed_out"] is True, doc["scripts"]
+assert doc["summary"]["timed_out"] == 1, doc["summary"]
+assert doc["summary"]["failed"] == 1, doc["summary"]
+' "$json" || { rm -rf "$tmp"; fail "JSON timeout accounting is wrong"; }
+  # The whole process group goes, not just the direct child: a hung grandchild
+  # left behind is how one wedged file keeps consuming the machine.
+  child=$(cat "$tmp/child.pid" 2>/dev/null || true)
+  [ -n "$child" ] || { rm -rf "$tmp"; fail "fixture never recorded its grandchild pid"; }
+  while kill -0 "$child" 2>/dev/null && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$child" 2>/dev/null; then
+    kill -KILL "$child" 2>/dev/null || true
+    rm -rf "$tmp"
+    fail "the bound left the fixture's grandchild $child running"
+  fi
+  rm -rf "$tmp"
+  pass "a hung script is bounded, named, and counted instead of consuming the run"
+}
+
+test_per_script_timeout_bounds_parallel_workers_too() {
+  local tmp repo runner fixture out rc bound=3 outer=90
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-hang-jobs.XXXXXX")
+  out="$tmp/out.txt"
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  # A proven-isolated path so --jobs accepts the selection.
+  fixture=tests/fm-brief.test.sh
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
+  chmod +x "$runner"
+  write_hang_fixture "$repo/$fixture"
+  set +e
+  FIXTURE_FIFO="$tmp/block.fifo" FIXTURE_CHILD_PID="$tmp/child.pid" \
+    fm_run_timed "$outer" "$runner" --jobs 2 --timeout "$bound" "$fixture" \
+    >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 124 ] || { rm -rf "$tmp"; fail "the parallel scheduler outran ${outer}s: workers are unbounded"; }
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "a timed-out parallel worker must fail the run, got exit 0"; }
+  grep -Eq "^FM_TEST_TIMEOUT .+ $fixture bound_s=$bound\$" "$out" \
+    || { rm -rf "$tmp"; fail "parallel path did not name the timed-out file: $(cat "$out")"; }
+  grep -Eq 'FM_TEST_SUMMARY .* timed_out=1$' "$out" \
+    || { rm -rf "$tmp"; fail "parallel summary must count the timed-out script: $(grep FM_TEST_SUMMARY "$out")"; }
+  rm -rf "$tmp"
+  pass "the per-script bound applies to parallel workers, not only the serial path"
+}
+
+# A bound that could not be established is not a hang. fm-timeout-lib.sh returns
+# 125 for it, and the runner must record an ordinary failure: no FM_TEST_TIMEOUT
+# marker, no timed_out count anywhere, and no "hard bound hit" claim. The concrete
+# state is a full or read-only TMPDIR, where every selected script would return
+# that status within milliseconds; counting it as a bound hit would report a
+# whole run of full-length hangs that never happened and send the next person
+# hunting one. The mktemp shim injects exactly that failure into the bounded
+# call without disturbing the runner's own scratch space, and the documented
+# mechanism override pins the dependency-free branch so the injected failure is
+# reached on every host rather than only where mktemp is on the bound's path.
+test_bound_setup_failure_fails_the_run_without_claiming_a_timeout() {
+  local tmp fixture out json shim real_mktemp rc bound=30 outer=90
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-nobound.XXXXXX")
+  fixture="$tmp/nobound.test.sh"
+  out="$tmp/out.txt"
+  json="$tmp/timing.json"
+  shim="$tmp/shim"
+  real_mktemp=$(command -v mktemp) \
+    || { rm -rf "$tmp"; fail "no mktemp on PATH to delegate to"; }
+  mkdir -p "$shim"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - the script ran even though its bound could never be established"
+SH
+  chmod +x "$fixture"
+  cat >"$shim/mktemp" <<SH
+#!/usr/bin/env bash
+# Fail only the bound's own scratch file, the way a full or read-only TMPDIR
+# would; everything else the run needs still gets a real temporary file.
+for arg in "\$@"; do
+  case "\$arg" in
+    *fm-bash-timeout-command*|*fm-timeout-status*)
+      echo "mktemp: no space left on device" >&2
+      exit 1
+      ;;
+  esac
+done
+exec $real_mktemp "\$@"
+SH
+  chmod +x "$shim/mktemp"
+  set +e
+  # The outer bound only exists so a broken guard reports here instead of
+  # wedging this suite.
+  fm_run_timed "$outer" env "PATH=$shim:$PATH" FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    "$RUNNER" --timeout "$bound" --json "$json" "$fixture" >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 124 ] || { rm -rf "$tmp"; fail "the runner itself outran ${outer}s"; }
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$tmp"; fail "a script whose bound could not be established must fail the run, got exit 0"; }
+  if grep -Fq 'not ok - the script ran' "$out"; then
+    rm -rf "$tmp"
+    fail "the script must not run when its bound could not be established"
+  fi
+  grep -Eq "^FM_TEST_END .+ $fixture exit=125 duration_ms=[0-9]+ gate_skip=false\$" "$out" \
+    || { rm -rf "$tmp"; fail "END must record exit=125: $(grep '^FM_TEST_END' "$out")"; }
+  if grep -q '^FM_TEST_TIMEOUT' "$out"; then
+    rm -rf "$tmp"
+    fail "a bound that was never established must not be named as a timeout: $(grep '^FM_TEST_TIMEOUT' "$out")"
+  fi
+  grep -q 'FM_TEST_SUMMARY total=1 failed=1 skipped_gate=0' "$out" \
+    || { rm -rf "$tmp"; fail "it must still be counted as a failure: $(grep FM_TEST_SUMMARY "$out")"; }
+  grep -Eq 'FM_TEST_SUMMARY .* timed_out=0$' "$out" \
+    || { rm -rf "$tmp"; fail "summary must not count it as timed out: $(grep FM_TEST_SUMMARY "$out")"; }
+  if grep -Fq 'hard bound hit' "$tmp/err.txt"; then
+    rm -rf "$tmp"
+    fail "the runner claimed a bound hit that never happened: $(cat "$tmp/err.txt")"
+  fi
+  grep -Fq 'bound not established' "$tmp/err.txt" \
+    || { rm -rf "$tmp"; fail "the real cause was not reported on stderr: $(cat "$tmp/err.txt")"; }
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["scripts"][0]["exit"] == 125, doc["scripts"]
+assert doc["scripts"][0]["timed_out"] is False, doc["scripts"]
+assert doc["summary"]["timed_out"] == 0, doc["summary"]
+assert doc["summary"]["failed"] == 1, doc["summary"]
+' "$json" || { rm -rf "$tmp"; fail "JSON accounting must record a failure and no timeout"; }
+  rm -rf "$tmp"
+  pass "a bound that could not be established fails the run without being reported as a hang"
+}
+
+test_per_script_timeout_cannot_be_disabled() {
+  local tmp rc bad
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-bound.XXXXXX")
+  # 0 is not a bound: `timeout 0` and the perl fallback's `alarm 0` both
+  # disable the deadline (bin/fm-timeout-lib.sh), so it must be refused rather
+  # than silently running the suite unguarded.
+  for bad in 0 abc -1 ''; do
+    set +e
+    "$RUNNER" --timeout "$bad" --list --all >"$tmp/out" 2>"$tmp/err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 2 ] \
+      || { rm -rf "$tmp"; fail "--timeout '$bad' must be refused with exit 2, got $rc"; }
+  done
+  "$RUNNER" --timeout 1 --list --all >"$tmp/out" 2>"$tmp/err" \
+    || { rm -rf "$tmp"; fail "--timeout 1 must be accepted: $(cat "$tmp/err")"; }
+  rm -rf "$tmp"
+  pass "the per-script bound refuses every non-bound and cannot be turned off"
+}
+
+test_selected_scripts_get_an_at_eof_stdin() {
+  local tmp fixture fifo holder rc out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-stdin.XXXXXX")
+  fixture="$tmp/stdin.test.sh"
+  out="$tmp/out.txt"
+  fifo="$tmp/never-eof.fifo"
+  # The 2026-08-22 defect's real mechanism: a test that reads the ambient stdin
+  # passes in CI, where stdin is already closed, and blocks forever under a
+  # terminal or an agent's open pipe. The fixture blocks on exactly that read,
+  # so it can only finish if the runner handed it an at-EOF stdin.
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+if IFS= read -r _; then
+  echo "not ok - the runner handed this script a readable stdin"
+  exit 1
+fi
+echo "ok - stdin was at end of file"
+SH
+  chmod +x "$fixture"
+  mkfifo "$fifo"
+  # A live writer that never writes and never closes: the read has no EOF to
+  # find unless the runner replaces it.
+  sleep 120 >"$fifo" &
+  holder=$!
+  exec 8<"$fifo"
+  set +e
+  fm_run_timed 60 "$RUNNER" --timeout 30 "$fixture" <&8 >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  exec 8<&-
+  kill "$holder" 2>/dev/null || true
+  [ "$rc" -ne 124 ] || { rm -rf "$tmp"; fail "the runner blocked on its own stdin instead of isolating the script's"; }
+  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "stdin isolation fixture failed (exit $rc): $(cat "$out")"; }
+  grep -Fq 'ok - stdin was at end of file' "$out" \
+    || { rm -rf "$tmp"; fail "the script did not see an at-EOF stdin: $(cat "$out")"; }
+  rm -rf "$tmp"
+  pass "every selected script runs with stdin at end of file, never the launcher's"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -721,3 +974,8 @@ test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
+test_per_script_timeout_reports_a_hang_instead_of_absorbing_it
+test_per_script_timeout_bounds_parallel_workers_too
+test_per_script_timeout_cannot_be_disabled
+test_bound_setup_failure_fails_the_run_without_claiming_a_timeout
+test_selected_scripts_get_an_at_eof_stdin

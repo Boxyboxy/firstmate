@@ -42,20 +42,44 @@
 #                   selected script is in the proven-isolated set
 #                   (bin/fm-test-isolation-proof.sh --list). Cap is 8. Stateful
 #                   families never schedule under --jobs.
+#   --timeout S     hard per-script bound in seconds (default 900). A script
+#                   that outruns it is killed with its whole process group,
+#                   recorded as exit=124, and named on a FM_TEST_TIMEOUT
+#                   marker, so a hung test reports instead of consuming the
+#                   run. Must be a positive integer; there is no way to
+#                   disable the bound. One bound does not fit every lane: the
+#                   default is sized for the portable-serial and real-Herdr
+#                   job caps, so a lane running under a tighter CI job cap
+#                   passes its own smaller bound (see SCRIPT_TIMEOUT_DEFAULT).
+#                   A script recorded as exit=125 did not hang: the bound
+#                   could not be established, so it is an ordinary failure and
+#                   is never counted as timed_out.
 #   -h, --help      print this header
 #
 # Per-script machine-parseable markers (stdout):
 #   FM_TEST_BEGIN <iso8601> <script> family=<family> expected_gate_skip=<class>
 #   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false>
+#   FM_TEST_TIMEOUT <iso8601> <script> bound_s=<n>   (only for a timed-out script)
 #
 # After all scripts (stdout):
-#   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
+#   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n> timed_out=<n>
 #   FM_TEST_SUMMARY_FAMILY family=<name> count=<n> duration_ms=<n> failed=<n>
 #   FM_TEST_SLOWEST rank=<k> script=<path> duration_ms=<n>
 #
-# Exit status is non-zero if any selected script exits non-zero or a configured
-# --fail-on-gate-skip token appears. Other gate skips (first meaningful line
-# matching ^skip:) remain successful and are counted as skipped_gate.
+# Exit status is non-zero if any selected script exits non-zero, outruns the
+# per-script bound, or a configured --fail-on-gate-skip token appears. Other
+# gate skips (first meaningful line matching ^skip:) remain successful and are
+# counted as skipped_gate.
+#
+# The per-script bound is a hang guard, not a performance gate: it is deliberately
+# far above any legitimate script so only a wedged test can reach it. Bounded
+# execution itself is owned by bin/fm-timeout-lib.sh.
+#
+# Every selected script also runs with stdin at end of file, alongside the
+# private TMPDIR and unset FM_* overrides the parallel path already applies.
+# A test must never depend on the ambient stdin of whoever launched the suite:
+# CI closes stdin while a terminal or an agent's open pipe does not, so a test
+# that reads stdin would pass CI and block indefinitely elsewhere.
 #
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
@@ -73,6 +97,11 @@ set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# Bounded execution has one owner; do not re-derive the coreutils/BSD/perl/bash
+# selection here.
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+
 MODE=
 LIST_ONLY=0
 LIST_FAMILIES=0
@@ -88,6 +117,81 @@ EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
 JOBS=1
 JOBS_MAX=8
+
+# Hard per-script bound, calibrated as a hang tripwire rather than a
+# performance gate. The slowest scripts measured in isolation on 2026-08-22
+# (macOS, Apple M5) were fm-pr-check-security 387s, fm-secondmate-safety 306s,
+# fm-session-start 220s, and fm-bootstrap 215s, so this leaves better than 2x
+# headroom over the slowest one. fm-remote-secondmate-lifecycle-e2e joined that
+# group on 2026-08-23 at 289s isolated, once its stdin block stopped making it
+# unmeasurable; it reached 572s in a full run competing with other work, which
+# is the closest any script has come to this bound and the reason the margin is
+# stated against a loaded machine rather than an idle one. The CI timing
+# artifact's slowest is fm-pr-check-security at 250s.
+#
+# Whether this bound can fire at all is a property of the CI lane, not of the
+# bound. The rule any lane has to satisfy, now and when the next one is added:
+#
+#   job (or step) cap > setup + the work that runs before the wedge + the bound
+#
+# because the job clock starts at checkout, not at the wedged script. A bound
+# smaller than the cap is necessary but not sufficient: under a 20-minute cap a
+# 900s bound only fires for a wedge that starts early in the lane, and a later
+# one is cancelled by GitHub first with no FM_TEST_TIMEOUT marker, no file
+# named, and timed_out still 0.
+#
+# The per-lane figures below are measured rather than estimated: the worst
+# observation per lane across three green CI runs on Boxyboxy/firstmate
+# (32629214566, 32624889561, 32409653841), read from each job's own step
+# timings. Setup is cheap on these runners - checkout at fetch-depth 0 takes
+# about 2s and each pinned install 0-6s - so it costs 5-8s on the parallel
+# lanes, 6-10s on the serial lanes, and 4-5s ahead of the Herdr family step.
+# An earlier estimate here recorded 90-150s of setup, which was roughly twenty
+# times the real cost; do not reintroduce an estimate where a green run can be
+# read. How each lane in .github/workflows/ci.yml satisfies the rule:
+#
+# - tests-portable-parallel-1 and -2: worst measured wall 149s, because the
+#   Herdr suite gate-skips on a runner without the CLI, worst setup 8s, and the
+#   steps pass an explicit --timeout 540. 8 + 149 + 540 = 697s, so both cap at
+#   15 minutes (900s). They capped at 10 (600s), which failed the rule even for
+#   a wedge on the lane's first script, where 0 + 540 already leaves under 60s
+#   of room.
+# - tests-herdr's family-run step: a step cap's clock starts at the step, so
+#   setup falls outside it. Worst measured family wall 411s plus the 900s bound
+#   is 1311s, so that step caps at 25 minutes (1500s), still far below the
+#   lane's 75-minute job backstop so cleanup and artifact upload still run.
+# - tests-portable-serial: worst setup 10s, and worst measured shard walls of
+#   649s, 695s, 943s and 617s for shards 1 through 4, so the four shards need
+#   1557s, 1602s, 1853s and 1527s. All four clear the 35-minute (2100s) cap.
+#   Shard 3 is the binding one and clears it by 247s, headroom comparable to
+#   the ~200s the portable-parallel lanes carry. 35 minutes was itself a raise
+#   from 30 (1800s), which shards 1, 2 and 4 cleared but shard 3 did not: under
+#   1800s a wedge had to start within that shard's first ~890s to be named, so
+#   a wedge in the last ~53s of its healthy timeline was cancelled by GitHub
+#   with no FM_TEST_TIMEOUT marker and no file named. 30 was in turn a raise
+#   from 20 (1200s), which left the bound blind for most of every shard's
+#   timeline in the lane that holds the stateful hang-prone scripts: watcher,
+#   lock, AFK, tmux, daemon. Shard 3 is also the shard
+#   portable_serial_weight_hints most understates - it estimates 664s against
+#   693-943s observed - so refreshing those hints from a green run
+#   (docs/fm-test-portable-shards.md owns that procedure) would rebalance the
+#   lane rather than only widen its cap.
+#
+# 540s for the portable-parallel lanes is derived from the slowest single script
+# either lane can run, not from the lane wall, because the bound is per script:
+# tests/fm-backend-herdr.test.sh at 323s (322.7s in the final full run, 326.3s in
+# an earlier full run on the same macOS Apple M5 host, both full --all runs with
+# no competing work). That figure comes from a host where the Herdr CLI is
+# installed and the gated suite really executes; on a CI runner without it the
+# suite gate-skips, which is why the measured shard wall there is only 87-149s.
+# The bound has to be safe on both, so it is derived from the host
+# where the suite runs. Whole-lane serial sums on that host, for context:
+# portable-parallel-1 213s across 11 scripts, portable-parallel-2 469s across 13.
+# 540s leaves 1.67x headroom over the 323s worst case, and the 15-minute lane cap
+# derived above is what lets it fire. A round 300s was rejected: it is below the
+# measured worst case and would turn a legitimate slow pass into a false timeout.
+SCRIPT_TIMEOUT_DEFAULT=900
+SCRIPT_TIMEOUT=$SCRIPT_TIMEOUT_DEFAULT
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
@@ -148,6 +252,7 @@ family_for_basename() {
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
+    fm-timeout-lib.test.sh|\
     fm-transition-lib.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
@@ -767,6 +872,7 @@ lanes = []
 all_scripts = []
 failed = 0
 skipped = 0
+timed_out = 0
 total = 0
 wall_ms = 0
 for path in inputs:
@@ -784,6 +890,7 @@ for path in inputs:
     total += int(summary.get("total") or 0)
     failed += int(summary.get("failed") or 0)
     skipped += int(summary.get("skipped_gate") or 0)
+    timed_out += int(summary.get("timed_out") or 0)
     wall_ms = max(wall_ms, int(summary.get("duration_ms") or 0))
     for s in doc.get("scripts") or []:
         row = dict(s)
@@ -801,13 +908,14 @@ agg = {
         "failed": failed,
         "skipped_gate": skipped,
         "critical_path_duration_ms": wall_ms,
+        "timed_out": timed_out,
     },
     "scripts": all_scripts,
     "slowest": all_scripts[:15],
 }
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps(agg, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-print(f"FM_TEST_AGGREGATE lanes={len(lanes)} total={total} failed={failed} skipped_gate={skipped} critical_path_duration_ms={wall_ms}")
+print(f"FM_TEST_AGGREGATE lanes={len(lanes)} total={total} failed={failed} skipped_gate={skipped} critical_path_duration_ms={wall_ms} timed_out={timed_out}")
 PY
 }
 
@@ -1194,15 +1302,16 @@ write_json_artifact() {
   local selection=$9
   local records_file=${10}
   local families_file=${11}
+  local timed_out=${12}
 
   if ! command -v python3 >/dev/null 2>&1; then
     die "--json requires python3 to emit a valid timing artifact"
   fi
 
-  python3 - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$skipped" "$duration" "$selection" "$records_file" "$families_file" <<'PY'
+  python3 - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$skipped" "$duration" "$selection" "$records_file" "$families_file" "$timed_out" <<'PY'
 import json, sys
 
-out, started, finished, run_id, total, failed, skipped, duration, selection, records_file, families_file = sys.argv[1:]
+out, started, finished, run_id, total, failed, skipped, duration, selection, records_file, families_file, timed_out = sys.argv[1:]
 
 scripts = []
 with open(records_file, encoding="utf-8") as fh:
@@ -1210,7 +1319,7 @@ with open(records_file, encoding="utf-8") as fh:
         line = line.rstrip("\n")
         if not line:
             continue
-        path, family, expected, exit_s, dur_s, gate = line.split("\t")
+        path, family, expected, exit_s, dur_s, gate, timed = line.split("\t")
         scripts.append({
             "path": path,
             "family": family,
@@ -1218,6 +1327,7 @@ with open(records_file, encoding="utf-8") as fh:
             "duration_ms": int(dur_s),
             "exit": int(exit_s),
             "gate_skip": gate == "true",
+            "timed_out": timed == "true",
         })
 
 families = []
@@ -1244,6 +1354,7 @@ doc = {
         "failed": int(failed),
         "skipped_gate": int(skipped),
         "duration_ms": int(duration),
+        "timed_out": int(timed_out),
     },
     "scripts": scripts,
     "families": families,
@@ -1322,6 +1433,15 @@ while [ "$#" -gt 0 ]; do
       ;;
     --jobs=*)
       JOBS=${1#--jobs=}
+      shift
+      ;;
+    --timeout)
+      [ "$#" -gt 1 ] || die "--timeout requires a positive integer number of seconds"
+      SCRIPT_TIMEOUT=$2
+      shift 2
+      ;;
+    --timeout=*)
+      SCRIPT_TIMEOUT=${1#--timeout=}
       shift
       ;;
     --list)
@@ -1425,6 +1545,13 @@ esac
 [ "$JOBS" -ge 1 ] || die "--jobs must be >= 1"
 [ "$JOBS" -le "$JOBS_MAX" ] || die "--jobs is capped at $JOBS_MAX (got $JOBS)"
 
+# fm-timeout-lib.sh: a non-positive bound is not a bound, so refuse one rather
+# than silently running the suite unguarded.
+case "$SCRIPT_TIMEOUT" in
+  ''|*[!0-9]*) die "--timeout must be a positive integer number of seconds" ;;
+esac
+[ "$SCRIPT_TIMEOUT" -ge 1 ] || die "--timeout must be >= 1 second (the bound cannot be disabled)"
+
 case "${MODE:-}" in
   all)
     select_all
@@ -1480,7 +1607,7 @@ fi
 
 if [ "${#SCRIPTS[@]}" -eq 0 ]; then
   log "nothing to run"
-  printf 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0\n'
+  printf 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0 timed_out=0\n'
   if [ -n "$JSON_PATH" ]; then
     empty_rec=$(mktemp)
     empty_fam=$(mktemp)
@@ -1488,7 +1615,7 @@ if [ "${#SCRIPTS[@]}" -eq 0 ]; then
     : >"$empty_fam"
     started=$(now_iso)
     mkdir -p "$(dirname "$JSON_PATH")"
-    write_json_artifact "$JSON_PATH" "$started" "$started" "empty" 0 0 0 0 "$SELECTION_DESC" "$empty_rec" "$empty_fam"
+    write_json_artifact "$JSON_PATH" "$started" "$started" "empty" 0 0 0 0 "$SELECTION_DESC" "$empty_rec" "$empty_fam" 0
     rm -f "$empty_rec" "$empty_fam"
   fi
   exit 0
@@ -1521,6 +1648,7 @@ RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
 TOTAL=0
 FAILED=0
 SKIPPED_GATE=0
+TIMED_OUT=0
 AGG_RC=0
 
 # Family accumulators as TSV lines updated in-memory via temp files.
@@ -1556,10 +1684,24 @@ family_bump() {
 
 record_script_result() {
   local script=$1 rc=$2 duration=$3 out=$4 end_iso=$5
-  local base family expected gate_skip fail_delta
+  local base family expected gate_skip fail_delta timed_out
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   expected=$(expected_gate_skip_for_family "$family")
+
+  # fm-timeout-lib.sh's convention: 124 means the hard bound was hit, and 125
+  # means the bound could not be established, so the script never ran and
+  # nothing was timed. Counting 125 as a hang would report a run of fake
+  # ${SCRIPT_TIMEOUT}s timeouts that never happened; it stays an ordinary
+  # failure instead, and the run still fails.
+  timed_out=false
+  if [ "$rc" -eq 124 ]; then
+    timed_out=true
+    TIMED_OUT=$((TIMED_OUT + 1))
+    log "hard bound hit: $script did not finish within ${SCRIPT_TIMEOUT}s and was killed with its process group"
+  elif [ "$rc" -eq 125 ]; then
+    log "bound not established for $script: it never ran and did not time out (most likely a full or unwritable TMPDIR, since the bound needs a scratch file)"
+  fi
 
   if [ -n "$FAIL_ON_GATE_SKIP" ] && detect_gate_skip_token "$out" "$FAIL_ON_GATE_SKIP"; then
     log "required gate skip token seen in $script: skip: $FAIL_ON_GATE_SKIP"
@@ -1574,6 +1716,9 @@ record_script_result() {
 
   printf 'FM_TEST_END %s %s exit=%s duration_ms=%s gate_skip=%s\n' \
     "$end_iso" "$script" "$rc" "$duration" "$gate_skip"
+  if [ "$timed_out" = true ]; then
+    printf 'FM_TEST_TIMEOUT %s %s bound_s=%s\n' "$end_iso" "$script" "$SCRIPT_TIMEOUT"
+  fi
 
   fail_delta=0
   if [ "$rc" -ne 0 ]; then
@@ -1582,8 +1727,8 @@ record_script_result() {
     AGG_RC=1
   fi
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$script" "$family" "$expected" "$rc" "$duration" "$gate_skip" >>"$RECORDS"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$script" "$family" "$expected" "$rc" "$duration" "$gate_skip" "$timed_out" >>"$RECORDS"
   family_bump "$family" "$duration" "$fail_delta"
   TOTAL=$((TOTAL + 1))
 }
@@ -1603,8 +1748,12 @@ run_one_serial() {
 
   set +e
   # Stream live output while retaining a copy for gate-skip detection.
-  # PIPESTATUS[0] is the test script; tee's exit is ignored for aggregate.
-  bash "$script" 2>&1 | tee "$out"
+  # PIPESTATUS[0] is the bounded test script; tee's exit is ignored for aggregate.
+  # stdin is /dev/null so no test can block on the ambient stdin of whoever
+  # launched the suite. CI closes stdin and a terminal or an agent's open pipe
+  # does not, which is how a stdin-blocking test passed CI and still wedged a
+  # local run for hours.
+  fm_run_timed "$SCRIPT_TIMEOUT" bash "$script" </dev/null 2>&1 | tee "$out"
   rc=${PIPESTATUS[0]}
   set -e
   : "${rc:=1}"
@@ -1711,7 +1860,7 @@ else
         FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
-      bash "$script" >"$work/output" 2>&1
+      fm_run_timed "$SCRIPT_TIMEOUT" bash "$script" </dev/null >"$work/output" 2>&1
       rc=$?
       end_ms=$(now_ms)
       duration=$((end_ms - begin_ms))
@@ -1739,8 +1888,8 @@ if [ "$RUN_DURATION" -lt 0 ]; then
   RUN_DURATION=0
 fi
 
-printf 'FM_TEST_SUMMARY total=%s failed=%s skipped_gate=%s duration_ms=%s\n' \
-  "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION"
+printf 'FM_TEST_SUMMARY total=%s failed=%s skipped_gate=%s duration_ms=%s timed_out=%s\n' \
+  "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION" "$TIMED_OUT"
 
 if [ -s "$FAMILIES_TSV" ]; then
   # Stable family summary order by name.
@@ -1753,7 +1902,7 @@ fi
 # Slowest scripts (top 15) from records.
 if [ -s "$RECORDS" ]; then
   rank=1
-  sort -t$'\t' -k5,5nr "$RECORDS" | head -n 15 | while IFS=$'\t' read -r path _family _expected _rc duration _gate; do
+  sort -t$'\t' -k5,5nr "$RECORDS" | head -n 15 | while IFS=$'\t' read -r path _family _expected _rc duration _gate _timed_out; do
     printf 'FM_TEST_SLOWEST rank=%s script=%s duration_ms=%s\n' \
       "$rank" "$path" "$duration"
     rank=$((rank + 1))
@@ -1771,7 +1920,7 @@ if [ -n "$JSON_PATH" ]; then
   write_json_artifact "$JSON_PATH" \
     "$RUN_STARTED_ISO" "$RUN_FINISHED_ISO" "$RUN_ID" \
     "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION" \
-    "$SELECTION_DESC" "$RECORDS" "$FAMILIES_TSV"
+    "$SELECTION_DESC" "$RECORDS" "$FAMILIES_TSV" "$TIMED_OUT"
   log "wrote timing artifact: $JSON_PATH"
 fi
 

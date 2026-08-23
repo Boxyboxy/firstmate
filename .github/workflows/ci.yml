@@ -52,9 +52,12 @@ jobs:
   tests-portable-parallel-1:
     name: Behavior portable parallel 1
     runs-on: ubuntu-latest
-    # Measured shard wall is ~1 min of serial sum on proven scripts; this cap is
-    # a hang tripwire with margin, not the expected healthy end of the lane.
-    timeout-minutes: 10
+    # Hang tripwire, not the expected healthy end of the lane. The per-script
+    # bound only fires if the job outlives it, so this cap must clear setup plus
+    # the work before the wedge plus the bound, not merely the bound. That rule
+    # and this lane's measured derivation are owned by SCRIPT_TIMEOUT_DEFAULT in
+    # bin/fm-test-run.sh; do not re-derive them here.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
@@ -75,10 +78,15 @@ jobs:
           npm install -g tasks-axi
           tasks-axi --version
       - name: Run portable parallel shard 1
+        # Explicit per-script bound: the runner's 900s default cannot fire under
+        # this job's 15-minute cap, so GitHub would cancel the job before the
+        # bound could name the wedged file. 540 is the shared portable-parallel
+        # bound; its derivation belongs to SCRIPT_TIMEOUT_DEFAULT in
+        # bin/fm-test-run.sh.
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-parallel-1 \
+          bin/fm-test-run.sh --lane portable-parallel-1 --timeout 540 \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
       - name: Upload shard 1 timing artifact
         if: always()
@@ -91,7 +99,12 @@ jobs:
   tests-portable-parallel-2:
     name: Behavior portable parallel 2
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Hang tripwire, not the expected healthy end of the lane. The per-script
+    # bound only fires if the job outlives it, so this cap must clear setup plus
+    # the work before the wedge plus the bound, not merely the bound. That rule
+    # and this lane's measured derivation are owned by SCRIPT_TIMEOUT_DEFAULT in
+    # bin/fm-test-run.sh; do not re-derive them here.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
@@ -112,10 +125,15 @@ jobs:
           npm install -g tasks-axi
           tasks-axi --version
       - name: Run portable parallel shard 2
+        # Explicit per-script bound: the runner's 900s default cannot fire under
+        # this job's 15-minute cap, so GitHub would cancel the job before the
+        # bound could name the wedged file. 540 is the shared portable-parallel
+        # bound; its derivation belongs to SCRIPT_TIMEOUT_DEFAULT in
+        # bin/fm-test-run.sh.
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-parallel-2 \
+          bin/fm-test-run.sh --lane portable-parallel-2 --timeout 540 \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-2.json"
       - name: Upload shard 2 timing artifact
         if: always()
@@ -134,10 +152,12 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # Measured whole remainder is ~42 min of serial work; the balanced shards
-    # are ~10.6 min each. Cap is a hang tripwire with roughly 2x margin, not the
-    # expected healthy end of the lane.
-    timeout-minutes: 20
+    # Hang tripwire, not the expected healthy end of the lane. The per-script
+    # bound only fires if the job outlives it, so this cap must clear setup plus
+    # the shard wall plus the 900s bound, not merely the bound. That rule and
+    # this lane's measured derivation are owned by SCRIPT_TIMEOUT_DEFAULT in
+    # bin/fm-test-run.sh; do not re-derive them here.
+    timeout-minutes: 35
     strategy:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
@@ -197,10 +217,10 @@ jobs:
   tests-herdr:
     name: Behavior tests (Herdr)
     runs-on: ubuntu-latest
-    # Healthy runs finish around 7 minutes. This job cap is a last-resort hang
-    # tripwire, not the expected end of the lane. The family-run step owns the
-    # tighter bound so a wedged suite fails fast with always() cleanup and
-    # timing artifacts still uploaded (docs/fm-test-portable-shards.md).
+    # Last-resort hang tripwire, not the expected end of the lane. The
+    # family-run step owns the tighter bound so a wedged suite fails fast with
+    # always() cleanup and timing artifacts still uploaded
+    # (docs/fm-test-portable-shards.md).
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6
@@ -281,9 +301,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/fm-herdr"
           bin/fm-herdr-ci-cleanup.sh snapshot "$RUNNER_TEMP/fm-herdr/sessions-before.json"
       - name: Run real-Herdr family (serial, required)
-        # Comfortably above the ~7 min healthy wall and far below the 75 min
-        # job backstop. A hang must fail this step so cleanup still runs.
-        timeout-minutes: 20
+        # Same rule as every other lane: this cap must clear the work before the
+        # wedge plus the per-script bound, not merely the bound. A step clock
+        # starts at the step, so setup falls outside it. The derivation is owned
+        # by SCRIPT_TIMEOUT_DEFAULT in bin/fm-test-run.sh. A hang must fail this
+        # step so cleanup still runs.
+        timeout-minutes: 25
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
