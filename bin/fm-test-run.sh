@@ -47,7 +47,13 @@
 #                   recorded as exit=124, and named on a FM_TEST_TIMEOUT
 #                   marker, so a hung test reports instead of consuming the
 #                   run. Must be a positive integer; there is no way to
-#                   disable the bound.
+#                   disable the bound. One bound does not fit every lane: the
+#                   default is sized for the portable-serial and real-Herdr
+#                   job caps, so a lane running under a tighter CI job cap
+#                   passes its own smaller bound (see SCRIPT_TIMEOUT_DEFAULT).
+#                   A script recorded as exit=125 did not hang: the bound
+#                   could not be established, so it is an ordinary failure and
+#                   is never counted as timed_out.
 #   -h, --help      print this header
 #
 # Per-script machine-parseable markers (stdout):
@@ -121,9 +127,30 @@ JOBS_MAX=8
 # unmeasurable; it reached 572s in a full run competing with other work, which
 # is the closest any script has come to this bound and the reason the margin is
 # stated against a loaded machine rather than an idle one. The CI timing
-# artifact's slowest is fm-pr-check-security at 250s. The bound also stays under
-# the 20-minute portable-serial shard job timeout, so it fires and names the
-# file instead of the CI job dying anonymously.
+# artifact's slowest is fm-pr-check-security at 250s.
+#
+# Coverage of this default is per lane, not universal, because the bound only
+# gets to fire if the CI job outlives it. 900s sits under the 20-minute
+# portable-serial shard cap (.github/workflows/ci.yml, tests-portable-serial)
+# and under the 20-minute real-Herdr family step cap, so in those lanes it fires
+# and names the wedged file instead of the job dying anonymously. It EXCEEDS the
+# 10-minute job caps of tests-portable-parallel-1 and tests-portable-parallel-2,
+# where GitHub would cancel the job first and no file would ever be named, so
+# those two steps pass an explicit --timeout 540 instead of taking this default.
+#
+# 540s for the portable-parallel lanes is derived from the slowest single script
+# either lane can run, not from the lane wall, because the bound is per script:
+# tests/fm-backend-herdr.test.sh at 323s (322.7s in the final full run, 326.3s in
+# an earlier full run on the same macOS Apple M5 host, both full --all runs with
+# no competing work). That figure comes from a host where the Herdr CLI is
+# installed and the gated suite really executes; on a CI runner without it the
+# suite gate-skips, which is why the shard wall there is roughly 1 minute of
+# serial sum. The bound has to be safe on both, so it is derived from the host
+# where the suite runs. Whole-lane serial sums on that host, for context:
+# portable-parallel-1 213s across 11 scripts, portable-parallel-2 469s across 13.
+# 540s leaves 1.67x headroom over the 323s worst case and still fires 60s before
+# the 600s job cap. A round 300s was rejected: it is below the measured worst
+# case and would turn a legitimate slow pass into a false timeout.
 SCRIPT_TIMEOUT_DEFAULT=900
 SCRIPT_TIMEOUT=$SCRIPT_TIMEOUT_DEFAULT
 
@@ -1623,12 +1650,18 @@ record_script_result() {
   family=$(family_for_basename "$base")
   expected=$(expected_gate_skip_for_family "$family")
 
-  # fm-timeout-lib.sh's convention: 124 means the hard bound was hit.
+  # fm-timeout-lib.sh's convention: 124 means the hard bound was hit, and 125
+  # means the bound could not be established, so the script never ran and
+  # nothing was timed. Counting 125 as a hang would report a run of fake
+  # ${SCRIPT_TIMEOUT}s timeouts that never happened; it stays an ordinary
+  # failure instead, and the run still fails.
   timed_out=false
   if [ "$rc" -eq 124 ]; then
     timed_out=true
     TIMED_OUT=$((TIMED_OUT + 1))
     log "hard bound hit: $script did not finish within ${SCRIPT_TIMEOUT}s and was killed with its process group"
+  elif [ "$rc" -eq 125 ]; then
+    log "bound not established for $script: it never ran and did not time out (most likely a full or unwritable TMPDIR, since the bound needs a scratch file)"
   fi
 
   if [ -n "$FAIL_ON_GATE_SKIP" ] && detect_gate_skip_token "$out" "$FAIL_ON_GATE_SKIP"; then

@@ -85,6 +85,39 @@ for mech in $MECHANISMS; do
 done
 pass "fm_run_timed reports 124 when the bound is hit, under every available mechanism"
 
+# --- a bound that could not be established is not a bound hit -----------------
+
+# The concrete state is a full or read-only TMPDIR. The timeout and bash
+# mechanisms need a scratch file to carry the command's own status back out, so
+# with an unusable TMPDIR they cannot establish a bound at all and the command
+# never runs. Reporting that as 124 would tell every caller the command hung for
+# its whole bound: the behavior-test runner would report a fleet of full-length
+# hangs that never happened, within milliseconds of starting.
+ABSENT_TMPDIR="$TMP_ROOT/no-such-tmpdir"
+[ ! -e "$ABSENT_TMPDIR" ] || fail "the unusable-TMPDIR fixture path already exists"
+for mech in $MECHANISMS; do
+  rc=$(
+    TMPDIR="$ABSENT_TMPDIR"
+    export TMPDIR
+    run_under "$mech" 30 bash -c 'exit 0'
+  )
+  [ "$rc" -ne 124 ] \
+    || fail "$mech: a bound that could not be established was reported as a bound hit"
+  case "$mech" in
+    perl)
+      # perl bounds with alarm and needs no scratch file, so an unusable TMPDIR
+      # does not stop it establishing the bound: the command still runs.
+      [ "$rc" -eq 0 ] \
+        || fail "$mech: needs no scratch file, so an unusable TMPDIR must not disturb it (got $rc)"
+      ;;
+    *)
+      [ "$rc" -eq 125 ] \
+        || fail "$mech: a bound that could not be established reported $rc instead of 125"
+      ;;
+  esac
+done
+pass "fm_run_timed reports 125, never a bound hit, when the bound cannot be established"
+
 # A hung grandchild must not outlive the bound: the whole process group goes.
 for mech in $MECHANISMS; do
   pidfile="$TMP_ROOT/grandchild-$mech.pid"

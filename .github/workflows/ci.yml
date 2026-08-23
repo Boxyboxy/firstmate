@@ -75,10 +75,14 @@ jobs:
           npm install -g tasks-axi
           tasks-axi --version
       - name: Run portable parallel shard 1
+        # Explicit per-script bound: the runner's 900s default exceeds this
+        # job's 10-minute cap, so without a lane-appropriate bound GitHub would
+        # cancel the job before the bound could fire and name the wedged file.
+        # 540s clears the lane's slowest script (323s) and fires 60s early.
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-parallel-1 \
+          bin/fm-test-run.sh --lane portable-parallel-1 --timeout 540 \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
       - name: Upload shard 1 timing artifact
         if: always()
@@ -112,10 +116,14 @@ jobs:
           npm install -g tasks-axi
           tasks-axi --version
       - name: Run portable parallel shard 2
+        # Explicit per-script bound: the runner's 900s default exceeds this
+        # job's 10-minute cap, so without a lane-appropriate bound GitHub would
+        # cancel the job before the bound could fire and name the wedged file.
+        # 540s clears the lane's slowest script (323s) and fires 60s early.
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-parallel-2 \
+          bin/fm-test-run.sh --lane portable-parallel-2 --timeout 540 \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-2.json"
       - name: Upload shard 2 timing artifact
         if: always()

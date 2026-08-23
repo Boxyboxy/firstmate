@@ -813,6 +813,88 @@ test_per_script_timeout_bounds_parallel_workers_too() {
   pass "the per-script bound applies to parallel workers, not only the serial path"
 }
 
+# A bound that could not be established is not a hang. fm-timeout-lib.sh returns
+# 125 for it, and the runner must record an ordinary failure: no FM_TEST_TIMEOUT
+# marker, no timed_out count anywhere, and no "hard bound hit" claim. The concrete
+# state is a full or read-only TMPDIR, where every selected script would return
+# that status within milliseconds; counting it as a bound hit would report a
+# whole run of full-length hangs that never happened and send the next person
+# hunting one. The mktemp shim injects exactly that failure into the bounded
+# call without disturbing the runner's own scratch space, and the documented
+# mechanism override pins the dependency-free branch so the injected failure is
+# reached on every host rather than only where mktemp is on the bound's path.
+test_bound_setup_failure_fails_the_run_without_claiming_a_timeout() {
+  local tmp fixture out json shim real_mktemp rc bound=30 outer=90
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-nobound.XXXXXX")
+  fixture="$tmp/nobound.test.sh"
+  out="$tmp/out.txt"
+  json="$tmp/timing.json"
+  shim="$tmp/shim"
+  real_mktemp=$(command -v mktemp) \
+    || { rm -rf "$tmp"; fail "no mktemp on PATH to delegate to"; }
+  mkdir -p "$shim"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - the script ran even though its bound could never be established"
+SH
+  chmod +x "$fixture"
+  cat >"$shim/mktemp" <<SH
+#!/usr/bin/env bash
+# Fail only the bound's own scratch file, the way a full or read-only TMPDIR
+# would; everything else the run needs still gets a real temporary file.
+for arg in "\$@"; do
+  case "\$arg" in
+    *fm-bash-timeout-command*|*fm-timeout-status*)
+      echo "mktemp: no space left on device" >&2
+      exit 1
+      ;;
+  esac
+done
+exec $real_mktemp "\$@"
+SH
+  chmod +x "$shim/mktemp"
+  set +e
+  # The outer bound only exists so a broken guard reports here instead of
+  # wedging this suite.
+  fm_run_timed "$outer" env "PATH=$shim:$PATH" FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    "$RUNNER" --timeout "$bound" --json "$json" "$fixture" >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 124 ] || { rm -rf "$tmp"; fail "the runner itself outran ${outer}s"; }
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$tmp"; fail "a script whose bound could not be established must fail the run, got exit 0"; }
+  if grep -Fq 'not ok - the script ran' "$out"; then
+    rm -rf "$tmp"
+    fail "the script must not run when its bound could not be established"
+  fi
+  grep -Eq "^FM_TEST_END .+ $fixture exit=125 duration_ms=[0-9]+ gate_skip=false\$" "$out" \
+    || { rm -rf "$tmp"; fail "END must record exit=125: $(grep '^FM_TEST_END' "$out")"; }
+  if grep -q '^FM_TEST_TIMEOUT' "$out"; then
+    rm -rf "$tmp"
+    fail "a bound that was never established must not be named as a timeout: $(grep '^FM_TEST_TIMEOUT' "$out")"
+  fi
+  grep -q 'FM_TEST_SUMMARY total=1 failed=1 skipped_gate=0' "$out" \
+    || { rm -rf "$tmp"; fail "it must still be counted as a failure: $(grep FM_TEST_SUMMARY "$out")"; }
+  grep -Eq 'FM_TEST_SUMMARY .* timed_out=0$' "$out" \
+    || { rm -rf "$tmp"; fail "summary must not count it as timed out: $(grep FM_TEST_SUMMARY "$out")"; }
+  if grep -Fq 'hard bound hit' "$tmp/err.txt"; then
+    rm -rf "$tmp"
+    fail "the runner claimed a bound hit that never happened: $(cat "$tmp/err.txt")"
+  fi
+  grep -Fq 'bound not established' "$tmp/err.txt" \
+    || { rm -rf "$tmp"; fail "the real cause was not reported on stderr: $(cat "$tmp/err.txt")"; }
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["scripts"][0]["exit"] == 125, doc["scripts"]
+assert doc["scripts"][0]["timed_out"] is False, doc["scripts"]
+assert doc["summary"]["timed_out"] == 0, doc["summary"]
+assert doc["summary"]["failed"] == 1, doc["summary"]
+' "$json" || { rm -rf "$tmp"; fail "JSON accounting must record a failure and no timeout"; }
+  rm -rf "$tmp"
+  pass "a bound that could not be established fails the run without being reported as a hang"
+}
+
 test_per_script_timeout_cannot_be_disabled() {
   local tmp rc bad
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-bound.XXXXXX")
@@ -893,4 +975,5 @@ test_aggregate_json
 test_per_script_timeout_reports_a_hang_instead_of_absorbing_it
 test_per_script_timeout_bounds_parallel_workers_too
 test_per_script_timeout_cannot_be_disabled
+test_bound_setup_failure_fails_the_run_without_claiming_a_timeout
 test_selected_scripts_get_an_at_eof_stdin
