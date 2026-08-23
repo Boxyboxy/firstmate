@@ -472,12 +472,19 @@ test_no_mistakes_brief_states_the_pipeline_pr_target_limitation() {
   assert_no_grep 'the no-mistakes pipeline does' "$brief" \
     "a direct-PR brief carries a pipeline limitation that does not apply to it"
 
-  # An unrecorded base states no target to qualify, so nothing is appended.
+  # --base is optional, so an unrecorded base is what the DEFAULT no-mistakes
+  # dispatch renders and is the most common no-mistakes brief. That arm states a
+  # PR target of its own for the worker to derive, so it carries the same
+  # limitation: leaving it off would leave the mismatch open on the common path.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" nm-unrecorded firstmate \
     --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/nm-unrecorded/brief.md"
-  assert_no_grep 'the no-mistakes pipeline does' "$brief" \
-    "a brief with no recorded base qualified a PR target it never stated"
+  assert_grep 'Derive the branch your PR must target from the base you just established' "$brief" \
+    "the default no-mistakes brief lost the anti-default-target guidance"
+  assert_grep 'you do not open the PR, the no-mistakes pipeline does' "$brief" \
+    "the default no-mistakes brief has a worker derive a PR target without saying who opens it"
+  assert_grep 'deliver such a task as direct-PR, or open the PR by hand' "$brief" \
+    "the default no-mistakes brief stated the limitation without naming what to do about it"
   pass "fm-brief.sh: a no-mistakes brief states who opens the PR and off which base"
 }
 

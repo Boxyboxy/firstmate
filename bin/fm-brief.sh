@@ -512,12 +512,15 @@ EOF
     # Stated limitation of this delivery mode, not backlog work: the worker does
     # not open the PR here, the no-mistakes pipeline does, and that pipeline
     # resolves its own base from the remote's default branch rather than from
-    # this task's recorded base. The derived PR target above is therefore
-    # something the worker must ensure rather than something the pipeline honors,
-    # so the brief says so instead of asserting a target the mode does not
-    # guarantee. It is stated rather than refused because a non-default base is
-    # exactly what this contract exists to serve on the primary delivery mode.
-    [ "$BASE_SET" -eq 0 ] || BASE_PR_TARGET="$BASE_PR_TARGET
+    # this task's base. The PR target stated above is therefore something the
+    # worker must ensure rather than something the pipeline honors, so the brief
+    # says so instead of asserting a target the mode does not guarantee. It is
+    # stated rather than refused because a non-default base is exactly what this
+    # contract exists to serve on the primary delivery mode. It attaches whether
+    # or not a base was recorded: --base is optional, so the unrecorded arm is
+    # what the default dispatch renders, and it states a PR target of its own for
+    # the worker to derive.
+    BASE_PR_TARGET="$BASE_PR_TARGET
 Known limitation of this delivery mode: you do not open the PR, the no-mistakes pipeline does, and it resolves its own base from the remote's default branch rather than from this task's base.
 If your base is not that default, the PR target above is yours to ensure rather than something the pipeline honors automatically - deliver such a task as direct-PR, or open the PR by hand."
     SETUP2="

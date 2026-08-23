@@ -505,6 +505,13 @@ test_legacy_brief_without_a_base_contract_refuses_an_explicit_base() {
     "spawn did not name the missing base contract as the reason it refused"
   assert_contains "$out" 'fm-brief.sh' \
     "spawn did not name re-scaffolding the brief as the remedy"
+  # bin/fm-brief.sh refuses to overwrite an existing brief, and this arm is only
+  # reached once the brief was read, so a bare "re-scaffold" would send the
+  # operator into a second refusal and silently lose the filled-in task text.
+  assert_contains "$out" 'aside' \
+    "the remedy did not say to move the existing brief aside, so re-scaffolding would refuse"
+  assert_contains "$out" '# Task' \
+    "the remedy did not say to restore the task text a fresh scaffold replaces"
   assert_contains "$out" 'origin/feat/campaigns' \
     "spawn did not name the base to re-scaffold the brief with"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \

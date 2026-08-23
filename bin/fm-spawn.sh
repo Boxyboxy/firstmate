@@ -1761,12 +1761,12 @@ if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
     # delivery-contract check above can warn because an omitted mode is silence,
     # not a contrary statement.
     [ "$BASE_SET" -eq 0 ] || {
-      echo "error: base mismatch for $ID: this spawn passed --base $BASE_ARG but $BRIEF records no base contract line (scaffolded before briefs recorded one), so it still asserts the worktree is on a clean default branch; re-scaffold the brief with bin/fm-brief.sh passing the same --base $BASE_ARG, then respawn" >&2
+      echo "error: base mismatch for $ID: this spawn passed --base $BASE_ARG but $BRIEF records no base contract line (scaffolded before briefs recorded one), so it still asserts the worktree is on a clean default branch; move $BRIEF aside, re-scaffold with bin/fm-brief.sh passing the same --base $BASE_ARG (it refuses to overwrite an existing brief), copy the saved '# Task' section over the new brief's {TASK} placeholder, then respawn" >&2
       exit 1
     }
   elif [ "$BRIEF_BASE" = unrecorded ]; then
     [ "$BASE_SET" -eq 0 ] || {
-      echo "error: base mismatch for $ID: this spawn passed --base $BASE_ARG but the brief declares its base unrecorded; re-scaffold the brief with the same --base so the worker is told the base it is actually on" >&2
+      echo "error: base mismatch for $ID: this spawn passed --base $BASE_ARG but the brief declares its base unrecorded; move $BRIEF aside, re-scaffold with bin/fm-brief.sh passing the same --base $BASE_ARG (it refuses to overwrite an existing brief), copy the saved '# Task' section over the new brief's {TASK} placeholder, then respawn" >&2
       exit 1
     }
   elif [ "$BRIEF_BASE" != "$BASE_ARG" ]; then
