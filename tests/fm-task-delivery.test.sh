@@ -238,16 +238,20 @@ test_promote_requires_and_records_the_delivery_contract() {
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
-# The promoted worker is told to reset to a clean default-branch base, so the
-# scout's recorded base stops being true at the moment of promotion. It must be
-# absent afterwards rather than blank, so a reader cannot tell it apart from a
-# task whose base was never recorded.
+# The promoted worker rebases onto a fresh cut of its base, so the scout's
+# resolved base_commit stops being true at the moment of promotion. All three
+# base fields must be absent afterwards rather than blank, so a reader cannot
+# tell the record apart from a task whose base was never recorded. The base it
+# names does NOT stop being true, though, and promotion hands its instructions to
+# fm-send.sh rather than re-scaffolding a brief, so the hint is the only place
+# left that can name it - a scout cut from origin/feat/campaigns sent back to the
+# default branch is the wrong-base defect stated as an instruction.
 test_promotion_drops_the_scout_base_record() {
   local home meta out status
   home="$TMP_ROOT/promote-base/home"
   mkdir -p "$home/state"
   meta="$home/state/promote-base-d2.meta"
-  printf 'window=fm-promote-base-d2\nkind=scout\nworktree=/tmp/wt\nbase=release-candidate\nbase_commit=%s\nbase_source=requested\n' \
+  printf 'window=fm-promote-base-d2\nkind=scout\nworktree=/tmp/wt\nbase=origin/feat/campaigns\nbase_commit=%s\nbase_source=requested\n' \
     '0123456789abcdef0123456789abcdef01234567' > "$meta"
 
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-base-d2 --mode local-only --yolo off 2>&1)
@@ -255,9 +259,34 @@ test_promotion_drops_the_scout_base_record() {
   expect_code 0 "$status" "promotion carrying both flags should succeed (got: $out)"
   assert_grep 'kind=ship' "$meta" "promotion did not restore ship teardown protection"
   grep -q '^base' "$meta" \
-    && fail "promotion kept a base record the promoted worker is told to abandon"
+    && fail "promotion kept a base record whose resolved commit the promoted worker no longer stands on"
   assert_grep 'worktree=/tmp/wt' "$meta" "promotion dropped unrelated task record fields"
-  pass "fm-promote: promotion leaves a promoted task with no recorded base rather than a stale one"
+  assert_contains "$out" 'origin/feat/campaigns' \
+    "promotion did not name the base the scout was cut from in its ship instructions"
+  assert_contains "$out" 'contains the code this task names' \
+    "promotion did not ask the promoted worker to confirm its base carries the task's code"
+  case "$out" in
+    *'clean default-branch base'*)
+      fail "promotion sent a scout cut from a feature branch back to the default branch" ;;
+  esac
+  pass "fm-promote: promotion drops the scout's base record but still names that base to the promoted worker"
+}
+
+# A scout that genuinely recorded no base has nothing to name, so the hint keeps
+# the generic default-branch wording rather than inventing a base.
+test_promotion_without_a_recorded_base_keeps_the_generic_hint() {
+  local home meta out status
+  home="$TMP_ROOT/promote-nobase/home"
+  mkdir -p "$home/state"
+  meta="$home/state/promote-nobase-d3.meta"
+  printf 'window=fm-promote-nobase-d3\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-nobase-d3 --mode local-only --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "promotion of a scout with no recorded base should succeed (got: $out)"
+  assert_contains "$out" 'reset to a clean default-branch base' \
+    "promotion of a baseless scout lost the generic default-branch instruction"
+  pass "fm-promote: a scout with no recorded base keeps the generic default-branch instruction"
 }
 
 # A local-only brief and bin/fm-merge-local.sh have to agree about one branch:
@@ -365,6 +394,7 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promotion_drops_the_scout_base_record
+test_promotion_without_a_recorded_base_keeps_the_generic_hint
 test_local_only_rebase_target_lands_when_local_default_is_ahead
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

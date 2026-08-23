@@ -20,13 +20,17 @@
 #   A ship or scout brief records the same value as a fixed
 #   "Base contract: base=<ref>" line, and this script refuses a spawn that
 #   contradicts it, so a worker is never handed a brief naming a base it is not
-#   standing on. Batch dispatch forwards it to every pair exactly like --mode and
+#   standing on. A brief carrying no such line predates the contract and still
+#   asserts a clean default-branch base, so an explicit --base against it is
+#   refused too, and the brief has to be re-scaffolded with that base. Batch dispatch forwards it to every pair exactly like --mode and
 #   --yolo, so the multi-task route cannot be the one that still defaults.
 #   A base must be a branch on origin, written "origin/<branch>". Every other
 #   shape is refused: a base has to be provable as current against the remote,
 #   and a tag, a raw commit, a revision expression like main~1, a local branch,
 #   or another remote's ref cannot be, since `git fetch origin` refreshes none of
-#   them.
+#   them. origin/HEAD, origin/refs/heads/x and origin/origin/x are refused at the
+#   same gate because the PR target derived from them names no branch.
+#   bin/fm-base-lib.sh owns that rule for this script and bin/fm-brief.sh alike.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -283,6 +287,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-base-lib.sh
+. "$SCRIPT_DIR/fm-base-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -439,33 +445,13 @@ if [ "$KIND" = secondmate ] && [ "$BASE_SET" -eq 1 ]; then
   exit 1
 fi
 
-# --base deliberately accepts ONE shape, a branch on origin written
-# "origin/<branch>", and refuses every other shape here, before the worktree is
-# touched. The reason is the whole point of this contract: a base has to be
-# provable as current against the remote, and nothing else can be. `git fetch
-# origin` writes refs/remotes/origin/* and nothing else, so a local branch, an
-# explicit refs/heads/* ref, or another remote's ref resolves cleanly while
-# sitting arbitrarily far behind; a tag or a raw commit has no branch a PR could
-# target; and a revision expression (main~1, main^, main^0, main@{0}, HEAD~1)
-# silently anchors on whichever of those refs it names, which is how a stale
-# local branch got in once already. This narrowness is deliberate rather than an
-# oversight: every real dispatch names a branch, so a caller with a genuine need
-# for another shape should reopen this decision rather than find the capability
-# pre-supported and unprovable. bin/fm-brief.sh enforces the identical form, so a
-# brief and its spawn cannot disagree about what a base may be.
+# --base accepts ONE shape, a branch on origin written "origin/<branch>", and
+# every other shape is refused here, before the worktree is touched. The rule and
+# the reasons behind its narrowness live in bin/fm-base-lib.sh, which
+# bin/fm-brief.sh applies to the same effect, so a brief and its spawn cannot
+# disagree about what a base may be.
 if [ "$BASE_SET" -eq 1 ]; then
-  base_shape_ok=0
-  case "$BASE_ARG" in
-    origin/?*)
-      case "$BASE_ARG" in
-        *'~'*|*'^'*|*':'*|*'?'*|*'*'*|*'['*|*'@{'*|*' '*) ;;
-        *) base_shape_ok=1 ;;
-      esac ;;
-  esac
-  [ "$base_shape_ok" -eq 1 ] || {
-    echo "error: --base must name a branch on origin as 'origin/<branch>' (got '$BASE_ARG'); a base must be provable as current against origin, and a tag, a raw commit, a revision expression, a local branch, or another remote's ref cannot be - pass the branch as 'origin/<branch>'" >&2
-    exit 1
-  }
+  fm_base_shape_check "$BASE_ARG" --base || exit 1
 fi
 
 spawn_remote_secondmate() {
@@ -1766,7 +1752,18 @@ fi
 if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
   BRIEF_BASE=$(sed -n 's/^Base contract: base=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ -z "$BRIEF_BASE" ]; then
-    [ "$BASE_SET" -eq 0 ] || echo "warning: $BRIEF records no base contract line (scaffolded before briefs recorded one); launching on the explicit --base $BASE_ARG - re-scaffold the brief so the worker is told which base it is on" >&2
+    # No base contract line means the brief predates this contract, and such a
+    # brief does not merely omit its base: it asserts outright that the worktree
+    # sits at a detached HEAD on a clean default branch. So the absence of the
+    # line proves the false claim is present, and launching it against an
+    # explicit --base would hand the worker exactly the false premise this
+    # contract exists to eliminate. It is refused rather than warned about; the
+    # delivery-contract check above can warn because an omitted mode is silence,
+    # not a contrary statement.
+    [ "$BASE_SET" -eq 0 ] || {
+      echo "error: base mismatch for $ID: this spawn passed --base $BASE_ARG but $BRIEF records no base contract line (scaffolded before briefs recorded one), so it still asserts the worktree is on a clean default branch; re-scaffold the brief with bin/fm-brief.sh passing the same --base $BASE_ARG, then respawn" >&2
+      exit 1
+    }
   elif [ "$BRIEF_BASE" = unrecorded ]; then
     [ "$BASE_SET" -eq 0 ] || {
       echo "error: base mismatch for $ID: this spawn passed --base $BASE_ARG but the brief declares its base unrecorded; re-scaffold the brief with the same --base so the worker is told the base it is actually on" >&2

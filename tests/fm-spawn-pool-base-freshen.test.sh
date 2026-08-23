@@ -243,6 +243,15 @@ publish_feature_branch() {  # <branch> <marker-file>
   git -C "$publisher" rev-parse HEAD
 }
 
+# Every brief bin/fm-brief.sh scaffolds records its base, and bin/fm-spawn.sh
+# refuses an explicit --base against a brief that carries no such line, because
+# such a brief predates the contract and still asserts the worktree is on a clean
+# default branch. A fixture that means to reach the base machinery therefore has
+# to state its base the way a real scaffolded brief does.
+declare_brief_base() {  # <id> <base>
+  printf 'Base contract: base=%s\n' "$2" >> "$HOME_DIR/data/$1/brief.md"
+}
+
 test_explicit_base_cuts_from_requested_branch() {
   local rec id out status feature_sha meta
   id='pool-explicit-base-r7'
@@ -250,6 +259,7 @@ test_explicit_base_cuts_from_requested_branch() {
   read_case_record "$rec"
   feature_sha=$(publish_feature_branch feat/campaigns campaigns.txt)
   meta="$HOME_DIR/state/$id.meta"
+  declare_brief_base "$id" origin/feat/campaigns
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off --base origin/feat/campaigns)
   status=$?
@@ -302,6 +312,7 @@ test_unknown_explicit_base_refuses() {
   rec=$(make_case unknown-base "$id")
   read_case_record "$rec"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  declare_brief_base "$id" origin/no-such-branch
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off --base origin/no-such-branch)
   status=$?
@@ -372,6 +383,7 @@ test_batch_dispatch_forwards_the_requested_base() {
   read_case_record "$rec"
   feature_sha=$(publish_feature_branch feat/campaigns campaigns.txt)
   meta="$HOME_DIR/state/$id.meta"
+  declare_brief_base "$id" origin/feat/campaigns
 
   out=$(run_spawn_argv "$id=$PROJECT_DIR" --mode no-mistakes --yolo off --base origin/feat/campaigns)
   status=$?
@@ -410,7 +422,7 @@ test_base_shape_is_restricted_to_a_branch_on_origin() {
     || fail "fixture did not prove refs/heads/main lags origin/main"
 
   for ref in main 'main~1' 'main^' 'HEAD^' 'HEAD~1' 'origin/main~1' refs/heads/main \
-    upstream/main v1.2.3 "$INITIAL_SHA"; do
+    upstream/main v1.2.3 "$INITIAL_SHA" origin/HEAD origin/refs/heads/main origin/origin/main; do
     out=$(run_spawn "$id" --mode no-mistakes --yolo off --base "$ref")
     status=$?
     [ "$status" -ne 0 ] || fail "a ship spawn accepted the base '$ref', which cannot be proven current"
@@ -435,6 +447,78 @@ test_base_shape_is_restricted_to_a_branch_on_origin() {
   pass "only a branch on origin is accepted as a base; every other shape is refused before the worktree moves"
 }
 
+# A base whose leading "origin/" strips to something that is not a branch name
+# passes the character screen but cannot be a PR target: origin/HEAD is a
+# symbolic ref that follows whichever branch the remote calls default, which is
+# the unstated base this whole contract exists to eliminate. The refusal has to
+# come from the shape gate and has to name the concrete remedy, rather than
+# arriving later as an unrelated-sounding fetch failure.
+test_a_symbolic_base_is_refused_with_the_branch_to_name_instead() {
+  local rec id out status before ref
+  id='pool-base-symbolic-r18'
+  rec=$(make_case base-symbolic "$id")
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  for ref in origin/HEAD origin/refs/heads/main origin/origin/main; do
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off --base "$ref")
+    status=$?
+    [ "$status" -ne 0 ] || fail "a spawn accepted the base '$ref', which names no branch a PR could target"
+    assert_contains "$out" "must name a branch on origin" \
+      "the refusal of base '$ref' did not say what a base must be"
+    assert_contains "$out" "is not a branch name" \
+      "the refusal of base '$ref' did not say why the derived target is unusable"
+    assert_contains "$out" "origin/feat/omp-adaptor" \
+      "the refusal of base '$ref' did not point at naming the concrete branch"
+    case "$out" in
+      *'could not fetch requested base'*)
+        fail "base '$ref' was refused by the fetch rather than by the shape gate" ;;
+    esac
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+      || fail "spawn moved HEAD after refusing the base '$ref'"
+    [ -f "$HOME_DIR/state/$id.meta" ] \
+      && fail "spawn recorded metadata for the task it refused with base '$ref'"
+  done
+  pass "a base that derives no branch is refused at the shape gate, naming the branch to pass instead"
+}
+
+# A brief carrying no base contract line predates this contract, and such a brief
+# does not merely omit its base: it asserts the worktree sits at a detached HEAD
+# on a clean default branch. Launching it against an explicit --base would hand
+# the worker exactly that false premise, so it is refused rather than warned
+# about. The same brief with NO --base keeps launching as it always did.
+test_legacy_brief_without_a_base_contract_refuses_an_explicit_base() {
+  local rec id out status before meta
+  id='pool-base-legacy-r19'
+  rec=$(make_case base-legacy "$id")
+  read_case_record "$rec"
+  publish_feature_branch feat/campaigns campaigns.txt >/dev/null
+  meta="$HOME_DIR/state/$id.meta"
+  grep -q '^Base contract:' "$HOME_DIR/data/$id/brief.md" \
+    && fail "fixture brief already records a base, so it cannot stand for a pre-contract brief"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base origin/feat/campaigns)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched a worker whose brief still claims a clean default-branch base"
+  assert_contains "$out" 'records no base contract line' \
+    "spawn did not name the missing base contract as the reason it refused"
+  assert_contains "$out" 'fm-brief.sh' \
+    "spawn did not name re-scaffolding the brief as the remedy"
+  assert_contains "$out" 'origin/feat/campaigns' \
+    "spawn did not name the base to re-scaffold the brief with"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after refusing a brief that records no base"
+  [ -f "$meta" ] && fail "spawn recorded metadata for the task it refused to launch"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "the same pre-contract brief with no --base should launch exactly as before"
+  grep -qx 'base_source=remote-default' "$meta" \
+    || fail "a pre-contract brief without --base stopped taking the remote-default base"
+  pass "a brief recording no base refuses an explicit base and still launches without one"
+}
+
 test_local_only_base_must_be_the_branch_the_merge_fast_forwards() {
   local rec id out status before meta
   id='pool-local-only-base-r17'
@@ -442,6 +526,7 @@ test_local_only_base_must_be_the_branch_the_merge_fast_forwards() {
   read_case_record "$rec"
   publish_feature_branch feat/campaigns campaigns.txt >/dev/null
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  declare_brief_base "$id" origin/feat/campaigns
 
   out=$(run_spawn "$id" --mode local-only --yolo off --base origin/feat/campaigns)
   status=$?
@@ -453,6 +538,8 @@ test_local_only_base_must_be_the_branch_the_merge_fast_forwards() {
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved HEAD after refusing a local-only base"
 
+  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  declare_brief_base "$id" "origin/$DEFAULT_BRANCH"
   out=$(run_spawn "$id" --mode local-only --yolo off --base "origin/$DEFAULT_BRANCH")
   status=$?
   expect_code 0 "$status" "a local-only task based on the default branch should still launch"
@@ -476,6 +563,8 @@ test_unrecorded_brief_base_refuses_explicit_base
 test_base_refused_on_secondmate_spawn
 test_batch_dispatch_forwards_the_requested_base
 test_base_shape_is_restricted_to_a_branch_on_origin
+test_a_symbolic_base_is_refused_with_the_branch_to_name_instead
+test_legacy_brief_without_a_base_contract_refuses_an_explicit_base
 test_local_only_base_must_be_the_branch_the_merge_fast_forwards
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

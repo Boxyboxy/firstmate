@@ -119,10 +119,16 @@ grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (ki
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
 # base/base_commit/base_source describe the worktree the SCOUT was cut from, and
-# the ship instructions below send the promoted worker to a clean default-branch
-# base, so keeping them would leave a false record that reads as authoritative.
-# They are dropped entirely rather than blanked, so every reader takes the same
-# path it takes for a task whose base was never recorded.
+# the promoted worker rebases onto a fresh cut of that base rather than staying
+# on the scout's tree, so keeping the resolved base_commit would leave a false
+# record that reads as authoritative. All three are dropped entirely rather than
+# blanked, so every reader takes the same path it takes for a task whose base was
+# never recorded. The base is read out FIRST, because the ship instructions below
+# have to name it: promotion delivers those instructions through fm-send.sh
+# instead of re-scaffolding a brief, so a hint that sent a scout cut from
+# origin/feat/campaigns back to the default branch would be the wrong-base defect
+# itself, stated as an instruction, with nothing downstream left to catch it.
+SCOUT_BASE=$(fmx_meta_get "$META" base)
 grep -v -e '^kind=' -e '^mode=' -e '^yolo=' \
   -e '^base=' -e '^base_commit=' -e '^base_source=' "$META" > "$TMP"
 {
@@ -137,7 +143,16 @@ META_LOCK_HELD=0
 
 HOME_Q=$(printf '%q' "$FM_HOME")
 echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
-echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
+# A scout that recorded a base was cut from it for a reason, so the promoted
+# worker is sent back to that same base and asked to confirm it carries the code
+# the task names - the one check a ref comparison cannot make. Only a scout that
+# genuinely recorded no base gets the generic default-branch wording.
+if [ -n "$SCOUT_BASE" ]; then
+  BASE_INSTRUCTION="reset to a clean base on $SCOUT_BASE, the base this scout was cut from, and confirm that base contains the code this task names"
+else
+  BASE_INSTRUCTION="reset to a clean default-branch base"
+fi
+echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; $BASE_INSTRUCTION; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
 
 promote_print_rechain_hint() {
   local consent_home=$1 work_home=$2 task_id=$3 id prefix

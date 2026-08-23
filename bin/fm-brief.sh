@@ -44,7 +44,12 @@
 #   A base must name a branch on origin ("origin/<branch>"); every other shape is
 #   refused, because a base has to be provable as current against the remote and
 #   a tag, a raw commit, a revision expression, a local branch, or another
-#   remote's ref cannot be. Nothing but the PR target is derived from the base:
+#   remote's ref cannot be. origin/HEAD is refused with it, along with anything
+#   else whose stripped branch is not a branch name (origin/refs/heads/x,
+#   origin/origin/x): the PR target derived from those names no branch, and
+#   origin/HEAD is a symbolic ref that follows whichever branch the remote calls
+#   default - the unstated base this contract exists to eliminate.
+#   Nothing but the PR target is derived from the base:
 #   local-only lands on the project's local default branch, which is
 #   bin/fm-merge-local.sh's business and never this base's.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
@@ -99,6 +104,8 @@ esac
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-base-lib.sh
+. "$SCRIPT_DIR/fm-base-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
 resolve_directory_input() {
@@ -207,29 +214,11 @@ fi
 # spawn resolves into the branch name a forge expects as a PR base.
 #
 # That derivation only yields a branch for a ref on origin, and "origin/<branch>"
-# is in any case the ONE shape a base may take. Everything else is refused here,
-# for the reason bin/fm-spawn.sh refuses it: a base has to be provable as current
-# against the remote, and a tag, a raw commit, a revision expression (main~1,
-# main^, main@{0}, HEAD~1), a local branch, an explicit refs/heads/* ref, or
-# another remote's ref cannot be, because `git fetch origin` refreshes none of
-# them. The narrowness is deliberate rather than an oversight: every real
-# dispatch names a branch, so a caller with a genuine need for another shape
-# should reopen this decision rather than find it pre-supported and unprovable.
-# The form check is identical to the spawn's, so a brief and its spawn cannot
-# disagree about what a base may be.
+# is in any case the ONE shape a base may take. What is admissible, and why, is
+# owned by bin/fm-base-lib.sh and applied by bin/fm-spawn.sh from that same
+# helper, so a brief and its spawn cannot disagree about what a base may be.
 if [ "$BASE_SET" -eq 1 ]; then
-  base_shape_ok=0
-  case "$BASE" in
-    origin/?*)
-      case "$BASE" in
-        *'~'*|*'^'*|*':'*|*'?'*|*'*'*|*'['*|*'@{'*|*' '*) ;;
-        *) base_shape_ok=1 ;;
-      esac ;;
-  esac
-  [ "$base_shape_ok" -eq 1 ] || {
-    echo "error: --base must name a branch on origin as 'origin/<branch>' (got '$BASE'); a base must be provable as current against origin, and a tag, a raw commit, a revision expression, a local branch, or another remote's ref cannot be - pass the branch as 'origin/<branch>'" >&2
-    exit 1
-  }
+  fm_base_shape_check "$BASE" --base || exit 1
 fi
 BASE_BRANCH=${BASE#origin/}
 

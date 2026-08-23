@@ -580,7 +580,8 @@ test_base_must_name_a_branch_on_origin() {
   mkdir -p "$home/data"
 
   for ref in main 'main~1' 'main^' 'HEAD^' 'origin/main~1' refs/heads/main upstream/main \
-    v1.2.3 0123456789abcdef0123456789abcdef01234567; do
+    v1.2.3 0123456789abcdef0123456789abcdef01234567 \
+    origin/HEAD origin/refs/heads/main origin/origin/main; do
     for kind in ship scout; do
       slug="base-form-$kind-$(printf '%s' "$ref" | tr -c 'a-z0-9' '-')"
       if [ "$kind" = scout ]; then
@@ -597,6 +598,24 @@ test_base_must_name_a_branch_on_origin() {
       [ -e "$home/data/$slug/brief.md" ] \
         && fail "a $kind brief was scaffolded for a base it refused"
     done
+  done
+
+  # origin/HEAD and its relatives pass the character screen, so they are refused
+  # for a different reason and have to say so: stripping "origin/" derives the PR
+  # target, and "HEAD", "refs/heads/main" and "origin/main" are not branches a
+  # forge can be asked to merge into. The refusal has to point at the branch to
+  # name instead rather than leave the caller guessing.
+  for ref in origin/HEAD origin/refs/heads/main origin/origin/main; do
+    slug="base-form-target-$(printf '%s' "$ref" | tr -c 'a-z0-9' '-')"
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$slug" firstmate \
+      --mode no-mistakes --base "$ref" 2>&1); status=$?
+    [ "$status" -ne 0 ] || fail "a brief accepted the base '$ref', which derives no PR target"
+    assert_contains "$out" "is not a branch name" \
+      "the refusal of base '$ref' did not say why the derived target is unusable"
+    assert_contains "$out" "origin/feat/omp-adaptor" \
+      "the refusal of base '$ref' did not point at naming the concrete branch"
+    [ -e "$home/data/$slug/brief.md" ] \
+      && fail "a brief was scaffolded for a base it refused"
   done
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-form-accepted firstmate \
