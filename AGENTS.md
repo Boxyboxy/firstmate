@@ -292,8 +292,9 @@ Record the resulting mode, `yolo` merge posture, and the one-line reason for any
 Resolve every crewmate task's base at intake too, and pass the same `--base` to the brief and the spawn.
 A worktree's base otherwise falls back to the remote's current default branch, which is a per-repo property rather than a statement about this task and frequently not the branch the task's code lives on; that fallback is announced, and the resolved base is recorded in the task's metadata either way.
 Write every task's base as `origin/<branch>`, the one shape a base may take; a bare branch name, an explicit `refs/heads/*` ref, another remote's ref, a tag, a raw commit, and a revision expression such as `main~1` are all refused, because a base must be provable as current against origin and `git fetch origin` refreshes none of them.
+`origin/HEAD` is refused with them, along with any other value whose stripped branch is not a branch name, such as `origin/refs/heads/x`: no PR target can be derived from those, and `origin/HEAD` is a symbolic ref that follows whichever branch the remote currently calls default, which is the unstated base this rule exists to eliminate.
 A `local-only` task must be based on `origin/<default branch>`, since the guarded local merge only ever fast-forwards that project's local default branch and a task cut anywhere else could never land.
-That local default branch is deliberately not treated as an instance of this defect and is never derived from `--base`: `bin/fm-merge-local.sh` gates on the local ref, which routinely sits ahead of its remote after an earlier unpushed local-only landing, so a brief that pointed a worker at `origin/HEAD` instead would be refused at the merge gate.
+That local default branch is deliberately not treated as an instance of this defect and is never derived from `--base`: `bin/fm-merge-local.sh` gates on the local ref, which routinely sits ahead of its remote after an earlier unpushed local-only landing, so a brief that pointed a worker at that branch's remote-tracking ref instead would put the worker on an older commit and be refused at the merge gate.
 
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
@@ -382,7 +383,9 @@ A report may recommend implementation but does not authorize it.
 Before treating the investigation or any visual review as complete, load `captain-hold-lifecycle`; teardown enforces that shared completion gate.
 When a scout's deliverable is a visual artifact the captain will iterate on, prefer keeping that scout alive to host its own Lavish loop rather than tearing it down and mediating from firstmate, so the scout keeps its investigation context and the captain iterates in one continuous session.
 When implementation is separately authorized, promote the existing scout through `bin/fm-promote.sh` rather than creating a duplicate task.
-The promoted worker must inventory scratch state, return to a clean default-branch base, carry over only intended fix changes, create the ship branch, and follow the project's selected delivery path while leaving scratch commits and debug edits behind and turning a reproduced bug into the regression test.
+The promoted worker must inventory scratch state, return to a clean base, carry over only intended fix changes, create the ship branch, and follow the project's selected delivery path while leaving scratch commits and debug edits behind and turning a reproduced bug into the regression test.
+That base is the one the scout was cut from when the scout recorded one, and a clean default-branch base otherwise and for every `local-only` promotion, which can only land on that branch.
+A promotion onto a recorded base also requires the worker to confirm that base contains the code the task names, exactly as a fresh ship brief does.
 
 ## 8. Supervision protocol
 
@@ -512,6 +515,7 @@ Use its scaffold as the contract, then replace every `{TASK}` placeholder with a
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
+It must equally retain the assertion that the worker confirm its base contains the code the task names: isolation and base are independent premises, and an isolated worktree cut from a base that lacks the feature under change still makes every later diff and test meaningless.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.
