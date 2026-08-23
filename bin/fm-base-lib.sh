@@ -16,8 +16,10 @@
 # cannot: resolving that default requires a worktree, and the brief never touches
 # one. So "--mode local-only --base origin/<non-default>" scaffolds here and is
 # refused later by the spawn. That asymmetry is a property of what each script
-# can know, not an oversight, and it is the one case where a scaffolded brief may
-# fail to launch.
+# can know, not an oversight, and it is the one admissibility rule the two do not
+# share. It is not the only way a scaffolded brief can fail to launch: the shape
+# rule makes no remote contact, so a base naming a branch that does not exist
+# scaffolds here too and is refused when the spawn's targeted fetch of it fails.
 #
 # --base deliberately accepts ONE shape, a branch on origin written
 # "origin/<branch>", and refuses every other shape before a worktree is touched.
