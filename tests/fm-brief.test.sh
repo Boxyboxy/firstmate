@@ -473,6 +473,244 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
+# The generated brief is the interface the worker reasons from, so a PR target it
+# states has to be qualified by what the delivery mode actually does with it.
+# Under mode=no-mistakes the worker never opens the PR: the pipeline does, from a
+# base it resolves off the remote default rather than off this task's base. That
+# limitation is stated rather than refused, because a non-default base is exactly
+# what this contract exists to serve on the primary delivery mode.
+test_no_mistakes_brief_states_the_pipeline_pr_target_limitation() {
+  local home brief
+  home="$TMP_ROOT/base-nm-limit-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" nm-limit firstmate \
+    --mode no-mistakes --base origin/feat/campaigns >/dev/null 2>&1
+  brief="$home/data/nm-limit/brief.md"
+  assert_grep "Your PR must target \`feat/campaigns\`" "$brief" \
+    "a no-mistakes brief lost the PR target derived from its base"
+  assert_grep 'you do not open the PR, the no-mistakes pipeline does' "$brief" \
+    "a no-mistakes brief asserts a PR target without saying who actually opens it"
+  assert_grep "resolves its own base from the remote's default branch" "$brief" \
+    "a no-mistakes brief did not say the pipeline resolves its own base"
+  assert_grep 'deliver such a task as direct-PR, or open the PR by hand' "$brief" \
+    "a no-mistakes brief stated the limitation without naming what to do about it"
+
+  # direct-PR has no such gap: the worker opens the PR itself, so the target it
+  # is given is the target it uses.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" dpr-limit firstmate \
+    --mode direct-PR --base origin/feat/campaigns >/dev/null 2>&1
+  brief="$home/data/dpr-limit/brief.md"
+  assert_grep "Your PR must target \`feat/campaigns\`" "$brief" \
+    "a direct-PR brief lost the PR target derived from its base"
+  assert_no_grep 'the no-mistakes pipeline does' "$brief" \
+    "a direct-PR brief carries a pipeline limitation that does not apply to it"
+
+  # --base is optional, so an unrecorded base is what the DEFAULT no-mistakes
+  # dispatch renders and is the most common no-mistakes brief. That arm states a
+  # PR target of its own for the worker to derive, so it carries the same
+  # limitation: leaving it off would leave the mismatch open on the common path.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" nm-unrecorded firstmate \
+    --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/nm-unrecorded/brief.md"
+  assert_grep 'Derive the branch your PR must target from the base you just established' "$brief" \
+    "the default no-mistakes brief lost the anti-default-target guidance"
+  assert_grep 'you do not open the PR, the no-mistakes pipeline does' "$brief" \
+    "the default no-mistakes brief has a worker derive a PR target without saying who opens it"
+  assert_grep 'deliver such a task as direct-PR, or open the PR by hand' "$brief" \
+    "the default no-mistakes brief stated the limitation without naming what to do about it"
+  pass "fm-brief.sh: a no-mistakes brief states who opens the PR and off which base"
+}
+
+test_base_contract_states_actual_base_and_pr_target() {
+  local home brief
+  home="$TMP_ROOT/base-contract-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-recorded firstmate \
+    --mode no-mistakes --base origin/staging >/dev/null 2>&1
+  brief="$home/data/base-recorded/brief.md"
+
+  # grep -qx, not assert_grep: the contract line is machine-read by bin/fm-spawn.sh,
+  # so it is asserted as a whole line rather than as a substring.
+  grep -qx 'Base contract: base=origin/staging' "$brief" \
+    || fail "ship brief did not record its base as a machine-readable contract"
+  assert_grep "detached HEAD cut from \`origin/staging\`" "$brief" \
+    "ship brief did not state the base it was actually cut from"
+  assert_grep "Your PR must target \`staging\`" "$brief" \
+    "ship brief did not state the branch its PR must target"
+  # The replaced claim asserted a base the spawn never guaranteed.
+  assert_no_grep 'clean default branch' "$brief" \
+    "ship brief still asserts a default branch it cannot guarantee"
+  pass "fm-brief.sh: a recorded base states the real base and the required PR target"
+}
+
+test_base_omission_is_loud_for_ship_and_scout() {
+  local home id brief
+  home="$TMP_ROOT/base-gate-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-base-gate-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    grep -qx 'Base contract: base=unrecorded' "$brief" \
+      || fail "$kind brief silently omitted the base contract"
+    assert_grep 'was NOT recorded' "$brief" \
+      "$kind brief did not declare its base unknown"
+    assert_grep 'Establish your actual base before you branch' "$brief" \
+      "$kind brief did not require the worker to establish its own base"
+    assert_no_grep 'clean default branch' "$brief" \
+      "$kind brief still asserts a default branch the spawn never guaranteed"
+  done
+  pass "fm-brief.sh: ship and scout scaffolds make an unrecorded base fail-visible"
+}
+
+test_ship_asserts_its_base_contains_the_named_code() {
+  local home brief
+  home="$TMP_ROOT/base-assert-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-assert firstmate \
+    --mode no-mistakes --base origin/main >/dev/null 2>&1
+  brief="$home/data/base-assert/brief.md"
+
+  assert_grep 'Confirm your base contains the code this task names' "$brief" \
+    "ship brief does not require the worker to verify its base premise"
+  assert_grep 'blocked: base does not contain' "$brief" \
+    "ship brief does not tell the worker how to report a base missing the named code"
+  # Isolation and base are independent premises; neither assertion may replace the other.
+  assert_grep 'Verify isolation before anything else' "$brief" \
+    "the base assertion displaced the worktree-isolation assertion"
+  pass "fm-brief.sh: a ship brief asserts its base contains the code the task names"
+}
+
+test_scout_base_contract_carries_no_pr_target() {
+  local home brief
+  home="$TMP_ROOT/base-scout-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-scout firstmate \
+    --scout --base origin/feat/campaigns >/dev/null 2>&1
+  brief="$home/data/base-scout/brief.md"
+
+  grep -qx 'Base contract: base=origin/feat/campaigns' "$brief" \
+    || fail "scout brief did not record its base"
+  # A scout never pushes or opens a PR, so PR-target language would contradict its contract.
+  assert_no_grep 'Your PR must target' "$brief" \
+    "scout brief tells a scout where to target a PR it must never open"
+  pass "fm-brief.sh: a scout records its base without acquiring a PR target"
+}
+
+test_base_is_refused_where_it_does_not_apply() {
+  local home out status
+  home="$TMP_ROOT/base-refusal-home"
+  mkdir -p "$home/data"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-secondmate --secondmate --no-projects \
+    --base origin/main 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a secondmate charter accepted a task base"
+  assert_contains "$out" '--base applies only to crewmate ship or scout briefs' \
+    "a secondmate charter did not refuse --base with its own reason"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-empty firstmate --mode no-mistakes \
+    --base '' 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "an empty --base scaffolded a brief asserting an empty base"
+  assert_contains "$out" '--base requires a non-empty value' \
+    "an empty --base did not name the missing value"
+  pass "fm-brief.sh: --base is refused where it cannot describe a task worktree"
+}
+
+test_base_assertion_does_not_contradict_a_recorded_base() {
+  local home brief
+  home="$TMP_ROOT/base-assert-recorded-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-assert-recorded firstmate \
+    --mode no-mistakes --base origin/feat/campaigns >/dev/null 2>&1
+  brief="$home/data/base-assert-recorded/brief.md"
+
+  assert_grep 'Confirm your base contains the code this task names' "$brief" \
+    "a recorded base dropped the premise assertion instead of restating its reason"
+  assert_grep 'blocked: base does not contain' "$brief" \
+    "a recorded base dropped the instruction for reporting a base missing the named code"
+  assert_grep "Your base \`origin/feat/campaigns\` was chosen for this task" "$brief" \
+    "the assertion did not explain itself in terms of the base the brief actually recorded"
+  # The Setup section already told this worker its base is origin/feat/campaigns.
+  # Restating the remote-default premise here would contradict that line and
+  # invite the worker to "correct" itself back onto the default branch.
+  assert_no_grep "base comes from the repository's remote default branch" "$brief" \
+    "a brief with a recorded base still claims its base came from the remote default"
+
+  home="$TMP_ROOT/base-assert-unrecorded-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-assert-unrecorded firstmate \
+    --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/base-assert-unrecorded/brief.md"
+  assert_grep 'Confirm your base contains the code this task names' "$brief" \
+    "an unrecorded base dropped the premise assertion"
+  assert_grep "an unrecorded base comes from the repository's remote default branch" "$brief" \
+    "an unrecorded base lost the reason the assertion matters"
+  pass "fm-brief.sh: the base assertion states a reason that matches the base the brief recorded"
+}
+
+# A base has to be provable as current against origin, and only a branch on
+# origin can be, so this scaffold accepts that one shape for every kind of brief.
+# The form check is the same one bin/fm-spawn.sh applies, so a brief cannot record
+# a base its spawn would refuse.
+test_base_must_name_a_branch_on_origin() {
+  local home out status brief ref slug kind
+  home="$TMP_ROOT/base-form-home"
+  mkdir -p "$home/data"
+
+  for ref in main 'main~1' 'main^' 'HEAD^' 'origin/main~1' refs/heads/main upstream/main \
+    v1.2.3 0123456789abcdef0123456789abcdef01234567 \
+    origin/HEAD origin/refs/heads/main origin/origin/main; do
+    for kind in ship scout; do
+      slug="base-form-$kind-$(printf '%s' "$ref" | tr -c 'a-z0-9' '-')"
+      if [ "$kind" = scout ]; then
+        out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$slug" firstmate \
+          --scout --base "$ref" 2>&1); status=$?
+      else
+        out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$slug" firstmate \
+          --mode no-mistakes --base "$ref" 2>&1); status=$?
+      fi
+      [ "$status" -ne 0 ] || fail "a $kind brief accepted the base '$ref', which cannot be proven current"
+      assert_contains "$out" "$ref" "the $kind refusal of base '$ref' did not name the value that was passed"
+      assert_contains "$out" "must name a branch on origin" \
+        "the $kind refusal of base '$ref' did not say what a base must be"
+      [ -e "$home/data/$slug/brief.md" ] \
+        && fail "a $kind brief was scaffolded for a base it refused"
+    done
+  done
+
+  # origin/HEAD and its relatives pass the character screen, so they are refused
+  # for a different reason and have to say so: stripping "origin/" derives the PR
+  # target, and "HEAD", "refs/heads/main" and "origin/main" are not branches a
+  # forge can be asked to merge into. The refusal has to point at the branch to
+  # name instead rather than leave the caller guessing.
+  for ref in origin/HEAD origin/refs/heads/main origin/origin/main; do
+    slug="base-form-target-$(printf '%s' "$ref" | tr -c 'a-z0-9' '-')"
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$slug" firstmate \
+      --mode no-mistakes --base "$ref" 2>&1); status=$?
+    [ "$status" -ne 0 ] || fail "a brief accepted the base '$ref', which derives no PR target"
+    assert_contains "$out" "is not a branch name" \
+      "the refusal of base '$ref' did not say why the derived target is unusable"
+    assert_contains "$out" "origin/feat/omp-adaptor" \
+      "the refusal of base '$ref' did not point at naming the concrete branch"
+    [ -e "$home/data/$slug/brief.md" ] \
+      && fail "a brief was scaffolded for a base it refused"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-form-accepted firstmate \
+    --mode no-mistakes --base origin/feat/campaigns >/dev/null 2>&1
+  brief="$home/data/base-form-accepted/brief.md"
+  grep -qx 'Base contract: base=origin/feat/campaigns' "$brief" \
+    || fail "a branch on origin was not accepted as a base"
+  assert_grep "Your PR must target \`feat/campaigns\`" "$brief" \
+    "an accepted base did not yield the PR target derived from it"
+  pass "fm-brief.sh: only a branch on origin is accepted as a base, for ship and scout alike"
+}
+
 test_secondmate_no_projects_charter() {
   local home brief status
   home="$TMP_ROOT/no-projects-home"
@@ -963,6 +1201,14 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_premise_check_is_structural_in_every_task_scaffold
 test_premise_check_is_absent_from_secondmate_charter
 test_scout_and_secondmate_load_decision_hold_policy
+test_base_contract_states_actual_base_and_pr_target
+test_no_mistakes_brief_states_the_pipeline_pr_target_limitation
+test_base_omission_is_loud_for_ship_and_scout
+test_ship_asserts_its_base_contains_the_named_code
+test_scout_base_contract_carries_no_pr_target
+test_base_is_refused_where_it_does_not_apply
+test_base_assertion_does_not_contradict_a_recorded_base
+test_base_must_name_a_branch_on_origin
 test_evidence_paths_are_absolute
 test_relative_home_is_resolved_or_refused
 test_scout_and_secondmate_scaffold

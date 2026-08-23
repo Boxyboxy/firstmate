@@ -238,6 +238,147 @@ test_promote_requires_and_records_the_delivery_contract() {
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
+# The promoted worker rebases onto a fresh cut of its base, so the scout's
+# resolved base_commit stops being true at the moment of promotion. All three
+# base fields must be absent afterwards rather than blank, so a reader cannot
+# tell the record apart from a task whose base was never recorded. The base it
+# names does NOT stop being true, though, and promotion hands its instructions to
+# fm-send.sh rather than re-scaffolding a brief, so the hint is the only place
+# left that can name it - a scout cut from origin/feat/campaigns sent back to the
+# default branch is the wrong-base defect stated as an instruction.
+test_promotion_drops_the_scout_base_record() {
+  local home meta out status
+  home="$TMP_ROOT/promote-base/home"
+  mkdir -p "$home/state"
+  meta="$home/state/promote-base-d2.meta"
+  printf 'window=fm-promote-base-d2\nkind=scout\nworktree=/tmp/wt\nbase=origin/feat/campaigns\nbase_commit=%s\nbase_source=requested\n' \
+    '0123456789abcdef0123456789abcdef01234567' > "$meta"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-base-d2 --mode direct-PR --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "promotion carrying both flags should succeed (got: $out)"
+  assert_grep 'kind=ship' "$meta" "promotion did not restore ship teardown protection"
+  grep -q '^base' "$meta" \
+    && fail "promotion kept a base record whose resolved commit the promoted worker no longer stands on"
+  assert_grep 'worktree=/tmp/wt' "$meta" "promotion dropped unrelated task record fields"
+  assert_contains "$out" 'origin/feat/campaigns' \
+    "promotion did not name the base the scout was cut from in its ship instructions"
+  assert_contains "$out" 'contains the code this task names' \
+    "promotion did not ask the promoted worker to confirm its base carries the task's code"
+  case "$out" in
+    *'clean default-branch base'*)
+      fail "promotion sent a scout cut from a feature branch back to the default branch" ;;
+  esac
+  pass "fm-promote: promotion drops the scout's base record but still names that base to the promoted worker"
+}
+
+# A scout that genuinely recorded no base has nothing to name, so the hint keeps
+# the generic default-branch wording rather than inventing a base.
+test_promotion_without_a_recorded_base_keeps_the_generic_hint() {
+  local home meta out status
+  home="$TMP_ROOT/promote-nobase/home"
+  mkdir -p "$home/state"
+  meta="$home/state/promote-nobase-d3.meta"
+  printf 'window=fm-promote-nobase-d3\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-nobase-d3 --mode direct-PR --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "promotion of a scout with no recorded base should succeed (got: $out)"
+  assert_contains "$out" 'reset to a clean default-branch base' \
+    "promotion of a baseless scout lost the generic default-branch instruction"
+  pass "fm-promote: a scout with no recorded base keeps the generic default-branch instruction"
+}
+
+# local-only lands through bin/fm-merge-local.sh, which only ever fast-forwards
+# the project's LOCAL default branch and refuses a branch that default is not an
+# ancestor of. bin/fm-spawn.sh already refuses --base with --mode local-only for
+# that reason, so naming a non-default base here would hand the promoted worker
+# as an instruction the exact combination the spawn refuses as a flag, and the
+# resulting branch could never land.
+test_promotion_to_local_only_keeps_the_generic_hint_despite_a_recorded_base() {
+  local home meta out status
+  home="$TMP_ROOT/promote-local-only-base/home"
+  mkdir -p "$home/state"
+  meta="$home/state/promote-lob-d4.meta"
+  printf 'window=fm-promote-lob-d4\nkind=scout\nworktree=/tmp/wt\nbase=origin/feat/campaigns\nbase_commit=%s\nbase_source=requested\n' \
+    '0123456789abcdef0123456789abcdef01234567' > "$meta"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-lob-d4 --mode local-only --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "promotion to local-only should still succeed (got: $out)"
+  assert_contains "$out" 'reset to a clean default-branch base' \
+    "a local-only promotion lost the generic default-branch instruction its merge requires"
+  case "$out" in
+    *'origin/feat/campaigns'*)
+      fail "a local-only promotion named a base bin/fm-merge-local.sh can never fast-forward" ;;
+  esac
+  pass "fm-promote: a local-only promotion keeps the generic default-branch instruction its merge requires"
+}
+
+# A local-only brief and bin/fm-merge-local.sh have to agree about one branch:
+# the project's LOCAL default branch, which routinely sits ahead of its remote
+# because a previous local-only landing fast-forwarded it and never pushed. This
+# drives both real scripts end to end in that state - generate the brief, follow
+# the rebase target it names, then run the guarded merge - so a brief that ever
+# points the worker at a remote-tracking ref is refused here rather than at some
+# operator's merge gate.
+test_local_only_rebase_target_lands_when_local_default_is_ahead() {
+  local case_dir home origin project pool id meta brief target out status
+  case_dir="$TMP_ROOT/local-only-landing"
+  home="$case_dir/home"
+  origin="$case_dir/origin.git"
+  project="$case_dir/project"
+  pool="$case_dir/pool"
+  id=local-only-landing-e1
+  mkdir -p "$home/data" "$home/state"
+
+  git init --quiet --bare -b main "$origin"
+  git clone --quiet "$origin" "$case_dir/seed" 2>/dev/null
+  printf 'seed\n' > "$case_dir/seed/seed.txt"
+  git -C "$case_dir/seed" add seed.txt
+  git -C "$case_dir/seed" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm seed
+  git -C "$case_dir/seed" push --quiet origin main
+  git clone --quiet "$origin" "$project"
+
+  # The steady state fm-merge-local.sh itself creates: local main carries an
+  # earlier local-only landing that was never pushed, so it is ahead of origin/main.
+  printf 'landed earlier\n' > "$project/earlier.txt"
+  git -C "$project" add earlier.txt
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'earlier local-only landing'
+  [ "$(git -C "$project" rev-parse main)" != "$(git -C "$project" rev-parse origin/main)" ] \
+    || fail "fixture did not put the local default branch ahead of its remote"
+  git -C "$project" worktree add --quiet --detach "$pool" origin/main
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016 # The backticks are literal brief markup, not a substitution.
+  target=$(sed -n 's/^Keep your branch a clean fast-forward .*`\([^`]*\)`.*$/\1/p' "$brief" | head -n 1)
+  [ -n "$target" ] || fail "the local-only brief prescribed no branch to stay a fast-forward of"
+
+  git -C "$pool" checkout --quiet -b "fm/$id"
+  printf 'task work\n' > "$pool/task.txt"
+  git -C "$pool" add task.txt
+  git -C "$pool" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'task work'
+  git -C "$pool" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    rebase --quiet "$target" >/dev/null 2>&1 \
+    || fail "the branch could not be rebased onto '$target', the target the brief names"
+
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=ship\nmode=local-only\nproject=%s\n' "$id" "$project" > "$meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-merge-local.sh" "$id" 2>&1)
+  status=$?
+  expect_code 0 "$status" "the guarded merge refused a branch that followed the brief (target '$target'): $out"
+  git -C "$project" merge-base --is-ancestor "fm/$id" main \
+    || fail "the guarded merge did not land the task branch on the local default branch"
+  git -C "$project" show main:earlier.txt >/dev/null 2>&1 \
+    || fail "landing discarded the earlier unpushed local-only merge"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed local-only landing: target=%s local main=%s origin/main=%s\n' \
+      "$target" "$(git -C "$project" rev-parse --short main)" "$(git -C "$project" rev-parse --short origin/main)"
+  fi
+  pass "fm-brief/fm-merge-local: a local-only branch rebased onto the brief's target lands when local default is ahead"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -278,5 +419,9 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promotion_drops_the_scout_base_record
+test_promotion_without_a_recorded_base_keeps_the_generic_hint
+test_promotion_to_local_only_keeps_the_generic_hint_despite_a_recorded_base
+test_local_only_rebase_target_lands_when_local_default_is_ahead
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

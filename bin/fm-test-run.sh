@@ -991,6 +991,13 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
       ;;
+    bin/fm-base-lib.sh)
+      # The single owner of the admissible task-base shape, sourced by both
+      # bin/fm-brief.sh (pure-contract-unit) and bin/fm-spawn.sh
+      # (backend-dispatch and pure-contract-unit).
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      ;;
     bin/fm-composer-lib.sh)
       # The shared shape catalogue is vendor-rendered signal; a change to it
       # re-selects the live guard (fm-composer-matrix-live-e2e) alongside the

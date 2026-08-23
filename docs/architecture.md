@@ -166,7 +166,9 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
-`fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
+`fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of the task's resolved base, and any unsafe or unverifiable base stops the spawn.
+That base is the explicit `--base` when the task was given one, and origin's resolved default branch only when it was not; either way the resolved ref and its commit are recorded in the task's metadata.
+Only the spawn, the brief, and the brief's derived PR target consume that record today: `fm-review-diff.sh` resolves its diff base and `fm-teardown.sh` its already-landed safety check from `origin/HEAD`, so for a task cut from a non-default base both still compare against the default branch; that is pre-existing behavior tracked separately, not a property of the recorded base.
 Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
