@@ -152,10 +152,12 @@ JOBS_MAX=8
 # - tests-herdr's family-run step: about a 420s healthy wall plus the 900s bound
 #   is 1320s, so that step caps at 25 minutes (1500s), still far below the lane's
 #   75-minute job backstop so cleanup and artifact upload still run.
-# - tests-portable-parallel-1 and -2 satisfy the same rule from the other side.
-#   Their job caps stay at 10 minutes and their steps pass an explicit
-#   --timeout 540, a bound small enough that the cap still clears setup plus
-#   wall plus bound.
+# - tests-portable-parallel-1 and -2: their CI wall is about 1 min of serial sum
+#   because the Herdr suite gate-skips there, their four setup steps cost the
+#   same roughly 90-150s, and their steps pass an explicit --timeout 540, so each
+#   cap has to clear 150 + 60 + 540 = 750s. Both cap at 15 minutes (900s). They
+#   capped at 10 (600s), which failed the rule even for a wedge on the lane's
+#   first script, where 90 + 0 + 540 = 630s already exceeds the cap.
 #
 # 540s for the portable-parallel lanes is derived from the slowest single script
 # either lane can run, not from the lane wall, because the bound is per script:
@@ -167,9 +169,9 @@ JOBS_MAX=8
 # serial sum. The bound has to be safe on both, so it is derived from the host
 # where the suite runs. Whole-lane serial sums on that host, for context:
 # portable-parallel-1 213s across 11 scripts, portable-parallel-2 469s across 13.
-# 540s leaves 1.67x headroom over the 323s worst case and still fires 60s before
-# the 600s job cap. A round 300s was rejected: it is below the measured worst
-# case and would turn a legitimate slow pass into a false timeout.
+# 540s leaves 1.67x headroom over the 323s worst case, and the 15-minute lane cap
+# derived above is what lets it fire. A round 300s was rejected: it is below the
+# measured worst case and would turn a legitimate slow pass into a false timeout.
 SCRIPT_TIMEOUT_DEFAULT=900
 SCRIPT_TIMEOUT=$SCRIPT_TIMEOUT_DEFAULT
 
@@ -1587,7 +1589,7 @@ fi
 
 if [ "${#SCRIPTS[@]}" -eq 0 ]; then
   log "nothing to run"
-  printf 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0\n'
+  printf 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0 timed_out=0\n'
   if [ -n "$JSON_PATH" ]; then
     empty_rec=$(mktemp)
     empty_fam=$(mktemp)

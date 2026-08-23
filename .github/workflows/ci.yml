@@ -52,9 +52,15 @@ jobs:
   tests-portable-parallel-1:
     name: Behavior portable parallel 1
     runs-on: ubuntu-latest
-    # Measured shard wall is ~1 min of serial sum on proven scripts; this cap is
-    # a hang tripwire with margin, not the expected healthy end of the lane.
-    timeout-minutes: 10
+    # The per-script bound only fires if the job outlives it, so this cap must
+    # clear setup plus the work before the wedge plus the bound, not merely the
+    # bound (the rule is owned by SCRIPT_TIMEOUT_DEFAULT in bin/fm-test-run.sh).
+    # The four setup steps below cost ~90-150s, this lane's CI wall is ~1 min of
+    # serial sum because the Herdr suite gate-skips there, and the step passes an
+    # explicit 540s bound, so the cap has to clear 150 + 60 + 540 = 750s. 15
+    # minutes (900s) does. At 10 (600s) the bound could not fire anywhere in the
+    # lane: even a wedge on the first script needs 90 + 0 + 540 = 630s.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
@@ -75,13 +81,13 @@ jobs:
           npm install -g tasks-axi
           tasks-axi --version
       - name: Run portable parallel shard 1
-        # Explicit per-script bound: the runner's 900s default exceeds this
-        # job's 10-minute cap, so without a lane-appropriate bound GitHub would
-        # cancel the job before the bound could fire and name the wedged file.
-        # 540s clears this lane's whole measured 213s serial sum with room and
-        # still fires before the 600s cap. 540 is the shared portable-parallel
-        # bound; its derivation belongs to SCRIPT_TIMEOUT_DEFAULT in
-        # bin/fm-test-run.sh.
+        # Explicit per-script bound: once setup and the lane wall are counted,
+        # the runner's 900s default no longer fits under this job's 15-minute
+        # cap, so without a lane-appropriate bound GitHub would cancel the job
+        # before the bound could fire and name the wedged file. 540s clears this
+        # lane's whole measured 213s serial sum with room. 540 is the shared
+        # portable-parallel bound; its derivation belongs to
+        # SCRIPT_TIMEOUT_DEFAULT in bin/fm-test-run.sh.
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
@@ -98,7 +104,15 @@ jobs:
   tests-portable-parallel-2:
     name: Behavior portable parallel 2
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The per-script bound only fires if the job outlives it, so this cap must
+    # clear setup plus the work before the wedge plus the bound, not merely the
+    # bound (the rule is owned by SCRIPT_TIMEOUT_DEFAULT in bin/fm-test-run.sh).
+    # The four setup steps below cost ~90-150s, this lane's CI wall is ~1 min of
+    # serial sum because the Herdr suite gate-skips there, and the step passes an
+    # explicit 540s bound, so the cap has to clear 150 + 60 + 540 = 750s. 15
+    # minutes (900s) does. At 10 (600s) the bound could not fire anywhere in the
+    # lane: even a wedge on the first script needs 90 + 0 + 540 = 630s.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
@@ -119,12 +133,13 @@ jobs:
           npm install -g tasks-axi
           tasks-axi --version
       - name: Run portable parallel shard 2
-        # Explicit per-script bound: the runner's 900s default exceeds this
-        # job's 10-minute cap, so without a lane-appropriate bound GitHub would
-        # cancel the job before the bound could fire and name the wedged file.
-        # 540s clears this lane's slowest script, tests/fm-backend-herdr.test.sh
-        # at 323s, with 1.67x headroom and still fires 60s before the 600s cap.
-        # The derivation belongs to SCRIPT_TIMEOUT_DEFAULT in bin/fm-test-run.sh.
+        # Explicit per-script bound: once setup and the lane wall are counted,
+        # the runner's 900s default no longer fits under this job's 15-minute
+        # cap, so without a lane-appropriate bound GitHub would cancel the job
+        # before the bound could fire and name the wedged file. 540s clears this
+        # lane's slowest script, tests/fm-backend-herdr.test.sh at 323s, with
+        # 1.67x headroom. The derivation belongs to SCRIPT_TIMEOUT_DEFAULT in
+        # bin/fm-test-run.sh.
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"

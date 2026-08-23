@@ -15,7 +15,11 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-timeout-lib)
 mkdir -p "$TMP_ROOT"
-trap 'rm -rf -- "$TMP_ROOT"' EXIT
+cleanup() {
+  rm -rf -- "$TMP_ROOT"
+  fm_test_cleanup
+}
+trap cleanup EXIT
 
 # Every mechanism this host can really run. bash needs nothing; the others need
 # their own binary, and a machine missing one must not silently pass over it.
