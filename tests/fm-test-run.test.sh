@@ -833,6 +833,45 @@ test_per_script_timeout_cannot_be_disabled() {
   pass "the per-script bound refuses every non-bound and cannot be turned off"
 }
 
+test_selected_scripts_get_an_at_eof_stdin() {
+  local tmp fixture fifo holder rc out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-stdin.XXXXXX")
+  fixture="$tmp/stdin.test.sh"
+  out="$tmp/out.txt"
+  fifo="$tmp/never-eof.fifo"
+  # The 2026-08-22 defect's real mechanism: a test that reads the ambient stdin
+  # passes in CI, where stdin is already closed, and blocks forever under a
+  # terminal or an agent's open pipe. The fixture blocks on exactly that read,
+  # so it can only finish if the runner handed it an at-EOF stdin.
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+if IFS= read -r _; then
+  echo "not ok - the runner handed this script a readable stdin"
+  exit 1
+fi
+echo "ok - stdin was at end of file"
+SH
+  chmod +x "$fixture"
+  mkfifo "$fifo"
+  # A live writer that never writes and never closes: the read has no EOF to
+  # find unless the runner replaces it.
+  sleep 120 >"$fifo" &
+  holder=$!
+  exec 8<"$fifo"
+  set +e
+  fm_run_timed 60 "$RUNNER" --timeout 30 "$fixture" <&8 >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  exec 8<&-
+  kill "$holder" 2>/dev/null || true
+  [ "$rc" -ne 124 ] || { rm -rf "$tmp"; fail "the runner blocked on its own stdin instead of isolating the script's"; }
+  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "stdin isolation fixture failed (exit $rc): $(cat "$out")"; }
+  grep -Fq 'ok - stdin was at end of file' "$out" \
+    || { rm -rf "$tmp"; fail "the script did not see an at-EOF stdin: $(cat "$out")"; }
+  rm -rf "$tmp"
+  pass "every selected script runs with stdin at end of file, never the launcher's"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -854,3 +893,4 @@ test_aggregate_json
 test_per_script_timeout_reports_a_hang_instead_of_absorbing_it
 test_per_script_timeout_bounds_parallel_workers_too
 test_per_script_timeout_cannot_be_disabled
+test_selected_scripts_get_an_at_eof_stdin

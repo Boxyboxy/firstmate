@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # End-to-end remote reply relay through fm-on and the process-event runner.
+#
+# fm-on captures the caller's stdin as bounded job input, so bind this script's
+# stdin to an already-at-EOF source; see tests/fm-on.test.sh's header for the
+# mechanism. Per-command redirects still take precedence over this default.
 set -u
+exec </dev/null
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"

@@ -69,6 +69,12 @@
 # far above any legitimate script so only a wedged test can reach it. Bounded
 # execution itself is owned by bin/fm-timeout-lib.sh.
 #
+# Every selected script also runs with stdin at end of file, alongside the
+# private TMPDIR and unset FM_* overrides the parallel path already applies.
+# A test must never depend on the ambient stdin of whoever launched the suite:
+# CI closes stdin while a terminal or an agent's open pipe does not, so a test
+# that reads stdin would pass CI and block indefinitely elsewhere.
+#
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
 # owned by bin/fm-test-isolation-proof.sh; portable parallel shards are a
@@ -1661,7 +1667,11 @@ run_one_serial() {
   set +e
   # Stream live output while retaining a copy for gate-skip detection.
   # PIPESTATUS[0] is the bounded test script; tee's exit is ignored for aggregate.
-  fm_run_timed "$SCRIPT_TIMEOUT" bash "$script" 2>&1 | tee "$out"
+  # stdin is /dev/null so no test can block on the ambient stdin of whoever
+  # launched the suite. CI closes stdin and a terminal or an agent's open pipe
+  # does not, which is how a stdin-blocking test passed CI and still wedged a
+  # local run for hours.
+  fm_run_timed "$SCRIPT_TIMEOUT" bash "$script" </dev/null 2>&1 | tee "$out"
   rc=${PIPESTATUS[0]}
   set -e
   : "${rc:=1}"
@@ -1768,7 +1778,7 @@ else
         FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
-      fm_run_timed "$SCRIPT_TIMEOUT" bash "$script" >"$work/output" 2>&1
+      fm_run_timed "$SCRIPT_TIMEOUT" bash "$script" </dev/null >"$work/output" 2>&1
       rc=$?
       end_ms=$(now_ms)
       duration=$((end_ms - begin_ms))

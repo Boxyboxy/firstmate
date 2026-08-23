@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # Behavior tests for the generic SSH transport and fixed remote entrypoint.
+#
+# fm-on captures the caller's stdin as bounded job input (bin/fm-remote-job-lib.sh
+# stages it with a bounded `head -c`), so every fm_on call below inherits this
+# script's stdin. Bind it to an already-at-EOF source: inheriting the runner's
+# stdin made the transport's capture block forever whenever that stdin was a
+# terminal or a pipe nobody closes, which is how this file wedged a whole suite
+# run on 2026-08-22 while passing in CI, where stdin is already closed. The one
+# case that asserts stdin passthrough still redirects per command, which takes
+# precedence over this default.
 set -u
+exec </dev/null
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -54,8 +64,12 @@ case "\${1:-}:\${2:-}" in
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
 esac
 SH
+# The doctor resolves the backend adapter on the remote root, so the fixture
+# needs everything that adapter sources. Without them the probe fails only on a
+# host that actually has the backend CLI installed.
 cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
-  "$ROOT/bin/fm-backend.sh" "$REMOTE_ROOT/bin/"
+  "$ROOT/bin/fm-backend.sh" "$ROOT/bin/fm-composer-lib.sh" \
+  "$ROOT/bin/fm-transition-lib.sh" "$REMOTE_ROOT/bin/"
 mkdir -p "$REMOTE_ROOT/bin/backends"
 cp "$ROOT/bin/backends/herdr.sh" "$REMOTE_ROOT/bin/backends/herdr.sh"
 cat > "$REMOTE_ROOT/bin/fm-mutate.sh" <<'SH'
