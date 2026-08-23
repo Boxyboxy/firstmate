@@ -227,11 +227,151 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
+# Publish a branch carrying content the remote default does not have, so a test
+# can prove which base a spawn actually landed on rather than only that it moved.
+publish_feature_branch() {  # <branch> <marker-file>
+  local branch=$1 marker=$2 publisher="$CASE_DIR/publisher"
+  git -C "$publisher" checkout --quiet -b "$branch"
+  printf 'execution_kind lives only on this branch\n' > "$publisher/$marker"
+  git -C "$publisher" add "$marker"
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm "$branch"
+  git -C "$publisher" push --quiet origin "$branch"
+  git -C "$publisher" rev-parse HEAD
+}
+
+test_explicit_base_cuts_from_requested_branch() {
+  local rec id out status feature_sha meta
+  id='pool-explicit-base-r7'
+  rec=$(make_case explicit-base "$id")
+  read_case_record "$rec"
+  feature_sha=$(publish_feature_branch feat/campaigns campaigns.txt)
+  meta="$HOME_DIR/state/$id.meta"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base origin/feat/campaigns)
+  status=$?
+  expect_code 0 "$status" "spawn should accept an explicit base"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$feature_sha" ] \
+    || fail "an explicit base did not cut the worktree from the requested branch"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" != "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
+    || fail "fixture did not prove the requested base differs from the remote default"
+  [ -f "$POOL_DIR/campaigns.txt" ] \
+    || fail "the requested base is missing the feature content the task would name"
+  grep -qx 'base=origin/feat/campaigns' "$meta" \
+    || fail "metadata did not record the requested base"
+  grep -qx "base_commit=$feature_sha" "$meta" \
+    || fail "metadata did not record the resolved base commit"
+  grep -qx 'base_source=requested' "$meta" \
+    || fail "metadata did not record the base as requested rather than defaulted"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed explicit base: %s\n' "$(grep '^base' "$meta" | tr '\n' ' ')"
+  fi
+  pass "an explicit base cuts the worktree from the requested branch and records it"
+}
+
+test_defaulted_base_is_recorded_and_declared() {
+  local rec id out status meta
+  id='pool-default-base-r8'
+  rec=$(make_case default-base "$id")
+  read_case_record "$rec"
+  meta="$HOME_DIR/state/$id.meta"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should still launch without an explicit base"
+  assert_contains "$out" 'no --base given' \
+    "spawn applied the remote-default base without declaring it"
+  grep -qx 'base=origin/main' "$meta" \
+    || fail "metadata did not record the defaulted base"
+  grep -qx 'base_source=remote-default' "$meta" \
+    || fail "metadata did not distinguish a defaulted base from a requested one"
+  grep -q '^base_commit=[0-9a-f]\{40\}$' "$meta" \
+    || fail "metadata did not record the defaulted base commit"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed defaulted base: %s\n' "$(grep '^base' "$meta" | tr '\n' ' ')"
+  fi
+  pass "a defaulted base is announced and recorded as remote-default"
+}
+
+test_unknown_explicit_base_refuses() {
+  local rec id out status before
+  id='pool-unknown-base-r9'
+  rec=$(make_case unknown-base "$id")
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base origin/no-such-branch)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded on a base that does not exist"
+  assert_contains "$out" 'could not fetch requested base' \
+    "spawn did not clearly refuse an unresolvable requested base"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after refusing an unresolvable requested base"
+  [ -f "$HOME_DIR/state/$id.meta" ] \
+    && fail "spawn recorded metadata for a task it refused to launch"
+  pass "an unresolvable requested base refuses before the worktree moves"
+}
+
+test_brief_base_contract_mismatch_refuses() {
+  local rec id out status before
+  id='pool-base-mismatch-r10'
+  rec=$(make_case base-mismatch "$id")
+  read_case_record "$rec"
+  publish_feature_branch feat/campaigns campaigns.txt >/dev/null
+  printf 'Delivery contract: mode=no-mistakes\nBase contract: base=origin/feat/campaigns\n' \
+    > "$HOME_DIR/data/$id/brief.md"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base origin/main)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched a worker whose brief names a different base"
+  assert_contains "$out" 'base mismatch' \
+    "spawn did not clearly refuse a brief/spawn base disagreement"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after refusing a base disagreement"
+  pass "a brief naming a different base refuses the spawn"
+}
+
+test_unrecorded_brief_base_refuses_explicit_base() {
+  local rec id out status
+  id='pool-base-unrecorded-r11'
+  rec=$(make_case base-unrecorded "$id")
+  read_case_record "$rec"
+  printf 'Delivery contract: mode=no-mistakes\nBase contract: base=unrecorded\n' \
+    > "$HOME_DIR/data/$id/brief.md"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base origin/main)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a base its brief declares unrecorded"
+  assert_contains "$out" 'declares its base unrecorded' \
+    "spawn did not name the unrecorded brief base as the disagreement"
+  pass "a brief declaring its base unrecorded refuses an explicit base"
+}
+
+test_base_refused_on_secondmate_spawn() {
+  local rec id out status
+  id='pool-base-secondmate-r12'
+  rec=$(make_case base-secondmate "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --secondmate --base origin/main)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a secondmate spawn accepted a task base"
+  assert_contains "$out" '--base applies only to crewmate ship or scout spawns' \
+    "a secondmate spawn did not refuse --base with its own reason"
+  pass "a secondmate spawn refuses a task base"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
+test_explicit_base_cuts_from_requested_branch
+test_defaulted_base_is_recorded_and_declared
+test_unknown_explicit_base_refuses
+test_brief_base_contract_mismatch_refuses
+test_unrecorded_brief_base_refuses_explicit_base
+test_base_refused_on_secondmate_spawn
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

@@ -6,8 +6,8 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--base <ref>] [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout [--base <ref>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -27,6 +27,20 @@
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
+#   --base <ref> records the base commit-ish the task worktree is cut from, so the
+#   generated Setup states the ACTUAL base and the branch the PR must target
+#   instead of asserting a default the spawn never guaranteed. A worktree's base
+#   is resolved from the REMOTE's default branch (bin/fm-spawn.sh's
+#   freshen_spawn_worktree_base), which is a per-repo property and frequently not
+#   the branch a task's code lives on, so the base is an input here rather than an
+#   assumption. Ship and scout scaffolds record it as a fixed machine-readable
+#   "Base contract: base=<ref>" line that bin/fm-spawn.sh checks against its own
+#   --base before launching, so the worker's stated base and the spawned base
+#   cannot drift apart. Like --herdr-lab, the flag is explicit because the base
+#   cannot be detected here: this script never touches a worktree, and {TASK} is
+#   filled in after scaffolding. Omitting it is never silent - the Setup section
+#   then declares the base unrecorded and requires the worker to establish it
+#   before branching, rather than claiming a default branch.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
@@ -40,7 +54,11 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
-# Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Ship briefs begin with a worktree-isolation assertion before the branch step,
+# then require the worker to prove its base contains the code the task names
+# before implementing. Isolation and base are independent premises: an isolated
+# worktree cut from a base that lacks the feature under change still makes every
+# later diff and test meaningless, so both are asserted rather than assumed.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
@@ -106,6 +124,8 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+BASE=
+BASE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -115,6 +135,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      base) BASE=$a; BASE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -127,6 +148,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --base) want_value=base ;;
+    --base=*) BASE=${a#--base=}; BASE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -160,6 +183,23 @@ if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
   exit 1
 fi
+
+# A secondmate home is a persistent lease, not a task worktree cut from a base,
+# so a base contract has nothing to describe there.
+if [ "$KIND" = secondmate ] && [ "$BASE_SET" -eq 1 ]; then
+  echo "error: --base applies only to crewmate ship or scout briefs; a secondmate home is a persistent lease, not a worktree cut from a task base" >&2
+  exit 1
+fi
+
+# An empty --base would scaffold a brief asserting a base of "", which is worse
+# than the honest unrecorded declaration, so it stops here.
+[ "$BASE_SET" -eq 0 ] || [ -n "$BASE" ] || { echo "error: --base requires a non-empty value" >&2; exit 1; }
+
+# The PR target is derived from the base rather than taken as a second input, so
+# the two can never disagree: a branch cut from a base belongs in a PR against
+# that same base. Stripping a leading "origin/" turns the remote-tracking ref the
+# spawn resolves into the branch name a forge expects as a PR base.
+BASE_BRANCH=${BASE#origin/}
 
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
@@ -298,6 +338,43 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# Base statement shared by the ship and scout Setup sections. The scaffold cannot
+# inspect a worktree, so an omitted --base is declared rather than guessed: a
+# brief must never assert a base the spawn did not guarantee. The leading
+# "Base contract: base=<ref>" line is the machine-readable record bin/fm-spawn.sh
+# reads back and refuses to contradict.
+if [ "$BASE_SET" -eq 1 ]; then
+# shellcheck disable=SC2016  # single quotes are deliberate: the backtick-wrapped git commands below are literal brief text for the reading agent and must not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
+BASE_SETUP=$(printf '%s\n' \
+'Base contract: base='"$BASE" \
+'You are in a disposable git worktree of '"$REPO"', at a detached HEAD cut from `'"$BASE"'`.' \
+'Confirm that base before you branch: `git rev-parse HEAD` must equal `git rev-parse '"$BASE"'`.' \
+'If they differ, this worktree was cut from something other than the recorded base - append `blocked: base is {the actual commit}, not the recorded '"$BASE"'` to the status file and stop.')
+# The PR target is ship-only language: a scout never pushes or opens one.
+BASE_PR_TARGET='Your PR must target `'"$BASE_BRANCH"'`, which is NOT necessarily this repository'"'"'s default branch; confirm the target rather than accepting the forge'"'"'s default.'
+BASE_DESC='`'"$BASE"'`'
+else
+IFS= read -r -d '' BASE_SETUP <<EOF || true
+Base contract: base=unrecorded
+You are in a disposable git worktree of $REPO at a detached HEAD, and **the base it was cut from was NOT recorded**, so this brief does not know it.
+Do not assume it is the default branch: a task worktree's base is resolved from the REMOTE's default branch, a per-repo property that is frequently not the branch your task's code lives on.
+Establish your actual base before you branch: \`git rev-parse HEAD\`, \`git log --oneline -1 HEAD\`, and \`git branch -r --contains HEAD\`.
+EOF
+BASE_SETUP=${BASE_SETUP%$'\n'}
+BASE_PR_TARGET='Derive the branch your PR must target from the base you just established, never from the forge'"'"'s default, and say which branch you chose when you report the PR.'
+BASE_DESC='the base you established in Setup'
+fi
+
+# Ship-only base premise assertion. Worktree isolation and base correctness are
+# independent premises, so proving one never proves the other.
+IFS= read -r -d '' BASE_ASSERT <<'EOF' || true
+**Confirm your base contains the code this task names.** A task worktree's base comes from the repository's remote default branch rather than from your task, so a base that lacks the very feature you were asked to change is a routine outcome, not a rare one.
+Before implementing anything, prove the code the `# Task` section names is present in your base: search for the symbols, files, or behavior it names, for example `git grep <symbol> HEAD -- <path>` or `git log --oneline -1 HEAD -- <path>`.
+If the named code is absent, or present only in a form the task does not describe, STOP - do not implement - append `blocked: base does not contain {the named code}` to the status file and stop.
+A diff and a test written on a base that lacks the feature measure the wrong tree, however careful the change itself is.
+EOF
+BASE_ASSERT=${BASE_ASSERT%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -308,7 +385,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+$BASE_SETUP
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
@@ -367,13 +444,15 @@ EOF
     ;;
   local-only)
     SETUP2=""
+    # local-only never opens a PR, so the Setup section carries no PR target.
+    BASE_PR_TARGET=
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+Keep your branch a clean fast-forward onto $BASE_DESC - if it has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
@@ -410,6 +489,13 @@ esac
 # briefs stay byte-identical to the historical Bash 5 output.
 DOD=${DOD%$'\n'}
 
+# The PR target is a ship-mode concern, so it joins the shared base statement
+# only for the modes that actually open one. Appending it here keeps an empty
+# value from leaving a stray blank line inside the Setup section.
+BASE_SETUP_SHIP=$BASE_SETUP
+[ -z "$BASE_PR_TARGET" ] || BASE_SETUP_SHIP="$BASE_SETUP
+$BASE_PR_TARGET"
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -419,11 +505,13 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+$BASE_SETUP_SHIP
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
+
+$BASE_ASSERT
 
 1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
 

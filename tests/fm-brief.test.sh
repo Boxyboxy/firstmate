@@ -439,6 +439,122 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
+test_base_contract_states_actual_base_and_pr_target() {
+  local home brief
+  home="$TMP_ROOT/base-contract-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-recorded firstmate \
+    --mode no-mistakes --base origin/staging >/dev/null 2>&1
+  brief="$home/data/base-recorded/brief.md"
+
+  # grep -qx, not assert_grep: the contract line is machine-read by bin/fm-spawn.sh,
+  # so it is asserted as a whole line rather than as a substring.
+  grep -qx 'Base contract: base=origin/staging' "$brief" \
+    || fail "ship brief did not record its base as a machine-readable contract"
+  assert_grep 'detached HEAD cut from `origin/staging`' "$brief" \
+    "ship brief did not state the base it was actually cut from"
+  assert_grep 'Your PR must target `staging`' "$brief" \
+    "ship brief did not state the branch its PR must target"
+  # The replaced claim asserted a base the spawn never guaranteed.
+  assert_no_grep 'clean default branch' "$brief" \
+    "ship brief still asserts a default branch it cannot guarantee"
+  pass "fm-brief.sh: a recorded base states the real base and the required PR target"
+}
+
+test_base_omission_is_loud_for_ship_and_scout() {
+  local home id brief
+  home="$TMP_ROOT/base-gate-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-base-gate-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    grep -qx 'Base contract: base=unrecorded' "$brief" \
+      || fail "$kind brief silently omitted the base contract"
+    assert_grep 'was NOT recorded' "$brief" \
+      "$kind brief did not declare its base unknown"
+    assert_grep 'Establish your actual base before you branch' "$brief" \
+      "$kind brief did not require the worker to establish its own base"
+    assert_no_grep 'clean default branch' "$brief" \
+      "$kind brief still asserts a default branch the spawn never guaranteed"
+  done
+  pass "fm-brief.sh: ship and scout scaffolds make an unrecorded base fail-visible"
+}
+
+test_ship_asserts_its_base_contains_the_named_code() {
+  local home brief
+  home="$TMP_ROOT/base-assert-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-assert firstmate \
+    --mode no-mistakes --base origin/main >/dev/null 2>&1
+  brief="$home/data/base-assert/brief.md"
+
+  assert_grep 'Confirm your base contains the code this task names' "$brief" \
+    "ship brief does not require the worker to verify its base premise"
+  assert_grep 'blocked: base does not contain' "$brief" \
+    "ship brief does not tell the worker how to report a base missing the named code"
+  # Isolation and base are independent premises; neither assertion may replace the other.
+  assert_grep 'Verify isolation before anything else' "$brief" \
+    "the base assertion displaced the worktree-isolation assertion"
+  pass "fm-brief.sh: a ship brief asserts its base contains the code the task names"
+}
+
+test_scout_base_contract_carries_no_pr_target() {
+  local home brief
+  home="$TMP_ROOT/base-scout-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-scout firstmate \
+    --scout --base origin/feat/campaigns >/dev/null 2>&1
+  brief="$home/data/base-scout/brief.md"
+
+  grep -qx 'Base contract: base=origin/feat/campaigns' "$brief" \
+    || fail "scout brief did not record its base"
+  # A scout never pushes or opens a PR, so PR-target language would contradict its contract.
+  assert_no_grep 'Your PR must target' "$brief" \
+    "scout brief tells a scout where to target a PR it must never open"
+  pass "fm-brief.sh: a scout records its base without acquiring a PR target"
+}
+
+test_local_only_fast_forward_names_the_recorded_base() {
+  local home brief
+  home="$TMP_ROOT/base-local-only-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-local-only firstmate \
+    --mode local-only --base origin/staging >/dev/null 2>&1
+  brief="$home/data/base-local-only/brief.md"
+
+  assert_grep 'fast-forward onto `origin/staging`' "$brief" \
+    "local-only brief did not name its recorded base as the rebase target"
+  assert_no_grep 'if `main` has advanced' "$brief" \
+    "local-only brief still hardcodes main as the branch to rebase onto"
+  assert_no_grep 'Your PR must target' "$brief" \
+    "local-only brief names a PR target for a mode that opens no PR"
+  pass "fm-brief.sh: local-only rebases onto its recorded base rather than a hardcoded main"
+}
+
+test_base_is_refused_where_it_does_not_apply() {
+  local home out status
+  home="$TMP_ROOT/base-refusal-home"
+  mkdir -p "$home/data"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-secondmate --secondmate --no-projects \
+    --base origin/main 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a secondmate charter accepted a task base"
+  assert_contains "$out" '--base applies only to crewmate ship or scout briefs' \
+    "a secondmate charter did not refuse --base with its own reason"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-empty firstmate --mode no-mistakes \
+    --base '' 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "an empty --base scaffolded a brief asserting an empty base"
+  assert_contains "$out" '--base requires a non-empty value' \
+    "an empty --base did not name the missing value"
+  pass "fm-brief.sh: --base is refused where it cannot describe a task worktree"
+}
+
 test_secondmate_no_projects_charter() {
   local home brief status
   home="$TMP_ROOT/no-projects-home"
@@ -731,4 +847,10 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_base_contract_states_actual_base_and_pr_target
+test_base_omission_is_loud_for_ship_and_scout
+test_ship_asserts_its_base_contains_the_named_code
+test_scout_base_contract_carries_no_pr_target
+test_local_only_fast_forward_names_the_recorded_base
+test_base_is_refused_where_it_does_not_apply
 test_scout_and_secondmate_scaffold

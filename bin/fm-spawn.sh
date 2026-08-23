@@ -1,9 +1,26 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--base <ref>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--base <ref>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#   --base <ref> is the base this task's worktree is cut from: the intended
+#   starting point, resolved per TASK at intake. It applies to ship and scout
+#   spawns and is refused on --secondmate (a persistent lease, not a task
+#   worktree) and on --relaunch (which reuses an existing worktree as it stands).
+#   Without it the base falls back to the remote's current default branch, which
+#   is a per-repo property rather than a statement about this task: identical
+#   flags in different repos legitimately produce different bases, and the
+#   fallback is frequently not the branch the task's code lives on. That fallback
+#   is therefore announced loudly rather than applied silently.
+#   Either way the resolved ref, its commit, and whether it was requested or
+#   defaulted are recorded in state/<id>.meta as base=, base_commit=, and
+#   base_source=, so the base is durable and auditable instead of being
+#   reconstructed later from `git merge-base` archaeology.
+#   A ship or scout brief records the same value as a fixed
+#   "Base contract: base=<ref>" line, and this script refuses a spawn that
+#   contradicts it, so a worker is never handed a brief naming a base it is not
+#   standing on.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -275,6 +292,10 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+BASE_ARG=
+# Published by freshen_spawn_worktree_base once the base is resolved and verified.
+SPAWN_BASE=
+SPAWN_BASE_COMMIT=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -282,6 +303,7 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+BASE_SET=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -297,6 +319,7 @@ for a in "$@"; do
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
+      base) BASE_ARG=$a; BASE_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
@@ -319,6 +342,8 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --base) want_value=base ;;
+    --base=*) BASE_ARG=${a#--base=}; BASE_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
     *) POS+=("$a") ;;
@@ -332,6 +357,7 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$BASE_SET" -eq 0 ] || [ -n "$BASE_ARG" ] || { echo "error: --base requires a non-empty value" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -359,6 +385,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
+  # A relaunch keeps the existing worktree exactly as it stands, so it never
+  # re-resolves a base and must not appear to accept a new one.
+  [ "$BASE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's existing worktree and its recorded base; --base cannot override it" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -394,6 +423,14 @@ else
       exit 1
     }
   fi
+fi
+
+# A secondmate home is a persistent lease rather than a task worktree cut from a
+# base, so nothing there consumes a base ref. A scout does take a freshened
+# worktree, so it accepts one exactly like a ship task.
+if [ "$KIND" = secondmate ] && [ "$BASE_SET" -eq 1 ]; then
+  echo "error: --base applies only to crewmate ship or scout spawns; a secondmate home is a persistent lease, not a worktree cut from a task base" >&2
+  exit 1
 fi
 
 spawn_remote_secondmate() {
@@ -1677,6 +1714,28 @@ if [ "$KIND" = ship ]; then
   fi
 fi
 
+# Brief/spawn base agreement, same shape and same reason as the delivery check
+# above. fm-brief.sh records a crewmate brief's base as a fixed
+# "Base contract: base=<ref>" line, so a spawn that cuts the worktree from a
+# different ref would hand the worker a brief that names a base it is not
+# standing on - the precise false premise this contract exists to prevent.
+# "unrecorded" is the scaffold's honest declaration that no base was given, so it
+# is the one value that never contradicts a flag.
+if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
+  BRIEF_BASE=$(sed -n 's/^Base contract: base=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  if [ -z "$BRIEF_BASE" ]; then
+    [ "$BASE_SET" -eq 0 ] || echo "warning: $BRIEF records no base contract line (scaffolded before briefs recorded one); launching on the explicit --base $BASE_ARG - re-scaffold the brief so the worker is told which base it is on" >&2
+  elif [ "$BRIEF_BASE" = unrecorded ]; then
+    [ "$BASE_SET" -eq 0 ] || {
+      echo "error: base mismatch for $ID: this spawn passed --base $BASE_ARG but the brief declares its base unrecorded; re-scaffold the brief with the same --base so the worker is told the base it is actually on" >&2
+      exit 1
+    }
+  elif [ "$BRIEF_BASE" != "$BASE_ARG" ]; then
+    echo "error: base mismatch for $ID: the brief says base=$BRIEF_BASE but this spawn passed --base ${BASE_ARG:-<none>}; correct the flag or re-scaffold the brief so the worker's stated base and its actual base agree" >&2
+    exit 1
+  fi
+fi
+
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
@@ -1727,24 +1786,52 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
-freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+# Resolve, refresh, and RECORD the base this task's worktree starts from.
+#
+# With an explicit <base-ref> the caller's intent is authoritative and is used
+# verbatim. Without one the base falls back to the remote's current default
+# branch, which is a PER-REPO property and not a statement about this task: two
+# tasks in different repos, spawned with identical flags, legitimately start from
+# different branches, and neither one is necessarily the branch the task's code
+# lives on. That fallback is therefore declared loudly rather than applied
+# silently, and either way the resolved ref and commit are published in
+# SPAWN_BASE/SPAWN_BASE_COMMIT so state/<id>.meta records the base as durable
+# fact instead of leaving it to later `git merge-base` archaeology.
+freshen_spawn_worktree_base() {  # <worktree> [<base-ref>]
+  local worktree=$1 requested=${2:-} default target expected actual status branch
+  SPAWN_BASE=""
+  SPAWN_BASE_COMMIT=""
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+  if [ -n "$requested" ]; then
+    target=$requested
+    # A single-branch clone may not carry the requested branch yet, so fetch it
+    # by name before resolving. A ref that is not a remote-tracking branch (a
+    # tag or raw commit) needs no such fetch and is verified as-is below.
+    case "$target" in
+      origin/*)
+        branch=${target#origin/}
+        if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
+          echo "error: could not fetch requested base '$target' for pooled worktree '$worktree'; refusing to launch from a base this spawn cannot verify" >&2
+          return 1
+        fi ;;
+    esac
+  else
+    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    target="origin/$default"
+    if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+      echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
@@ -1766,6 +1853,13 @@ freshen_spawn_worktree_base() {  # <worktree>
   if [ "$actual" != "$expected" ]; then
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
     return 1
+  fi
+  # Published only after the reset is verified, so the recorded base always
+  # describes the commit the worker actually starts from.
+  SPAWN_BASE=$target
+  SPAWN_BASE_COMMIT=$expected
+  if [ -z "$requested" ]; then
+    echo "notice: no --base given for $ID; its worktree starts from '$target' ('$expected'), resolved from the remote's current default branch rather than from this task - confirm that base actually contains the code this task names" >&2
   fi
 }
 
@@ -2261,7 +2355,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" || exit 1
+  freshen_spawn_worktree_base "$WT" "$BASE_ARG" || exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -2643,6 +2737,23 @@ preserve_relaunch_meta() {
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
+  # The base this worktree actually starts from, recorded as durable fact so it
+  # never has to be reconstructed later from `git merge-base` archaeology.
+  # base_source distinguishes a base firstmate chose for this task from one that
+  # merely fell out of the remote's default branch, which is the difference
+  # between an intended base and an accidental one. Both are omitted when no base
+  # was resolved (a secondmate lease, or a relaunch reusing an existing
+  # worktree), and a relaunch preserves the original task's recorded values
+  # because relaunching never re-cuts the worktree.
+  if [ -n "$SPAWN_BASE" ]; then
+    echo "base=$SPAWN_BASE"
+    echo "base_commit=$SPAWN_BASE_COMMIT"
+    if [ "$BASE_SET" -eq 1 ]; then
+      echo "base_source=requested"
+    else
+      echo "base_source=remote-default"
+    fi
+  fi
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
