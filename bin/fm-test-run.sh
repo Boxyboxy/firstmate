@@ -161,19 +161,21 @@ JOBS_MAX=8
 #   is 1311s, so that step caps at 25 minutes (1500s), still far below the
 #   lane's 75-minute job backstop so cleanup and artifact upload still run.
 # - tests-portable-serial: worst setup 10s, and worst measured shard walls of
-#   649s, 695s, 943s and 617s for shards 1 through 4. Shards 1, 2 and 4 need
-#   1557s, 1602s and 1527s and clear the 30-minute (1800s) cap. Shard 3 needs
-#   10 + 943 + 900 = 1853s and does not: with 1800s the wedge has to start
-#   within the shard's first ~890s to be named, so a wedge in the last ~53s of
-#   that shard's healthy timeline is still cancelled by GitHub with no
-#   FM_TEST_TIMEOUT marker and no file named. Closing that needs the cap raised
-#   above 1853s, which is a workflow change rather than a documentation one.
-#   30 minutes was itself a raise from 20 (1200s), which left the bound blind
-#   for most of every shard's timeline in the lane that holds the stateful
-#   hang-prone scripts: watcher, lock, AFK, tmux, daemon. Shard 3 is also the
-#   shard portable_serial_weight_hints most understates - it estimates 664s
-#   against 693-943s observed - so refreshing those hints from a green run is
-#   part of the same gap.
+#   649s, 695s, 943s and 617s for shards 1 through 4, so the four shards need
+#   1557s, 1602s, 1853s and 1527s. All four clear the 35-minute (2100s) cap.
+#   Shard 3 is the binding one and clears it by 247s, headroom comparable to
+#   the ~200s the portable-parallel lanes carry. 35 minutes was itself a raise
+#   from 30 (1800s), which shards 1, 2 and 4 cleared but shard 3 did not: under
+#   1800s a wedge had to start within that shard's first ~890s to be named, so
+#   a wedge in the last ~53s of its healthy timeline was cancelled by GitHub
+#   with no FM_TEST_TIMEOUT marker and no file named. 30 was in turn a raise
+#   from 20 (1200s), which left the bound blind for most of every shard's
+#   timeline in the lane that holds the stateful hang-prone scripts: watcher,
+#   lock, AFK, tmux, daemon. Shard 3 is also the shard
+#   portable_serial_weight_hints most understates - it estimates 664s against
+#   693-943s observed - so refreshing those hints from a green run
+#   (docs/fm-test-portable-shards.md owns that procedure) would rebalance the
+#   lane rather than only widen its cap.
 #
 # 540s for the portable-parallel lanes is derived from the slowest single script
 # either lane can run, not from the lane wall, because the bound is per script:

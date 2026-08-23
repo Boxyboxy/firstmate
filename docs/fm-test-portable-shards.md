@@ -111,10 +111,10 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 | Lane | Bound |
 |---|---|
 | portable parallel 1/2 | job `timeout-minutes: 15`; per-script `--timeout 540` passed by the step |
-| portable serial 1-4 | job `timeout-minutes: 30`; per-script bound 900s (the runner default) |
+| portable serial 1-4 | job `timeout-minutes: 35`; per-script bound 900s (the runner default) |
 | Herdr | family-run step `timeout-minutes: 25`; job `timeout-minutes: 75` backstop; per-script bound 900s (the runner default) |
 
 Timeouts are hang tripwires rather than expected healthy durations.
 A job or step cap only lets the per-script bound name a wedged file when the cap outlives setup plus the work before the wedge plus the bound, so a bound smaller than the cap is necessary but not sufficient.
 `.github/workflows/ci.yml` owns the exact numbers.
-`SCRIPT_TIMEOUT_DEFAULT` in `bin/fm-test-run.sh` owns the per-script bound, that rule, and each lane's derivation against measured CI walls, including the one portable serial shard whose worst measured wall the current 30-minute cap does not clear.
+`SCRIPT_TIMEOUT_DEFAULT` in `bin/fm-test-run.sh` owns the per-script bound, that rule, and each lane's derivation against measured CI walls, including which lane's measured wall binds each cap.

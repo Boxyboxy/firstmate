@@ -156,9 +156,8 @@ jobs:
     # bound only fires if the job outlives it, so this cap must clear setup plus
     # the shard wall plus the 900s bound, not merely the bound. That rule and
     # this lane's measured derivation are owned by SCRIPT_TIMEOUT_DEFAULT in
-    # bin/fm-test-run.sh, including the one shard whose worst measured wall this
-    # 30-minute cap does not yet clear.
-    timeout-minutes: 30
+    # bin/fm-test-run.sh; do not re-derive them here.
+    timeout-minutes: 35
     strategy:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
