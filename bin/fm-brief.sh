@@ -27,10 +27,10 @@
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
-#   --base <ref> records the base commit-ish the task worktree is cut from, so the
-#   generated Setup states the ACTUAL base and the branch the PR must target
-#   instead of asserting a default the spawn never guaranteed. A worktree's base
-#   is resolved from the REMOTE's default branch (bin/fm-spawn.sh's
+#   --base <ref> records the branch on origin the task worktree is cut from, so the
+#   generated Setup states the ACTUAL base, plus the branch a ship task's PR must
+#   target, instead of asserting a default the spawn never guaranteed. Without it
+#   a worktree's base falls back to the REMOTE's default branch (bin/fm-spawn.sh's
 #   freshen_spawn_worktree_base), which is a per-repo property and frequently not
 #   the branch a task's code lives on, so the base is an input here rather than an
 #   assumption. Ship and scout scaffolds record it as a fixed machine-readable
