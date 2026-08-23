@@ -289,6 +289,9 @@ On a `no-mistakes-prod-only` project, classify the task's surface: internal-only
 An unregistered project or absent registry resolves to `no-mistakes` with yolo off, and the registration gap goes to the captain.
 Record the resulting mode, `yolo` merge posture, and the one-line reason for any deviation in the backlog item note.
 
+Resolve every crewmate task's base at intake too, and pass the same `--base` to the brief and the spawn.
+A worktree's base otherwise falls back to the remote's current default branch, which is a per-repo property rather than a statement about this task and frequently not the branch the task's code lives on; that fallback is announced, and the resolved base is recorded in the task's metadata either way.
+
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
 Write the task-specific brief under section 11 before spawning.

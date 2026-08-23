@@ -451,9 +451,9 @@ test_base_contract_states_actual_base_and_pr_target() {
   # so it is asserted as a whole line rather than as a substring.
   grep -qx 'Base contract: base=origin/staging' "$brief" \
     || fail "ship brief did not record its base as a machine-readable contract"
-  assert_grep 'detached HEAD cut from `origin/staging`' "$brief" \
+  assert_grep "detached HEAD cut from \`origin/staging\`" "$brief" \
     "ship brief did not state the base it was actually cut from"
-  assert_grep 'Your PR must target `staging`' "$brief" \
+  assert_grep "Your PR must target \`staging\`" "$brief" \
     "ship brief did not state the branch its PR must target"
   # The replaced claim asserted a base the spawn never guaranteed.
   assert_no_grep 'clean default branch' "$brief" \
@@ -527,9 +527,9 @@ test_local_only_fast_forward_names_the_recorded_base() {
     --mode local-only --base origin/staging >/dev/null 2>&1
   brief="$home/data/base-local-only/brief.md"
 
-  assert_grep 'fast-forward onto `origin/staging`' "$brief" \
+  assert_grep "fast-forward onto \`origin/staging\`" "$brief" \
     "local-only brief did not name its recorded base as the rebase target"
-  assert_no_grep 'if `main` has advanced' "$brief" \
+  assert_no_grep "if \`main\` has advanced" "$brief" \
     "local-only brief still hardcodes main as the branch to rebase onto"
   assert_no_grep 'Your PR must target' "$brief" \
     "local-only brief names a PR target for a mode that opens no PR"
