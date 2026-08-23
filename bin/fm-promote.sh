@@ -6,6 +6,9 @@
 # (inventory scratch state, reset to a clean default-branch base, carry over only
 # intended fix changes, create branch fm/<task-id>, implement, then report done
 # according to this task's delivery mode).
+# Those instructions abandon the base the scout was cut from, so promotion also
+# drops base=, base_commit= and base_source= from the meta: a promoted task has no
+# recorded base rather than a stale one that reads as an intended input.
 # A scout records no delivery posture, so promotion is where this task's delivery
 # contract is decided: --mode and --yolo are REQUIRED and written into the meta
 # alongside the kind= flip. Firstmate resolves both at promotion time, having just
@@ -115,7 +118,13 @@ META_LOCK_HELD=1
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
+# base/base_commit/base_source describe the worktree the SCOUT was cut from, and
+# the ship instructions below send the promoted worker to a clean default-branch
+# base, so keeping them would leave a false record that reads as authoritative.
+# They are dropped entirely rather than blanked, so every reader takes the same
+# path it takes for a task whose base was never recorded.
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' \
+  -e '^base=' -e '^base_commit=' -e '^base_source=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"

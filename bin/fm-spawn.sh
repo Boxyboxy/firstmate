@@ -1859,9 +1859,9 @@ freshen_spawn_worktree_base() {  # <worktree> [<base-ref>]
     # an origin/* one: `git fetch origin` writes refs/remotes/origin/* and
     # nothing else, so a local branch or another remote's ref resolves cleanly
     # while sitting arbitrarily far behind the remote. A branch on origin and a
-    # tag are therefore re-fetched by name (which also lets a single-branch clone
-    # resolve a branch it does not carry yet), a raw commit is immutable and only
-    # has to exist, and anything else is refused.
+    # tag are therefore re-fetched from origin by name (which also lets a clone
+    # that does not carry the ref yet resolve it), a raw commit is immutable and
+    # only has to exist, and anything else is refused.
     case "$target" in
       origin/*)
         branch=${target#origin/}
@@ -1870,23 +1870,34 @@ freshen_spawn_worktree_base() {  # <worktree> [<base-ref>]
           return 1
         fi ;;
       *)
-        full=$(git -C "$worktree" rev-parse --symbolic-full-name "$target" 2>/dev/null || true)
-        case "$full" in
-          refs/tags/*)
-            tag=${full#refs/tags/}
-            if ! git -C "$worktree" fetch --quiet origin "+refs/tags/$tag:refs/tags/$tag"; then
-              echo "error: could not fetch requested base tag '$target' from origin for pooled worktree '$worktree'; refusing to launch from a base this spawn cannot verify" >&2
-              return 1
-            fi ;;
-          "")
-            if ! git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" >/dev/null 2>&1; then
-              echo "error: requested base '$target' is not a branch on origin, a tag, or a commit in pooled worktree '$worktree'; refusing to launch from a base this spawn cannot verify" >&2
-              return 1
-            fi ;;
-          *)
-            echo "error: requested base '$target' resolves through '$full', which 'git fetch origin' never refreshes, so this spawn cannot prove it is current; pass the base as 'origin/<branch>', a tag, or a commit sha" >&2
-            return 1 ;;
-        esac ;;
+        # `git rev-parse --symbolic-full-name` echoes its argument on stdout and
+        # exits 128 for a ref it cannot resolve, so the exit status - not the
+        # output - decides whether the ref exists here at all.
+        if full=$(git -C "$worktree" rev-parse --symbolic-full-name "$target" 2>/dev/null); then
+          case "$full" in
+            refs/tags/*) tag=${full#refs/tags/} ;;
+            "")
+              tag=
+              if ! git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" >/dev/null 2>&1; then
+                echo "error: requested base '$target' names no commit in pooled worktree '$worktree'; refusing to launch from a base this spawn cannot verify" >&2
+                return 1
+              fi ;;
+            *)
+              echo "error: requested base '$target' resolves through '$full', which 'git fetch origin' never refreshes, so this spawn cannot prove it is current; pass the base as 'origin/<branch>', a tag published on origin, or a commit sha" >&2
+              return 1 ;;
+          esac
+        else
+          # Not resolvable locally. It is still acceptable if origin publishes it
+          # as a tag, which is exactly the single-branch-clone case, so try that
+          # by name before concluding the base does not exist.
+          tag=$target
+        fi
+        if [ -n "$tag" ]; then
+          if ! git -C "$worktree" fetch --quiet origin "+refs/tags/$tag:refs/tags/$tag"; then
+            echo "error: requested base '$target' is not a tag on origin and names nothing this spawn can verify in pooled worktree '$worktree'; pass 'origin/<branch>', a tag published on origin, or a commit sha" >&2
+            return 1
+          fi
+        fi ;;
     esac
   else
     if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then

@@ -42,16 +42,19 @@
 #   then declares the base unrecorded and requires the worker to establish it
 #   before branching, rather than claiming a default branch.
 #   A ship base must name a branch on origin ("origin/<branch>"), because the PR
-#   target and the local-only merge target are derived from it and a tag, a raw
-#   commit, or another remote's ref has no such branch; a scout, whose brief
-#   derives no branch, records any ref the spawn accepts.
+#   target is derived from it and a tag, a raw commit, or another remote's ref has
+#   no such branch; a scout, whose brief derives no branch, records any ref the
+#   spawn accepts. A local-only brief derives nothing from the base: its landing
+#   branch is the project's default branch, which only bin/fm-merge-local.sh can
+#   resolve.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
-#                the configured merge authority approves, firstmate merges to local main
+#                the configured merge authority approves, then firstmate fast-forwards
+#                the project's default branch through bin/fm-merge-local.sh
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
 # The generated ship brief records the chosen mode as a fixed machine-readable
@@ -368,11 +371,10 @@ if [ "$BASE_SET" -eq 1 ]; then
 BASE_SETUP=$(printf '%s\n' \
 'Base contract: base='"$BASE" \
 'You are in a disposable git worktree of '"$REPO"', at a detached HEAD cut from `'"$BASE"'`.' \
-'Confirm that base before you branch: `git rev-parse HEAD` must equal `git rev-parse '"$BASE"'`.' \
+'Confirm that base before you branch: `git rev-parse HEAD` must equal `git rev-parse '"'$BASE^{commit}'"'`, which peels an annotated tag to the commit the worktree was actually reset to.' \
 'If they differ, this worktree was cut from something other than the recorded base - append `blocked: base is {the actual commit}, not the recorded '"$BASE"'` to the status file and stop.')
 # The PR target is ship-only language: a scout never pushes or opens one.
 BASE_PR_TARGET='Your PR must target `'"$BASE_BRANCH"'`, which is NOT necessarily this repository'"'"'s default branch; confirm the target rather than accepting the forge'"'"'s default.'
-BASE_DESC='`'"$BASE"'`'
 else
 IFS= read -r -d '' BASE_SETUP <<EOF || true
 Base contract: base=unrecorded
@@ -382,7 +384,6 @@ Establish your actual base before you branch: \`git rev-parse HEAD\`, \`git log 
 EOF
 BASE_SETUP=${BASE_SETUP%$'\n'}
 BASE_PR_TARGET='Derive the branch your PR must target from the base you just established, never from the forge'"'"'s default, and say which branch you chose when you report the PR.'
-BASE_DESC='the base you established in Setup'
 fi
 
 # Ship-only base premise assertion. Worktree isolation and base correctness are
@@ -477,27 +478,25 @@ EOF
     # local-only never opens a PR, so the Setup section carries no PR target.
     BASE_PR_TARGET=
     # bin/fm-merge-local.sh is AUTHORITATIVE for where a local-only task lands:
-    # it fast-forwards the project's local default branch and refuses a branch
-    # that is not a fast-forward of it, so a brief that named any other target
-    # would send the worker toward a state the guarded merge rejects. The two are
-    # kept in agreement from both ends - bin/fm-spawn.sh refuses a local-only
-    # spawn whose --base is not the remote default branch, so the recorded base
-    # and the landing branch are the same branch, and the brief names it in every
-    # place it used to hardcode `main`.
-    if [ "$BASE_SET" -eq 1 ]; then
-      LOCAL_LANDING='`'"$BASE_BRANCH"'`'
-    else
-      LOCAL_LANDING="this project's default branch"
-    fi
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local $LOCAL_LANDING."
+    # it resolves the project's default branch from origin/HEAD and only ever
+    # fast-forwards that branch, refusing anything that is not a fast-forward of
+    # it. That is the single target named here, and it is deliberately NOT
+    # derived from --base: this scaffold cannot resolve a project's default
+    # branch (its repo argument is a caller-supplied string, not a path), so
+    # deriving it would let a brief render a landing claim the spawn refuses to
+    # produce. bin/fm-spawn.sh closes the loop from the other side by refusing a
+    # local-only spawn whose --base is not the remote default branch, so the
+    # base, this target, and the guarded merge are the same branch.
+    LOCAL_LANDING="this project's local default branch"
+    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into $LOCAL_LANDING."
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto $BASE_DESC - if it has advanced, rebase onto it so the eventual merge stays a fast-forward.
+Keep your branch a clean fast-forward onto $LOCAL_LANDING, which is the branch your worktree was cut from and the only branch firstmate fast-forwards - resolve its name with \`git rev-parse --abbrev-ref origin/HEAD\`, and if it has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local $LOCAL_LANDING through the guarded fast-forward path.
+The configured merge authority approves the ready branch, then firstmate merges it into $LOCAL_LANDING through the guarded fast-forward path.
 EOF
     ;;
   *)  # no-mistakes

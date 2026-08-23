@@ -238,6 +238,28 @@ test_promote_requires_and_records_the_delivery_contract() {
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
+# The promoted worker is told to reset to a clean default-branch base, so the
+# scout's recorded base stops being true at the moment of promotion. It must be
+# absent afterwards rather than blank, so a reader cannot tell it apart from a
+# task whose base was never recorded.
+test_promotion_drops_the_scout_base_record() {
+  local home meta out status
+  home="$TMP_ROOT/promote-base/home"
+  mkdir -p "$home/state"
+  meta="$home/state/promote-base-d2.meta"
+  printf 'window=fm-promote-base-d2\nkind=scout\nworktree=/tmp/wt\nbase=release-candidate\nbase_commit=%s\nbase_source=requested\n' \
+    '0123456789abcdef0123456789abcdef01234567' > "$meta"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-base-d2 --mode local-only --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "promotion carrying both flags should succeed (got: $out)"
+  assert_grep 'kind=ship' "$meta" "promotion did not restore ship teardown protection"
+  grep -q '^base' "$meta" \
+    && fail "promotion kept a base record the promoted worker is told to abandon"
+  assert_grep 'worktree=/tmp/wt' "$meta" "promotion dropped unrelated task record fields"
+  pass "fm-promote: promotion leaves a promoted task with no recorded base rather than a stale one"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -278,5 +300,6 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promotion_drops_the_scout_base_record
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

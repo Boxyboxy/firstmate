@@ -304,7 +304,7 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   id="brief-local-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local this project's default branch through the guarded fast-forward path." "$brief" \
+  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into this project's local default branch through the guarded fast-forward path." "$brief" \
     "local-only brief lost configured merge authority and guarded landing"
   assert_no_grep "The captain approves the ready branch" "$brief" \
     "local-only brief hard-coded captain-only authority"
@@ -519,21 +519,67 @@ test_scout_base_contract_carries_no_pr_target() {
   pass "fm-brief.sh: a scout records its base without acquiring a PR target"
 }
 
-test_local_only_fast_forward_names_the_recorded_base() {
+# The Setup section's base check is a command the worker runs first, so it is
+# executed here against a real worktree cut the way bin/fm-spawn.sh cuts one
+# (reset to <base>^{commit}). An annotated tag is the case that separates the two
+# readings: `git rev-parse <tag>` is the tag object, not the commit.
+test_recorded_base_check_holds_for_an_annotated_tag() {
+  local home repo wt brief check head resolved moved
+  home="$TMP_ROOT/base-annotated-home"
+  repo="$TMP_ROOT/base-annotated-repo"
+  wt="$TMP_ROOT/base-annotated-wt"
+  mkdir -p "$home/data"
+  git init --quiet -b main "$repo"
+  printf 'seed\n' > "$repo/seed.txt"
+  git -C "$repo" add seed.txt
+  git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm seed
+  git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    tag -a v9.9.9 -m 'annotated release'
+  git -C "$repo" worktree add --quiet --detach "$wt" 'v9.9.9^{commit}'
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-annotated firstmate \
+    --scout --base v9.9.9 >/dev/null 2>&1
+  brief="$home/data/base-annotated/brief.md"
+  # shellcheck disable=SC2016 # The backticks are literal brief markup, not a substitution.
+  check=$(sed -n 's/^Confirm that base before you branch: `git rev-parse HEAD` must equal `\(.*\)`,.*$/\1/p' "$brief")
+  [ -n "$check" ] || fail "the brief prescribed no base-confirmation command to run"
+
+  head=$(git -C "$wt" rev-parse HEAD)
+  resolved=$(cd "$wt" && eval "$check") || fail "the brief's base-confirmation command failed to run"
+  [ "$resolved" = "$head" ] \
+    || fail "the brief's own base check fails on the base the spawn cut ($resolved vs HEAD $head)"
+  [ "$resolved" != "$(git -C "$wt" rev-parse v9.9.9)" ] \
+    || fail "fixture did not prove an annotated tag object differs from its commit"
+
+  printf 'later\n' > "$repo/later.txt"
+  git -C "$repo" add later.txt
+  git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm later
+  git -C "$wt" checkout --quiet --detach main
+  moved=$(git -C "$wt" rev-parse HEAD)
+  [ "$moved" != "$resolved" ] \
+    || fail "fixture did not move the worktree off the recorded base"
+  [ "$(cd "$wt" && eval "$check")" != "$moved" ] \
+    || fail "the brief's base check no longer catches a worktree cut from the wrong base"
+  pass "fm-brief.sh: the recorded-base check passes on an annotated tag and still catches a real mismatch"
+}
+
+test_local_only_rebase_target_is_never_a_hardcoded_branch() {
   local home brief
   home="$TMP_ROOT/base-local-only-home"
   mkdir -p "$home/data"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-local-only firstmate \
-    --mode local-only --base origin/staging >/dev/null 2>&1
+    --mode local-only --base origin/main >/dev/null 2>&1
   brief="$home/data/base-local-only/brief.md"
 
-  assert_grep "fast-forward onto \`origin/staging\`" "$brief" \
-    "local-only brief did not name its recorded base as the rebase target"
+  assert_grep "fast-forward onto this project's local default branch" "$brief" \
+    "local-only brief did not name the branch its guarded merge fast-forwards as the rebase target"
+  assert_grep 'git rev-parse --abbrev-ref origin/HEAD' "$brief" \
+    "local-only brief named a default branch without telling the worker how to resolve it"
   assert_no_grep "if \`main\` has advanced" "$brief" \
     "local-only brief still hardcodes main as the branch to rebase onto"
   assert_no_grep 'Your PR must target' "$brief" \
     "local-only brief names a PR target for a mode that opens no PR"
-  pass "fm-brief.sh: local-only rebases onto its recorded base rather than a hardcoded main"
+  pass "fm-brief.sh: local-only rebases onto the branch its merge fast-forwards, never a hardcoded main"
 }
 
 test_base_is_refused_where_it_does_not_apply() {
@@ -587,31 +633,40 @@ test_base_assertion_does_not_contradict_a_recorded_base() {
   pass "fm-brief.sh: the base assertion states a reason that matches the base the brief recorded"
 }
 
-test_local_only_names_the_branch_its_merge_fast_forwards() {
-  local home brief
+test_local_only_landing_branch_never_comes_from_the_base() {
+  local home brief base
   home="$TMP_ROOT/base-local-landing-home"
   mkdir -p "$home/data"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-local-landing firstmate \
-    --mode local-only --base origin/staging >/dev/null 2>&1
-  brief="$home/data/base-local-landing/brief.md"
 
-  # bin/fm-merge-local.sh fast-forwards the project's default branch, so every
-  # place this brief names a landing branch must name that same branch.
-  assert_grep "firstmate handles the merge into local \`staging\`" "$brief" \
-    "local-only rule 1 still names a branch other than the one it was based on"
-  assert_grep "merges it into local \`staging\` through the guarded fast-forward path" "$brief" \
-    "the local-only definition of done still names a branch other than the one it was based on"
-  assert_no_grep "into local \`main\`" "$brief" \
-    "local-only still hardcodes main as the branch firstmate merges into"
+  # bin/fm-merge-local.sh only ever fast-forwards the project's default branch,
+  # and this scaffold cannot resolve which branch that is, so no --base may move
+  # the landing branch it names - otherwise a brief could promise a merge the
+  # guarded path refuses and the spawn refuses to produce.
+  for base in origin/staging origin/main; do
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "base-local-landing-${base#origin/}" firstmate \
+      --mode local-only --base "$base" >/dev/null 2>&1
+    brief="$home/data/base-local-landing-${base#origin/}/brief.md"
+    assert_grep "firstmate handles the merge into this project's local default branch" "$brief" \
+      "local-only rule 1 named a landing branch derived from --base $base"
+    assert_grep "merges it into this project's local default branch through the guarded fast-forward path" "$brief" \
+      "the local-only definition of done named a landing branch derived from --base $base"
+    assert_no_grep "into local \`${base#origin/}\`" "$brief" \
+      "local-only claimed firstmate merges into the base branch $base"
+    assert_no_grep "into local \`main\`" "$brief" \
+      "local-only still hardcodes main as the branch firstmate merges into"
+    # The base is still recorded; only the landing branch stops being derived from it.
+    grep -qx "Base contract: base=$base" "$brief" \
+      || fail "local-only stopped recording its base contract"
+  done
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-local-landing-unrecorded firstmate \
     --mode local-only >/dev/null 2>&1
   brief="$home/data/base-local-landing-unrecorded/brief.md"
-  assert_grep "firstmate handles the merge into local this project's default branch" "$brief" \
+  assert_grep "firstmate handles the merge into this project's local default branch" "$brief" \
     "an unrecorded local-only base still hardcodes a landing branch it cannot know"
   assert_no_grep "into local \`main\`" "$brief" \
     "an unrecorded local-only base still hardcodes main as the landing branch"
-  pass "fm-brief.sh: local-only names the branch its guarded merge fast-forwards, never a hardcoded main"
+  pass "fm-brief.sh: a local-only landing branch is the project default, never derived from --base"
 }
 
 test_ship_base_must_name_a_branch_on_origin() {
@@ -937,9 +992,10 @@ test_base_contract_states_actual_base_and_pr_target
 test_base_omission_is_loud_for_ship_and_scout
 test_ship_asserts_its_base_contains_the_named_code
 test_scout_base_contract_carries_no_pr_target
-test_local_only_fast_forward_names_the_recorded_base
+test_recorded_base_check_holds_for_an_annotated_tag
+test_local_only_rebase_target_is_never_a_hardcoded_branch
 test_base_is_refused_where_it_does_not_apply
 test_base_assertion_does_not_contradict_a_recorded_base
-test_local_only_names_the_branch_its_merge_fast_forwards
+test_local_only_landing_branch_never_comes_from_the_base
 test_ship_base_must_name_a_branch_on_origin
 test_scout_and_secondmate_scaffold
