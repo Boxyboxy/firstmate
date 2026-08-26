@@ -45,7 +45,8 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 - Helper scripts in `bin/` are plain bash.
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
-  `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, pinned shellcheck version, and pinned actionlint workflow lint), and both CI and the no-mistakes pre-push gate run it, so local and CI can never diverge.
+  `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, pinned shellcheck version, and pinned actionlint workflow lint), and both CI and the no-mistakes pre-push gate run its no-argument full-analysis path.
+  Its header and `--help` output own the exact local lint modes and flags.
   A malformed `.github/workflows/*.yml`, including a self-broken `ci.yml`, fails that local lint path before merge because a broken workflow cannot report its own breakage.
   The same lint also refuses a workflow set where some pull request base branch gets CI without also getting the required check, because `pull_request.branches` matches the base branch and an absent required check is indistinguishable from a passing one; add every long-lived base to both `.github/workflows/ci.yml` and `.github/workflows/no-mistakes-required.yml` on the day that branch is created.
   It pins one exact shellcheck version and one exact actionlint version and refuses to run under any other.
@@ -106,6 +107,8 @@ Use `bin/fm-test-run.sh --list-lanes` for exact lane names and `--help` for `--j
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so pass one to `bin/fm-test-run.sh` to focus on a subject with canonical timing output.
 A test must never read the ambient stdin: the runner hands every script an at-EOF stdin, and a test that depends on the launcher's stdin passes in CI, where stdin is already closed, while blocking indefinitely under a terminal or an agent's open pipe.
 A script that outruns the runner's per-script bound is killed with its whole process group and named on a `FM_TEST_TIMEOUT` marker, so a wedged test reports instead of consuming the run.
+A fixture may shorten a production timeout to keep a failure path prompt, but never below what the real work inside that window costs on a loaded machine: a fork, an exec, a lock acquisition, a beacon publication, or a first-poll check.
+Where a case's assertion is not about the timeout itself, give that window headroom over the measured loaded cost, and bound the test's own waiting with iteration-counted poll loops, which stretch under load where a wall-clock budget does not.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
 The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the lane's isolation boundary, while [runtime backend verification](docs/verification/runtime-backends.md#herdr) owns active empirical evidence; live harness credential tests remain opt-in.
 
