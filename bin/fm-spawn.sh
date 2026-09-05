@@ -2760,9 +2760,11 @@ EOF
 // facts name the root structurally: a subagent cannot exist before its parent,
 // so the first factory call in the process is the root session; and
 // session_stop fires only for a main session, never for a task or subagent
-// session (omp's own extension contract, verified 18.1.10), so a later main
-// session (/new, reload) proves itself at its first completed turn. An
-// instance that is neither writes NO state event, never idle. Escape ends the
+// session (omp's own extension contract, verified 18.1.10), so it can confirm
+// a main-session instance. This does not promise correct attribution across
+// in-process /new or reload replacement sessions: Firstmate relaunches omp in
+// a fresh process instead. An instance that is neither writes NO state event,
+// never idle. Escape ends the
 // root's run with agent_end and no session_stop (verified 18.1.10), which the
 // first-call claim already attributes, so the interrupt path stays covered.
 // turn_end keeps touching the notification marker from EVERY session: a

@@ -390,7 +390,8 @@ omp's lifecycle event set diverges from Pi's in two ways that matter for busy st
 omp never emits `agent_settled`; a completed prompt run on a main session emits `agent_start`, then `turn_end` at every inner turn boundary, then `session_stop` and `agent_end` together at the end, while an Escape interrupt ends the run with `agent_end` alone and no `session_stop` (18.1.10).
 `ctx.isIdle()` does exist and is meaningful, but it has not settled at the instant those turn-end events fire, so the idle edge is `agent_end` re-checked shortly afterwards rather than a synchronous `agent_settled` guard.
 omp also hosts every `task` subagent inside the crewmate's own process and calls the same `-e` extension factory once per child session, each instance seeing only its own session's events and `ctx`, so a child's `agent_end` reaches the guard with the child idle while the root is mid-turn.
-The per-task extension therefore lets only the root session write state: the first factory call in the process is the root (a subagent cannot precede its parent), and `session_stop`, which omp fires only for a main session and never for a task or subagent session, re-proves a later main session; `bin/fm-spawn.sh`'s omp arm owns that contract, and an unattributed instance never writes idle.
+The per-task extension therefore lets only the root session write state: the first factory call in the process is the root (a subagent cannot precede its parent), and `session_stop`, which omp fires only for a main session and never for a task or subagent session, can confirm a main-session instance; `bin/fm-spawn.sh`'s omp arm owns that contract, and an unattributed instance never writes idle.
+This attribution contract covers Firstmate's fresh-process launches, not in-process `/new` or reload replacement sessions.
 
 | Fact | Value | Evidence |
 |---|---|---|
