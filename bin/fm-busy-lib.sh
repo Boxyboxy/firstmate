@@ -38,7 +38,12 @@
 # Firstmate-owned sources accepted for every converted adapter:
 #   fm-spawn         the launch-brief turn seeded at spawn
 #   fm-interrupt     the legacy Claude fm-send --key Escape idle event
-#   fm-recovery      a documented recovery reset after relaunch
+#   fm-recovery      a firstmate-applied reset or correction, always at the
+#                    current gen: a documented recovery reset after relaunch,
+#                    or a correction of a record that direct evidence (a live
+#                    pane mid-run, a wrong idle from a misattributed adapter
+#                    event) contradicts; the --event token names the concrete
+#                    case, and the adapter's next event overwrites it
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,

@@ -179,7 +179,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Harness | Version verified | Semantic source | Observed result |
 | --- | --- | --- | --- |
 | Pi | 0.82.0 | Extension `agent_start` / `agent_settled` with `ctx.isIdle()` | The spawn seed `busy source=fm-spawn`, then `busy source=pi-ext event=agent-start`, then `idle source=pi-ext event=agent-settled`; the turn-end marker was still touched. |
-| omp | 17.2.1 (live pane); event set and idle edge re-verified 17.2.2 | Extension `agent_start`, then a deferred `ctx.isIdle()` re-check at `agent_end` | A real pane ran the launch command `fm-spawn` built (`omp --auto-approve --model 'claude-haiku-4-5' --thinking 'low' -e '<state>/<id>.omp-ext.ts' "$(... encode launch-brief ...)"`). The record moved `seq=1 busy source=fm-spawn event=launch-brief` to `seq=3 idle source=omp-ext event=agent-end`, and a second steered turn was sampled mid-flight at `seq=4 busy source=omp-ext event=agent-start` before settling to `seq=5 idle source=omp-ext event=agent-end`. `fm_busy_classify` returned `busy omp-ext` then `idle omp-ext`, and the turn-end marker was touched. |
+| omp | 17.2.1 (live pane); event set and idle edge re-verified 17.2.2; subagent attribution and interactive-pane sampling 18.1.10 | Extension `agent_start`, then a deferred `ctx.isIdle()` re-check at `agent_end` | A real pane ran the launch command `fm-spawn` built (`omp --auto-approve --model 'claude-haiku-4-5' --thinking 'low' -e '<state>/<id>.omp-ext.ts' "$(... encode launch-brief ...)"`). The record moved `seq=1 busy source=fm-spawn event=launch-brief` to `seq=3 idle source=omp-ext event=agent-end`, and a second steered turn was sampled mid-flight at `seq=4 busy source=omp-ext event=agent-start` before settling to `seq=5 idle source=omp-ext event=agent-end`. `fm_busy_classify` returned `busy omp-ext` then `idle omp-ext`, and the turn-end marker was touched. |
 | OpenCode | 1.17.18 | Plugin `session.status` | In a real TUI pane: seed, then `busy source=opencode-plugin event=session-busy`, then `idle source=opencode-plugin event=session-status-idle`. |
 | Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` and `SessionEnd` are wired from the four hook names present in the installed binary; only the abnormal paths they cover were not reproduced live. |
 | Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
@@ -212,6 +212,42 @@ tests/fm-busy-state.test.sh
 tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
 ```
+
+### omp subagent attribution, 2026-09-05
+
+omp 18.1.10 hosts a `task` subagent inside the crewmate's own process and calls the `-e` extension factory once more for the child's session.
+A probe extension logging every lifecycle event with `ctx.sessionManager.getSessionId()`, `ctx.isIdle()`, and a module-level load counter was run under `omp -p --auto-approve --no-session --model claude-haiku-4-5 --thinking low -e <probe>` with a prompt that spawned one subagent; the module evaluated once (`globalCount=1` at both factory calls), the factory was called twice in the same pid with two session ids, each instance received only its own session's events, and the child's `agent_end` read `isIdle=true` both synchronously and at a 750ms deferred re-read while the root was between `turn_start` and `turn_end`.
+`session_stop` fired only for the root session, matching omp's own extension contract that it never fires for task or subagent sessions, and the child session exposed no parent, depth, or subagent field on `ctx` or its session manager.
+An interactive pane with the same probe showed that Escape ends the root's run with `agent_end` (`isIdle=true`) and no `session_stop`, so the interrupt path depends on `agent_end` staying the idle edge.
+
+Observed record transitions from a real pane running the exact launch command `fm-spawn` built, sampled every 100ms, before the fix (ms epoch, then record; `seq=3` and `seq=4` are the child's two agent loops, and `seq=5` is the child's false idle three seconds before the root's own `seq=6`):
+
+```text
+1788600008441 seq=1 state=busy source=fm-spawn event=launch-brief
+1788600011587 seq=2 state=busy source=omp-ext event=agent-start
+1788600022256 seq=3 state=busy source=omp-ext event=agent-start
+1788600025222 seq=4 state=busy source=omp-ext event=agent-start
+1788600032500 seq=5 state=idle source=omp-ext event=agent-end
+1788600035395 seq=6 state=idle source=omp-ext event=agent-end
+```
+
+The same run after the fix, where only the root's lifecycle reaches the record:
+
+```text
+1788599866682 seq=1 state=busy source=fm-spawn event=launch-brief
+1788599869025 seq=2 state=busy source=omp-ext event=agent-start
+1788599884034 seq=3 state=idle source=omp-ext event=agent-end
+```
+
+The refresh command is the live guard, which fails naming the omp version when a child session's completion reaches the root's record and refuses to pass unless the subagent actually ran:
+
+```sh
+FM_OMP_LIVE_E2E=1 tests/fm-omp-busy-subagent-live-e2e.test.sh
+# ok - omp omp/18.1.10: a real task subagent's completion left the root's record busy, and only the root's completion settled it idle
+```
+
+Run against the previous extension body on the same day, the guard reported `not ok - omp omp/18.1.10: the record went idle while the root was still working`.
+`tests/fm-busy-adapter-wiring.test.sh` pins the same contract portably by binding the generated extension twice in one Node host and driving the second instance.
 
 ## Turn-end guard
 

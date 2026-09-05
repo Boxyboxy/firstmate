@@ -114,22 +114,41 @@ EOF
 # fires - see the comment in bin/fm-spawn.sh's omp arm), so the end-* modes
 # must outlive that timer before the host exits or the idle write is lost.
 # Modes: agent-start, end-idle, end-continuing, turn-end.
+# omp hosts a `task` subagent in the crewmate's own process by calling the
+# factory once more for the child's session, so the child-* modes call the
+# factory twice in ONE host and drive the SECOND instance with a ctx whose
+# isIdle() reads true, exactly what a finished child sees while the root is
+# still mid-turn: child-start, child-end, child-turn-end. later-main-end also
+# drives a second instance, but delivers session_stop (main-session only on
+# omp) before agent_end, the shape of a /new or reloaded main session.
 drive_omp_ext() {
   EXT_PATH="$1" MODE="$2" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
-const handlers = {};
-mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+const bind = () => {
+  const handlers = {};
+  mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+  return handlers;
+};
+const root = bind();
+const second = process.env.MODE.startsWith("child-") || process.env.MODE === "later-main-end" ? bind() : null;
 const ctx = { isIdle: () => process.env.MODE !== "end-continuing" };
 switch (process.env.MODE) {
-  case "agent-start": await handlers["agent_start"]({}, ctx); break;
-  case "end-idle": await handlers["agent_end"]({}, ctx); break;
-  case "end-continuing": await handlers["agent_end"]({}, ctx); break;
-  case "turn-end": await handlers["turn_end"]({}, ctx); break;
+  case "agent-start": await root["agent_start"]({}, ctx); break;
+  case "end-idle": await root["agent_end"]({}, ctx); break;
+  case "end-continuing": await root["agent_end"]({}, ctx); break;
+  case "turn-end": await root["turn_end"]({}, ctx); break;
+  case "child-start": await second["agent_start"]({}, ctx); break;
+  case "child-end": await second["agent_end"]({}, ctx); break;
+  case "child-turn-end": await second["turn_end"]({}, ctx); break;
+  case "later-main-end":
+    await second["session_stop"]({}, ctx);
+    await second["agent_end"]({}, ctx);
+    break;
   default: throw new Error("unknown mode " + process.env.MODE);
 }
 // The omp arm defers its guarded idle write by 750ms; wait past it.
-const settle = process.env.MODE === "turn-end" ? 200 : 1400;
+const settle = process.env.MODE.endsWith("turn-end") ? 200 : 1400;
 await new Promise((resolve) => setTimeout(resolve, settle));
 EOF
 }
@@ -170,6 +189,44 @@ test_omp_extension_semantic_lifecycle() {
   out=$(classify omp "$id" "$state")
   [ "$out" = "idle omp-ext" ] || fail "a settled agent_end must classify 'idle omp-ext', got '$out'"
   pass "omp extension reports agent_start busy, settles idle only via the deferred ctx.isIdle() re-check at agent_end, and keeps turn_end a notification"
+}
+
+# Regression for the 2026-09-05 false idle: a `task` subagent's agent_end,
+# delivered to a second extension instance whose own ctx.isIdle() is true, must
+# never write idle under the root's gen while the root is still working. The
+# child's agent_start must not write either (only the root's lifecycle drives
+# the record), its turn_end still touches the notification marker (progress
+# evidence for the completed-turn bound), and a later main session that proves
+# itself with session_stop keeps the idle edge, so the fix cannot latch busy.
+test_omp_extension_ignores_child_session_lifecycle() {
+  local rec id=busy-omp-2 out state ext seq_before seq_after
+  rec=$(make_spawn_case omp-child omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+
+  out=$(drive_omp_ext "$ext" agent-start) || fail "root agent_start drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "root agent_start must classify 'busy omp-ext', got '$out'"
+  seq_before=$(cat "$state/$id.busy-state")
+
+  out=$(drive_omp_ext "$ext" child-end) || fail "child agent_end drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy omp-ext" ] || fail "a child session's settled agent_end must not write idle for the root, got '$out'"
+  out=$(drive_omp_ext "$ext" child-start) || fail "child agent_start drive failed: $out"
+  seq_after=$(cat "$state/$id.busy-state")
+  [ "$seq_after" = "$seq_before" ] || fail "a child session's lifecycle must not write the record at all: before '$seq_before' after '$seq_after'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_omp_ext "$ext" child-turn-end) || fail "child turn_end drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "a child session's completed turn must still touch the notification marker"
+
+  out=$(drive_omp_ext "$ext" later-main-end) || fail "later main session drive failed: $out"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "a later main session proven by session_stop must keep the idle edge, got '$out'"
+  pass "omp extension ignores a child session's agent_start and agent_end, keeps its turn_end a notification, and still settles a session_stop-proven main session idle"
 }
 
 test_pi_extension_semantic_lifecycle() {
@@ -410,6 +467,7 @@ test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
 test_omp_extension_semantic_lifecycle
+test_omp_extension_ignores_child_session_lifecycle
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
