@@ -2750,7 +2750,30 @@ EOF
 // meantime keeps the state busy instead of writing a false idle. If omp exits
 // before the deferred check runs, the record stays busy and the gone endpoint
 // is reported dead by fm_busy_classify_live - no idle is ever invented.
+// ROOT-SESSION ATTRIBUTION. omp hosts every \`task\` subagent inside the
+// crewmate's own process and calls this factory once more for each child
+// session (verified on omp 18.1.10: same pid, same module instance, a second
+// factory call for the child's session id), and each instance's handlers see
+// only their own session's events with their own session's ctx. A child's
+// agent_end therefore reached the isIdle() guard with the CHILD idle while the
+// root was mid-turn, and wrote a false idle under the root's gen. Two omp
+// facts name the root structurally: a subagent cannot exist before its parent,
+// so the first factory call in the process is the root session; and
+// session_stop fires only for a main session, never for a task or subagent
+// session (omp's own extension contract, verified 18.1.10), so it can confirm
+// a main-session instance. This does not promise correct attribution across
+// in-process /new or reload replacement sessions: Firstmate relaunches omp in
+// a fresh process instead. An instance that is neither writes NO state event,
+// never idle. Escape ends the
+// root's run with agent_end and no session_stop (verified 18.1.10), which the
+// first-call claim already attributes, so the interrupt path stays covered.
+// turn_end keeps touching the notification marker from EVERY session: a
+// child's completed turn is the same progress evidence for the watcher's
+// completed-turn bound as the root's inner turns, and never a state edge.
 import { execFile } from "node:child_process";
+type Ctx = { isIdle?: () => boolean };
+type Ext = { on: (event: string, handler: (event: unknown, ctx: Ctx) => unknown) => void };
+const ROOT_CLAIM = Symbol.for("firstmate.omp-ext.root-session");
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -2758,11 +2781,16 @@ const busyEvent = (state: string, event: string) =>
       "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
     ], () => resolve());
   });
-export default function (pi: any) {
-  pi.on("agent_start", () => busyEvent("busy", "agent-start"));
-  pi.on("agent_end", (_event: any, ctx: any) => {
+export default function (pi: Ext) {
+  const host = globalThis as Record<symbol, unknown>;
+  let root = host[ROOT_CLAIM] !== true;
+  host[ROOT_CLAIM] = true;
+  pi.on("session_stop", () => { root = true; });
+  pi.on("agent_start", () => (root ? busyEvent("busy", "agent-start") : undefined));
+  pi.on("agent_end", (_event, ctx) => {
+    if (!root) return;
     setTimeout(() => {
-      if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+      if (typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
       void busyEvent("idle", "agent-end");
     }, 750);
   });

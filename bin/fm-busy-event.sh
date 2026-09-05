@@ -19,9 +19,10 @@
 #       sidecar, advance seq under the lock, atomically replace the record.
 #       Adapter wiring passes the exact --gen embedded at arm time, so a
 #       hook that outlives its incarnation fails closed here. The legacy
-#       Claude fm-send --key Escape path (fm-interrupt) and firstmate recovery
-#       paths (fm-recovery) may pass --current-gen to bind to the incarnation
-#       armed right now.
+#       Claude fm-send --key Escape path (fm-interrupt) and firstmate-applied
+#       resets or corrections (fm-recovery; bin/fm-busy-lib.sh owns when that
+#       source is legitimate) may pass --current-gen to bind to the
+#       incarnation armed right now.
 #
 #   retire <state-dir> <id> (--gen G | --current-gen)
 #       Remove one incarnation's sidecar and record while holding the same
