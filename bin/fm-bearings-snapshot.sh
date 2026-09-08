@@ -38,8 +38,8 @@
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).
 # Bearings never invents Underway rows from backlog-only ids; it discloses those
-# gaps in omitted[] and, when invalid, a Charted Next gate line so the four-section
-# chat cannot claim an empty fleet while main current state is broken.
+# gaps in omitted[] and, when invalid, a Charted Next gate line so the chat digest
+# cannot claim an empty fleet while main current state is broken.
 #
 # The landed section merges this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
@@ -51,10 +51,25 @@
 # waste capacity, and --all-landed switches back to the complete global newest-first
 # order.
 #
+# Every project row (in_flight, decisions_open, landed, gates) carries `repo`: the
+# backlog row's recorded project, falling back for live tasks to the last path
+# segment of the meta `project=` value, and null when neither records one. It is
+# never inferred from a worktree, a PR URL, or prose. `--repo <name>` (repeatable)
+# scopes those four surfaces to the named projects before bounding, keeps the
+# fleet-integrity rows (main-inventory gate, secondmate home rows, unhealthy
+# endpoints) untouched, and discloses in omitted[] how many rows fell outside the
+# scope and how many of those had no recorded project, so a scoped read never
+# hides a row silently. The `scope` scalar names the applied scope ("fleet" when
+# none). Every gates row carries `ready`: true only when the row has no unresolved
+# blocker, no hold, and no future hold-until date - work the fleet could start
+# now - so "next" versus "waiting" is a projected fact, not a renderer's reading of
+# the reason text. The main-inventory integrity gate is never ready.
+#
 # Flags:
 #   (default)        compact projection, TOON, local-only
 #   --json           the same projected model as JSON (machine/debug; parity form)
 #   --include-prs    ALSO do live open-PR discovery + checks (the only network path)
+#   --repo <name>    scope project rows to this project; repeatable
 #   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
 #   --all-in-flight  include every in-flight task
 #   --all-decisions  include every open decision
@@ -107,7 +122,8 @@ validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
 
 usage() {
   cat <<'EOF'
-usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
+usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--repo <name>]...
+                               [--fields <list>]
                                [--all-in-flight] [--all-decisions]
                                [--all-secondmates] [--all-landed]
                                [--all-reports] [--all-queued]
@@ -117,11 +133,19 @@ usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
 Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
+Default fields: schema, home, scope, generated, prs, in_flight{id,kind,state,repo,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
-  decisions_open{id,key,verb,summary,age_days,owner}, landed{id,what,artifact,owner},
-  gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
+  decisions_open{id,key,verb,summary,age_days,repo,owner}, landed{id,what,artifact,repo,owner},
+  gates{id,title,blocked_by,reason,ready,repo,owner}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
+repo is the backlog row's recorded project (live tasks fall back to the meta
+  project's last path segment); null means no project is recorded. --repo <name>
+  (repeatable) scopes in_flight, decisions_open, landed, and gates to the named
+  projects before bounding, keeps fleet-integrity rows, sets scope, and discloses
+  the dropped row count (and how many had no recorded project) in omitted[].
+ready on a gates row is true only with no unresolved blocker, no hold, and no
+  future hold-until date: work the fleet could start now. The main-inventory
+  integrity gate is never ready.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure. Default selection is balanced across deterministic home
@@ -131,7 +155,7 @@ For every registered secondmate, readable structured facts from its own home are
   authoritative, including independently trustworthy surfaces from a partial summary.
   Parent events and bounded terminal reads are labeled fallback or contradiction
   evidence and never become current work.
-Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
+Opt-in surfaces: --repo, --fields bodies|paths|actions|endpoints, --all-in-flight,
   --all-decisions, --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
 Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
@@ -150,6 +174,7 @@ ALL_RECORDED_PRS=0
 ALL_UNHEALTHY=0
 ALL_PR_REPOS=0
 FIELDS=""
+REPOS_LIST=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) FORMAT=json ;;
@@ -165,6 +190,12 @@ while [ $# -gt 0 ]; do
     --all-pr-repos) ALL_PR_REPOS=1 ;;
     --fields) shift; FIELDS=${1:-} ;;
     --fields=*) FIELDS=${1#--fields=} ;;
+    --repo|--repo=*)
+      case "$1" in --repo) shift; repo_name=${1:-} ;; *) repo_name=${1#--repo=} ;; esac
+      [ -n "$repo_name" ] || { echo "fm-bearings-snapshot: --repo needs a project name" >&2; exit 2; }
+      REPOS_LIST="${REPOS_LIST}${repo_name}
+"
+      ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -172,6 +203,7 @@ while [ $# -gt 0 ]; do
 done
 
 command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2; exit 1; }
+REPOS_JSON=$(printf '%s' "$REPOS_LIST" | jq -cRn '[inputs | select(. != "")] | unique')
 
 # The deterministic return-catch-up owner must clear before this or any other
 # ordinary captain request proceeds. Bearings does not reproduce that policy;
@@ -316,9 +348,22 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
+  --argjson repos "$REPOS_JSON" \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  # A live task names its project through the joined backlog row when one exists,
+  # otherwise through the last segment of its meta project path; null otherwise.
+  def task_repo:
+    (.backlog.repo // ((.project // "") | if . == "" then null else (split("/") | last) end));
+  # Scope membership for project rows. No --repo means every row is in scope; a
+  # row with no recorded project is never in a named scope, and is counted so.
+  def in_scope: (($repos | length) == 0) or (.repo as $r | $r != null and (($repos | index($r)) != null));
+  # Work the fleet could start now: no unresolved blocker, no hold, no future date.
+  def ready_of($today):
+    (((.unresolved_blocker_ids // []) | length) == 0)
+    and ((.hold_reason // null) == null)
+    and (((.hold_until // null) == null) or (.hold_until <= $today));
   # Whole days between the date a hold was filed (tasks-axi `since`) and now, so an
   # aged decision reads as a hypothesis rather than a fact. Whole dates only: both
   # sides are floored to their UTC day, so the count never wobbles with the hour a
@@ -342,9 +387,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (($fl | index("actions")) != null) as $f_actions
   | (($fl | index("endpoints")) != null) as $f_endpoints
   | ([ .backlog.records[] | select(.state == "done" and .structured and .hold_kind != "captain")
-       | {id, title, pr_url, report_path, local_note, completion, home:"(main)", home_id:"(main)"} ]) as $main_done
-  | ((.secondmate_landed.records) // []) as $mate_done
-  | ($main_done + $mate_done) as $all_landed_rows
+       | {id, title, pr_url, report_path, local_note, completion, repo:(.repo // null), home:"(main)", home_id:"(main)"} ]) as $main_done
+  | ((.secondmate_landed.records) // [] | map(. + {repo:(.repo // null)})) as $mate_done
+  | ($main_done + $mate_done) as $landed_unscoped
+  | ([ $landed_unscoped[] | select(in_scope) ]) as $all_landed_rows
   | ([ $all_landed_rows | group_by(.home_id)[]
        | sort_by([(.completion.date // ""), .id]) | reverse
        | (if $all_landed == 1 then . else .[:$landed_per_home_n] end) ]) as $per_home_groups
@@ -353,7 +399,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ($per_home_capped | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_sorted
   | (if $all_landed == 1 then $landed_sorted else ($per_home_groups | round_robin_landed($landed_n)) end) as $done
   | ($done | map(.id)) as $done_ids
-  | ([.tasks[] | select(.kind != "secondmate") | .id]) as $live_ids
+  | ([.tasks[] | select(.kind != "secondmate") | select({repo:task_repo} | in_scope) | .id]) as $live_ids
   | ([.tasks[] | select(.kind != "secondmate" and .current_state.state == "working") | .id]) as $working_ids
   | ($live_ids + $done_ids) as $rel_ids
   | ([ .tasks[]
@@ -402,25 +448,36 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(.backlog.current_role != "held" or .current_state.state == "working")
        | {id, kind,
         state: .current_state.state,
+        repo: task_repo,
         doing: ((.current_state.detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
-      } ]
-     + [ $secondmate_views[]
-         | select(.bearings_state == "active_child_work")
-         | {id,kind:"secondmate",state:.bearings_state,
-            doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
+      } ]) as $in_flight_main
+  | ([ $secondmate_views[]
+       | select(.bearings_state == "active_child_work")
+       | . as $m
+       | ([$m.active_children[] | . + {repo:(.repo // null)}]) as $kids_all
+       | ([$kids_all[] | select(in_scope)]) as $kids
+       | {id, kids_all:($kids_all | length), kids:($kids | length),
+          norepo:([$kids_all[] | select(.repo == null)] | length),
+          row:(if ($kids | length) > 0 then
+                 {id,kind:"secondmate",state:.bearings_state,
+                  repo:([$kids[].repo // empty] | unique | join(",") | if . == "" then null else . end),
+                  doing:([$kids[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))}
+               else null end)} ]) as $in_flight_mates
+  | ([ $in_flight_main[] | select(in_scope) ] + [ $in_flight_mates[] | .row | select(. != null) ]) as $in_flight_all
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true)
          | select(($all_decisions == 1) or (.deferred_marker != true))
          | {id,key:.id,verb:"captain-hold",
-            summary:((.title + ": " + .hold_reason) | trunc(90)),
-            age_days:age_days(.since; $now),owner:"(main)"} ]
+            summary:((.title + ": " + .hold_reason) | trunc(160)),
+            age_days:age_days(.since; $now),repo:(.repo // null),owner:"(main)"} ]
      + [ (.secondmate_current.records // [])[] as $m | $m.decisions_open[]?
          | select(.source == "backlog" and .verb == "captain-hold")
          | select(($all_decisions == 1) or (.deferred_marker != true))
          | {id:($m.id + "/" + .id),key,verb,
-            summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(90)),
-            age_days:age_days(.since; $now),owner:$m.id} ]) as $decisions_all
+            summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(160)),
+            age_days:age_days(.since; $now),repo:(.repo // null),owner:$m.id} ]) as $decisions_unscoped
+  | ([ $decisions_unscoped[] | select(in_scope) ]) as $decisions_all
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true and .deferred_marker == true) ]
      + [ (.secondmate_current.records // [])[] | .decisions_open[]?
@@ -431,9 +488,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),
           blocked_by:"-",
           reason:"main inventory",
+          ready:false,
+          repo:null,
           owner:"(main)"}]
-      else [] end)
-     + [ .backlog.records[]
+      else [] end)) as $integrity_gates
+  | ([ .backlog.records[]
          | . as $record
          | select(.structured and
              (.state == "queued" or
@@ -445,7 +504,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
             reason:((if (.hold_until // null) != null and .hold_until > $today
                      then ("until " + .hold_until + ": " + (.hold_reason // .blocked_reason // "-"))
-                     else (.hold_reason // .blocked_reason // "-") end) | trunc(40)),owner:"(main)"} ]
+                     else (.hold_reason // .blocked_reason // "-") end) | trunc(40)),
+            ready:ready_of($today),repo:(.repo // null),owner:"(main)"} ]
      + [ (.secondmate_current.records // [])[] as $m
          | select($m.provenance.selected == "structured-home")
          | $m.queued[]?
@@ -456,23 +516,38 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
             reason:((if (.hold_until // null) != null and .hold_until > $today
                      then ("until " + .hold_until + ": " + (.hold_reason // .blocked_reason // "-"))
-                     else (.hold_reason // .blocked_reason // "-") end) | trunc(40)),owner:$m.id} ]) as $gates_all
+                     else (.hold_reason // .blocked_reason // "-") end) | trunc(40)),
+            ready:ready_of($today),repo:(.repo // null),owner:$m.id} ]) as $gates_unscoped
+  | ($integrity_gates + [ $gates_unscoped[] | select(in_scope) ]) as $gates_all
+  # Scope accounting: every project row (a secondmate active child counts as one)
+  # that the named scope dropped, and how many of those recorded no project.
+  | ((($in_flight_main | length) + ([$in_flight_mates[].kids_all] | add // 0)
+      + ($decisions_unscoped | length) + ($landed_unscoped | length) + ($gates_unscoped | length))
+     - (([$in_flight_main[] | select(in_scope)] | length) + ([$in_flight_mates[].kids] | add // 0)
+      + ($decisions_all | length) + ($all_landed_rows | length) + (($gates_all | length) - ($integrity_gates | length)))) as $scope_dropped
+  | (if ($repos | length) == 0 then 0 else
+       ([$in_flight_main[] | select(.repo == null)] | length) + ([$in_flight_mates[].norepo] | add // 0)
+       + ([$decisions_unscoped[] | select(.repo == null)] | length)
+       + ([$landed_unscoped[] | select(.repo == null)] | length)
+       + ([$gates_unscoped[] | select(.repo == null)] | length) end) as $scope_norepo
   | ([ .scout_reports[]
        | . as $r
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
        | {id, path} ]) as $reports_all
-  | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta") | {id, url:.pr.url} ]) as $recorded_prs_all
+  | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta")
+       | select({repo:task_repo} | in_scope) | {id, url:.pr.url} ]) as $recorded_prs_all
   | . as $snap
   | {
       schema: "fm-bearings.v1",
       home: $home,
+      scope: (if ($repos | length) == 0 then "fleet" else ($repos | join(",")) end),
       generated: $now,
       prs: $prs,
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
       secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
       landed: ($done | map({id, what:(.title | trunc(70)),
-                            artifact:(.pr_url // .report_path // .local_note // "-"),owner:.home_id})),
+                            artifact:(.pr_url // .report_path // .local_note // "-"),repo,owner:.home_id})),
       gates: (if $all_queued == 1 then $gates_all else $gates_all[:$gates_n] end),
       reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),
       recorded_prs: (if $all_recorded_prs == 1 then $recorded_prs_all else $recorded_prs_all[:$recorded_prs_n] end)
@@ -486,7 +561,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | . + (if $f_actions then {actions:[ $snap.tasks[] | {id, watch:(.actions.watch // .actions.send // "-"), steer:(.actions.steer // .actions.send // "-")} ]} else {} end)
   | . + (if $f_endpoints then {endpoints:[ $snap.tasks[] | {id, backend, target:(.endpoint.target // "-"), exists:.endpoint.exists, agent:.endpoint.agent_alive} ]} else {} end)
   | . + {omitted: (
-      [ (if $f_bodies then empty else {surface:"backlog item bodies", reveal:"--fields bodies"} end),
+      [ (if ($repos | length) > 0 and $scope_dropped > 0 then {surface:("project scope \($repos | join(",")): \($scope_dropped) row(s) outside scope, \($scope_norepo) with no recorded project"), reveal:"omit --repo"} else empty end),
+        (if $f_bodies then empty else {surface:"backlog item bodies", reveal:"--fields bodies"} end),
         (if $f_paths then empty else {surface:"task paths", reveal:"--fields paths"} end),
         (if $f_actions then empty else {surface:"watch/steer actions", reveal:"--fields actions"} end),
         (if $f_endpoints then empty else {surface:"healthy endpoint detail", reveal:"--fields endpoints"} end),

@@ -1016,6 +1016,128 @@ test_superseded_queued_item_dropped_by_default() {
   pass "superseded queued items are dropped by default and restored with --all-queued"
 }
 
+# Every project row names its project and every gate says whether the fleet
+# could start it now, so a project-scoped or "what next" read is projected fact
+# rather than a renderer reading reason strings or guessing from worktrees.
+test_project_rows_carry_repo_and_gates_mark_readiness() {
+  local home fakebin json
+  home=$(make_home repo-ready); write_fixture "$home"
+  sed '/^## Done/i\
+- [ ] ready-now - Unblocked queued work (repo: firstmate) (kind: ship)\
+- [ ] dated-hold - Wait for the window (repo: firstmate) (kind: ship) (hold: wait for the window) (hold-kind: external) (hold-until: 2026-08-01)\
+- [ ] no-project - Queued work without a project (kind: ship)
+' "$home/data/backlog.md" > "$home/data/backlog.next" && mv "$home/data/backlog.next" "$home/data/backlog.md"
+  mkdir -p "$home/projects/other-wt"
+  fm_write_meta "$home/state/path-only.meta" \
+    "window=firstmate:fm-path-only" "worktree=$home/projects/other-wt" \
+    "project=/srv/clones/other-project" "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$home/state" path-only busy
+  printf 'working: no backlog row names this project\n' > "$home/state/path-only.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .scope == "fleet"
+      and (.in_flight | any(.id == "ship-task" and .repo == "firstmate"))
+      and (.in_flight | any(.id == "path-only" and .repo == "other-project"))
+      and (.decisions_open | any(.id == "mate/mate-decision-race" and .repo == "firstmate"))
+      and (.landed | any(.id == "done-a" and .repo == "firstmate"))
+      and (.landed | any(.id == "mate-landed" and .repo == "firstmate"))
+      and (.gates | any(.id == "ready-now" and .ready == true and .repo == "firstmate"))
+      and (.gates | any(.id == "no-project" and .ready == true and .repo == null))
+      and (.gates | any(.id == "live-gate" and .ready == false and .blocked_by == "ship-task"))
+      and (.gates | any(.id == "dated-hold" and .ready == false and (.reason | startswith("until 2026-08-01"))))
+      and (.omitted | any(.surface | startswith("project scope")) | not)
+  ' >/dev/null || fail "repo or readiness projection is wrong: $json"
+  pass "project rows carry repo and gates mark what the fleet could start now"
+}
+
+# --repo scopes the four project surfaces before bounding, keeps fleet-integrity
+# rows, and discloses every dropped row so a scoped read never hides state silently.
+test_repo_scope_filters_project_rows_and_discloses() {
+  local home mate fakebin json toon rc
+  home=$(make_home repo-scope); write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] ship-task - Ship the thing (repo: firstmate) (kind: ship) (since 2026-07-11)
+- [ ] other-orphan - Other work without child metadata (repo: other) (kind: ship) (since 2026-07-11)
+
+## Queued
+- [ ] live-gate - Real queued work blocked-by: ship-task (repo: firstmate) (kind: ship)
+- [ ] other-ready - Other queued work (repo: other) (kind: ship)
+- [ ] other-call - Other captain question (repo: other) (kind: captain) (hold: pick a vendor) (hold-kind: captain)
+- [ ] no-project - Queued work without a project (kind: ship)
+
+## Done
+- [x] done-a - Landed thing https://github.com/kunchenguid/firstmate/pull/7 (repo: firstmate) (kind: ship) (merged 2026-07-10)
+- [x] other-done - Other landed thing (repo: other) (kind: ship) (merged 2026-07-09)
+EOF
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] mate-other - Secondmate work on other (repo: other) (kind: ship) (since 2026-07-11)
+- [ ] mate-first - Secondmate work on firstmate (repo: firstmate) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+- [x] mate-landed - Secondmate-managed fix https://github.com/kunchenguid/firstmate/pull/50 (repo: firstmate) (kind: ship) (merged 2026-07-11)
+EOF
+  rm -f "$mate/state/mate.meta" "$mate/state/mate.status"
+  mkdir -p "$mate/projects/other" "$mate/projects/first"
+  fm_write_meta "$mate/state/mate-other.meta" \
+    "window=firstmate:fm-mate-other" "worktree=$mate/projects/other" "project=other" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" mate-other busy
+  printf 'working: other parity\n' > "$mate/state/mate-other.status"
+  fm_write_meta "$mate/state/mate-first.meta" \
+    "window=firstmate:fm-mate-first" "worktree=$mate/projects/first" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" mate-first busy
+  printf 'working: firstmate parity\n' > "$mate/state/mate-first.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json --repo other)
+  printf '%s' "$json" | jq -e '
+    .scope == "other"
+      and ([.in_flight[].id] == ["mate"])
+      and (.in_flight[0].repo == "other" and (.in_flight[0].doing | contains("mate-other"))
+        and (.in_flight[0].doing | contains("mate-first") | not))
+      and ([.decisions_open[].id] == ["other-call"])
+      and ([.landed[].id] == ["other-done"])
+      and ([.gates[].id] == ["(main-inventory)", "other-ready"])
+      and (.gates[0].ready == false and .gates[0].repo == null)
+      and (.gates[1].ready == true)
+      and (.recorded_prs == [])
+      and (.reports == [])
+      and (.secondmates | any(.id == "mate"))
+      and (.omitted | any(.surface == "project scope other: 8 row(s) outside scope, 1 with no recorded project"
+        and .reveal == "omit --repo"))
+  ' >/dev/null || fail "--repo other scoped the projection wrongly: $json"
+  toon=$(run "$home" "$fakebin" --repo other)
+  assert_contains "$toon" "scope: other" "TOON must carry the applied scope"
+  json=$(run "$home" "$fakebin" --json --repo other --repo firstmate)
+  printf '%s' "$json" | jq -e '
+    .scope == "firstmate,other"
+      and ([.in_flight[].id] | sort) == ["external-wait", "mate", "scout-x", "ship-task"]
+      and (.in_flight[] | select(.id == "mate") | .repo == "firstmate,other")
+      and ([.decisions_open[].id] == ["other-call"])
+      and ([.landed[].id] | sort) == ["done-a", "mate-landed", "other-done"]
+      and ([.gates[].id] | sort) == ["(main-inventory)", "live-gate", "other-ready"]
+      and (.recorded_prs | any(.id == "ship-task"))
+      and (.reports | any(.id == "scout-x"))
+      and (.omitted | any(.surface == "project scope firstmate,other: 1 row(s) outside scope, 1 with no recorded project"))
+  ' >/dev/null || fail "two --repo scopes did not union: $json"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .scope == "fleet"
+      and (.gates | any(.id == "no-project"))
+      and (.omitted | any(.surface | startswith("project scope")) | not)
+  ' >/dev/null || fail "an unscoped read changed shape: $json"
+  run "$home" "$fakebin" --repo "" >/dev/null 2>"$home/repo.err"; rc=$?
+  [ "$rc" -eq 2 ] || fail "an empty --repo must be refused (rc=$rc)"
+  assert_contains "$(cat "$home/repo.err")" "--repo needs a project name" "empty --repo refusal must say why"
+  pass "--repo scopes project rows before bounding, keeps integrity rows, and discloses what it dropped"
+}
+
 # The collapsed captain-call contract: any due, unblocked captain-held task is
 # Captain's Call whatever its kind; a date-deferred hold is a dated gate until
 # due; a prose-deferred hold leaves the default views with a disclosure; and
@@ -2021,6 +2143,8 @@ test_open_decision_surfaces_end_to_end
 test_open_decisions_carry_hold_age
 test_report_pointers_surface
 test_superseded_queued_item_dropped_by_default
+test_project_rows_carry_repo_and_gates_mark_readiness
+test_repo_scope_filters_project_rows_and_discloses
 test_include_prs_is_the_only_fetch_path
 test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call
