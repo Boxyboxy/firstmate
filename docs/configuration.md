@@ -349,6 +349,18 @@ Its `remove` action excises only the marker-delimited Firstmate region and remov
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch instead carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
 
+## omp worker runtime bound (config/omp-max-time)
+
+The optional local, gitignored `config/omp-max-time` sets how long an omp worker may run before omp stops the session itself.
+Its value is the first non-empty, non-comment line of the file, whitespace-trimmed, matching the per-home text config pattern.
+Accepted values are a positive integer number of seconds, a positive integer suffixed with `m` for minutes or `h` for hours, or `off`.
+With no file the bound is `3h`, so an unattended omp worker cannot run unbounded by default.
+`off` restores an unbounded omp launch and passes no flag at all.
+Any other value, including a zero or a non-numeric duration, refuses the spawn before any endpoint, worktree, or task record exists and names the file to fix, so a home never silently launches unbounded because its bound was mistyped.
+The bound reaches the launch as omp's own `--max-time=<value>` flag, verified advertised on omp 18.1.19, and applies to crewmates, scouts, and omp secondmates alike.
+This axis is omp-only; other harnesses carry no equivalent flag and their launches are unaffected.
+`bin/fm-spawn.sh` reads the file on every spawn and relaunch, so a change takes effect at the next launch without a restart.
+
 ## Claude permission mode (config/claude-permission-mode)
 
 The optional local, gitignored `config/claude-permission-mode` holds one token selecting the permission flag every Claude worker launch carries: crewmates, scouts, Claude secondmates, and control-plane relaunches alike.

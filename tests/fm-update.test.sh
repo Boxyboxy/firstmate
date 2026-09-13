@@ -29,6 +29,9 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 UPDATE="$ROOT/bin/fm-update.sh"
+OMP_UPDATE="$ROOT/bin/fm-omp-update.sh"
+# A deliberately minimal PATH so a channel fixture is the only omp on it.
+BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
 # Deterministic, isolated git identity for fixture commits.
 fm_git_identity fmtest fmtest@example.com
@@ -475,6 +478,429 @@ test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_bin_only_advance_restarts
 test_unprovable_runtime_gets_fallback_nudge
+
+# --- omp executable update (ported with bin/fm-omp-update.sh) -----------------
+# The updater reaches beyond this repo to a machine-wide executable, so its
+# refusals are the contract under test: it installs only when every recorded
+# worker is proven stopped, and --check can never install.
+
+make_fake_omp() {
+  local case_dir=$1 channel_a channel_b
+  channel_a="$case_dir/channel-a"
+  channel_b="$case_dir/channel-b"
+  mkdir -p "$channel_a" "$channel_b" "$case_dir/home/state"
+  for channel in "$channel_a" "$channel_b"; do
+    cat > "$channel/omp" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  cat "${OMP_FAKE_VERSION_FILE:?}"
+  exit 0
+fi
+case "${1:-}" in
+  update)
+    if [ "${2:-}" = --check ]; then
+      : > "${OMP_FAKE_CHECK_MARKER:?}"
+      printf '%s\n' 'check only'
+    else
+      : > "${OMP_FAKE_INSTALL_MARKER:?}"
+      printf '%s\n' 'installed'
+      printf '%s\n' 'omp/99.1.0' > "${OMP_FAKE_VERSION_FILE:?}"
+    fi
+    ;;
+esac
+SH
+    chmod +x "$channel/omp"
+  done
+  printf '%s|%s|%s\n' "$case_dir/home" "$channel_a" "$channel_b"
+}
+
+make_alive_endpoint_tmux() {
+  local dir=$1
+  mkdir -p "$dir"
+  cat > "$dir/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message)
+    for a in "$@"; do
+      case "$a" in *pane_current_command*) printf '%s\n' claude; exit 0 ;; esac
+    done
+    exit 0
+    ;;
+  list-windows) printf '%s\n' win; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/tmux"
+}
+
+make_dead_endpoint_tmux() {
+  local dir=$1
+  mkdir -p "$dir"
+  cat > "$dir/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = list-windows ]; then
+  printf "can't find session: %s\n" "${3:-}" >&2
+fi
+exit 1
+SH
+  chmod +x "$dir/tmux"
+}
+
+make_unreadable_endpoint_tmux() {
+  local dir=$1
+  mkdir -p "$dir"
+  cat > "$dir/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'tmux: something unexpected\n' >&2
+exit 1
+SH
+  chmod +x "$dir/tmux"
+}
+
+test_omp_update_is_guarded_and_channel_preserving() {
+  local case_dir="$TMP_ROOT/omp-update" fixture home channel_a channel_b out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  fixture=${fixture#*|}
+  channel_a=${fixture%%|*}
+  channel_b=${fixture#*|}
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+
+  out=$(PATH="$channel_a:$channel_b:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE")
+
+  assert_contains "$out" "omp: channel: $channel_a/omp" "omp update uses the first channel on PATH, as the shell would"
+  assert_contains "$out" "omp: before: omp/17.2.6" "omp update reports its starting version"
+  assert_contains "$out" "omp: after: omp/99.1.0" "omp update reports its ending version"
+  [ -f "$case_dir/install-marker" ] || fail "empty-fleet omp update did not run"
+  [ ! -f "$case_dir/check-marker" ] || fail "normal omp update unexpectedly ran check mode"
+  pass "omp update is allowed for an empty fleet and preserves the resolved channel"
+}
+
+test_omp_update_refuses_live_fleet() {
+  local case_dir="$TMP_ROOT/omp-live" fixture home channels channel_a out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  channels=${fixture#*|}
+  channel_a=${channels%%|*}
+  make_alive_endpoint_tmux "$case_dir/fakebin"
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  printf 'window=main:win\n' > "$home/state/live.meta"
+
+  if out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "omp update succeeded with a live fleet"
+  fi
+  assert_contains "$out" "omp: refused: a worker is still running (task live)" \
+    "a verifiably running endpoint blocks the swap and is named as a task"
+  [ ! -f "$case_dir/install-marker" ] || fail "live-fleet guard attempted an install"
+  [ "$(cat "$case_dir/version")" = "omp/17.2.6" ] || fail "live-fleet guard changed omp version"
+  pass "omp update refuses a running worker without invoking the updater"
+}
+
+test_omp_update_refuses_unclassifiable_state() {
+  local case_dir="$TMP_ROOT/omp-unclassified" fixture home channel_a out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  channel_a=${fixture#*|}
+  channel_a=${channel_a%%|*}
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  {
+    printf 'backend=orca\n'
+    printf 'terminal=t1\n'
+  } > "$home/state/exp.meta"
+
+  if out=$(PATH="$channel_a:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "omp update ran with an unclassifiable endpoint"
+  fi
+  assert_contains "$out" "omp: refused: could not confirm every worker has stopped (task exp: its orca endpoint reads unverified)" \
+    "an unclassifiable endpoint is reported as unconfirmed, not as a running worker"
+  [ ! -f "$case_dir/install-marker" ] || fail "unclassifiable endpoint still attempted an install"
+  [ "$(cat "$case_dir/version")" = "omp/17.2.6" ] || fail "unclassifiable endpoint changed omp version"
+  if PATH="$channel_a:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" --force >/dev/null 2>&1; then
+    fail "omp update accepted an unsafe override"
+  fi
+  pass "omp refuses an unclassifiable endpoint without an override"
+}
+
+test_omp_update_ignores_records_whose_endpoint_is_gone() {
+  local case_dir="$TMP_ROOT/omp-stale" fixture home channel_a out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  channel_a=${fixture#*|}
+  channel_a=${channel_a%%|*}
+  make_dead_endpoint_tmux "$case_dir/fakebin"
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  printf 'window=main:fm-gone\n' > "$home/state/gone.meta"
+
+  out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE")
+
+  assert_contains "$out" "omp: after: omp/99.1.0" "stale record does not block the update"
+  [ -f "$case_dir/install-marker" ] || fail "stale record wedged the omp update"
+  pass "omp update ignores a record whose endpoint is authoritatively gone"
+}
+
+test_omp_update_names_a_second_mate_correctly() {
+  local case_dir="$TMP_ROOT/omp-sm" fixture home channel_a out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  channel_a=${fixture#*|}
+  channel_a=${channel_a%%|*}
+  make_dead_endpoint_tmux "$case_dir/fakebin"
+  make_alive_endpoint_tmux "$case_dir/alivebin"
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  # The home exists and simply holds no records yet - a reachable, genuinely
+  # empty home, which is what lets the second half below prove that a stopped
+  # second mate does not wedge the update.
+  mkdir -p "$case_dir/sm"
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=%s/sm\n' "$case_dir"
+    printf 'window=main:win\n'
+  } > "$home/state/sm1.meta"
+
+  if out=$(PATH="$channel_a:$case_dir/alivebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "omp update succeeded with a running second mate"
+  fi
+  assert_contains "$out" "omp: refused: a worker is still running (second mate sm1)" \
+    "a persistent second mate is never reported as a task"
+  [ ! -f "$case_dir/install-marker" ] || fail "running second mate did not stop the install"
+
+  # The same record stops blocking once its endpoint is authoritatively gone.
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=%s/sm\n' "$case_dir"
+    printf 'window=main:fm-sm1\n'
+  } > "$home/state/sm1.meta"
+  out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE")
+  assert_contains "$out" "omp: after: omp/99.1.0" "a second mate that is not running does not wedge omp"
+  [ -f "$case_dir/install-marker" ] || fail "non-running second mate wedged the omp update"
+  pass "omp names a second mate correctly and only blocks while it is running"
+}
+
+test_omp_update_covers_second_mate_homes() {
+  local case_dir="$TMP_ROOT/omp-sm-home" fixture home channel_a sm_home out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  channel_a=${fixture#*|}
+  channel_a=${channel_a%%|*}
+  make_alive_endpoint_tmux "$case_dir/alivebin"
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  sm_home="$case_dir/sm-home"
+  mkdir -p "$sm_home/state"
+  printf 'window=main:win\n' > "$sm_home/state/busy.meta"
+  # This home's own record carries no endpoint, so only the second mate home's
+  # crewmate can supply the running verdict the refusal must report.
+  {
+    printf 'kind=secondmate\n'
+    printf 'home=%s\n' "$sm_home"
+  } > "$home/state/sm1.meta"
+
+  if out=$(PATH="$channel_a:$case_dir/alivebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "omp update swapped the executable under a second mate's crewmate"
+  fi
+  assert_contains "$out" "omp: refused: a worker is still running (task busy in second mate sm1's home)" \
+    "a second mate home's running crewmate blocks the swap and is located"
+  [ ! -f "$case_dir/install-marker" ] || fail "second mate home's crewmate did not stop the install"
+
+  # The registry is the same guarantee for a second mate with no live record.
+  rm -f "$home/state/sm1.meta"
+  mkdir -p "$home/data"
+  printf -- '- sm1 - a second mate (home: %s; scope: x; projects: p; added 2026-06-23)\n' \
+    "$sm_home" > "$home/data/secondmates.md"
+  if out=$(PATH="$channel_a:$case_dir/alivebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "a registry-only second mate home was left unswept"
+  fi
+  assert_contains "$out" "omp: refused: a worker is still running (task busy in second mate sm1's home)" \
+    "the registry reaches a second mate home with no live record"
+
+  # A remote second mate's workers run on another machine, where this machine's
+  # omp cannot break them, so its route never blocks the local update.
+  rm -f "$sm_home/state/busy.meta"
+  printf -- '- sm2 - a remote second mate (host: h1; root: /srv/fm; home: /srv/sm2; scope: y; projects: p; added 2026-06-23)\n' \
+    > "$home/data/secondmates.md"
+  out=$(PATH="$channel_a:$case_dir/alivebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE")
+  assert_contains "$out" "omp: after: omp/99.1.0" "a remote second mate does not block the local channel"
+  [ -f "$case_dir/install-marker" ] || fail "remote second mate wedged the local omp update"
+  pass "omp accounts for every local second mate home, not just this one"
+}
+
+test_omp_update_ignores_a_remote_second_mate_record() {
+  local case_dir="$TMP_ROOT/omp-sm-remote" fixture home channel_a out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  channel_a=${fixture#*|}
+  channel_a=${channel_a%%|*}
+  make_unreadable_endpoint_tmux "$case_dir/fakebin"
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  {
+    printf 'window=remote:sm2\n'
+    printf 'kind=secondmate\n'
+    printf 'home=/srv/sm2\n'
+    printf 'remote_host=h1\n'
+    printf 'remote_root=/srv/fm\n'
+    printf 'remote_backend=tmux\n'
+    printf 'remote_target=main:fm-sm2\n'
+  } > "$home/state/sm2.meta"
+
+  out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE")
+
+  assert_contains "$out" "omp: after: omp/99.1.0" "a remote record does not block the local channel"
+  [ -f "$case_dir/install-marker" ] || fail "a remote second mate record wedged the local omp update"
+  pass "omp never classifies a remote second mate's record against the local backend"
+}
+
+test_omp_update_reports_places_it_cannot_reach() {
+  local case_dir="$TMP_ROOT/omp-unreachable" fixture home channel_a out corrupt_home
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  channel_a=${fixture#*|}
+  channel_a=${channel_a%%|*}
+  make_dead_endpoint_tmux "$case_dir/fakebin"
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  {
+    printf 'kind=secondmate\n'
+    printf 'window=main:fm-sm1\n'
+    printf 'home=relative/sm1\n'
+  } > "$home/state/sm1.meta"
+
+  if out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "an unreachable second mate home was treated as an empty fleet"
+  fi
+  assert_contains "$out" "second mate sm1's home: its recorded location is not a usable path (relative/sm1)" \
+    "a home the sweep cannot reach is named, not silently dropped"
+  [ ! -f "$case_dir/install-marker" ] || fail "unreachable home still attempted an install"
+
+  # An absolute home that is simply not on disk is the same unproven gap. It
+  # must NOT collapse into "that home has no records": the sweep never got
+  # there, so it saw nothing rather than proving nothing is running.
+  {
+    printf 'kind=secondmate\n'
+    printf 'window=main:fm-sm1\n'
+    printf 'home=%s/absent-sm\n' "$case_dir"
+  } > "$home/state/sm1.meta"
+  if out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "a registered home that is missing from disk was treated as an empty fleet"
+  fi
+  assert_contains "$out" "second mate sm1's home: its recorded location $case_dir/absent-sm is missing or cannot be read" \
+    "a missing registered home is reported as unknown, not counted as empty"
+  [ ! -f "$case_dir/install-marker" ] || fail "missing registered home still attempted an install"
+
+  # A home that IS there but whose state path is not a readable directory is the
+  # narrowest version of the same gap: the sweep reached the home, found
+  # something where the records belong, and still read none of them.
+  mkdir -p "$case_dir/corrupt-sm"
+  : > "$case_dir/corrupt-sm/state"
+  # The sweep resolves a reachable home before reading its records, so the
+  # report names the resolved path.
+  corrupt_home=$(cd "$case_dir/corrupt-sm" && pwd -P)
+  {
+    printf 'kind=secondmate\n'
+    printf 'window=main:fm-sm1\n'
+    printf 'home=%s/corrupt-sm\n' "$case_dir"
+  } > "$home/state/sm1.meta"
+  if out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "a home whose state path is not a directory was treated as an empty fleet"
+  fi
+  assert_contains "$out" "second mate sm1's home: its local records at $corrupt_home/state are not a readable directory" \
+    "a state path that is not a readable directory is reported as unknown"
+  [ ! -f "$case_dir/install-marker" ] || fail "an unreadable state path still attempted an install"
+
+  # A registry that is not a plain file is the same kind of unproven gap: the
+  # whole registered-home backstop went unread.
+  rm -f "$home/state/sm1.meta"
+  mkdir -p "$home/data"
+  printf -- '- sm1 - a second mate (home: %s/sm1; scope: x; projects: p; added 2026-06-23)\n' \
+    "$case_dir" > "$case_dir/registry.md"
+  ln -s "$case_dir/registry.md" "$home/data/secondmates.md"
+  if out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "an unread registry was treated as an empty fleet"
+  fi
+  assert_contains "$out" "the second mate registry: $home/data/secondmates.md is not a plain file" \
+    "an unread registry is reported instead of assumed empty"
+  [ ! -f "$case_dir/install-marker" ] || fail "unread registry still attempted an install"
+
+  # A registry entry the strict parser rejects hides one whole home the same
+  # way, so it is reported rather than skipped past.
+  rm -f "$home/data/secondmates.md" "$case_dir/install-marker"
+  printf -- '- sm2 - a second mate (home: %s/sm2; scope: x; added 2026-06-23)\n' \
+    "$case_dir" > "$home/data/secondmates.md"
+  if out=$(PATH="$channel_a:$case_dir/fakebin:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" 2>&1); then
+    fail "a malformed registry entry was treated as an empty fleet"
+  fi
+  assert_contains "$out" "the second mate registry: its entry \"- sm2 - a second mate" \
+    "a malformed registry entry is named instead of silently dropped"
+  [ ! -f "$case_dir/install-marker" ] || fail "malformed registry entry still attempted an install"
+  pass "omp reports every place it could not reach instead of assuming it is empty"
+}
+
+test_omp_check_is_detect_only_with_live_fleet() {
+  local case_dir="$TMP_ROOT/omp-check" fixture home channel_a out
+  fixture=$(make_fake_omp "$case_dir")
+  home=${fixture%%|*}
+  channel_a=${fixture#*|}
+  channel_a=${channel_a%%|*}
+  printf '%s\n' 'omp/17.2.6' > "$case_dir/version"
+  : > "$home/state/live.meta"
+
+  out=$(PATH="$channel_a:$BASE_PATH" FM_HOME="$home" \
+    OMP_FAKE_VERSION_FILE="$case_dir/version" \
+    OMP_FAKE_INSTALL_MARKER="$case_dir/install-marker" \
+    OMP_FAKE_CHECK_MARKER="$case_dir/check-marker" "$OMP_UPDATE" --check)
+
+  assert_contains "$out" "check only" "omp check runs the channel's check command"
+  [ -f "$case_dir/check-marker" ] || fail "omp check did not run check mode"
+  [ ! -f "$case_dir/install-marker" ] || fail "omp check attempted an install"
+  [ "$(cat "$case_dir/version")" = "omp/17.2.6" ] || fail "omp check changed omp version"
+  pass "omp check remains detect-only even with a live fleet"
+}
+
 test_dead_secondmate_gets_no_action
 test_legacy_remote_advance_restarts
 test_dirty_secondmate_skipped
@@ -485,5 +911,15 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+
+test_omp_update_is_guarded_and_channel_preserving
+test_omp_update_refuses_live_fleet
+test_omp_update_refuses_unclassifiable_state
+test_omp_update_ignores_records_whose_endpoint_is_gone
+test_omp_update_names_a_second_mate_correctly
+test_omp_update_covers_second_mate_homes
+test_omp_update_ignores_a_remote_second_mate_record
+test_omp_update_reports_places_it_cannot_reach
+test_omp_check_is_detect_only_with_live_fleet
 
 echo "# all fm-update tests passed"

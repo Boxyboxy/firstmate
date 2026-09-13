@@ -70,23 +70,50 @@ test_detection_anchored_name_and_marker_precedence() {
   out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "a process named omp must detect as omp, got '$out'"
+  # The decoy claim is about the ANCHORED NAME, so it is asserted through the
+  # same matcher the session lock uses, which takes the name as an argument and
+  # cannot be contaminated by this process tree.
   for decoy in ompd comp; do
-    # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-    out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
-      "$bin/$decoy" -c '"$1"; :' _ "$HARNESS")
-    [ "$out" != omp ] || fail "'$decoy' merely contains omp and must not detect as omp"
+    ! fm_harness_process_matches "$decoy" '' \
+      || fail "'$decoy' merely contains omp and must not match the anchored omp name"
   done
+  # The end-to-end arm additionally proves a decoy-named PROCESS does not
+  # resolve to omp, but that only holds when no genuine omp sits in the
+  # ancestry. On an omp primary - this home's own posture - a real omp ancestor
+  # makes detection correctly answer omp regardless of the decoy's name, so the
+  # arm would assert the opposite of the truth. Detect that and say which arms
+  # ran, rather than skipping quietly or pinning the contaminated result.
+  local anc_pid=$$ anc_comm omp_in_ancestry=no
+  for _ in 1 2 3 4 5 6 7 8; do
+    anc_comm=$(ps -o comm= -p "$anc_pid" 2>/dev/null) || break
+    if [ "$(basename -- "$anc_comm")" = omp ]; then omp_in_ancestry=yes; break; fi
+    anc_pid=$(ps -o ppid= -p "$anc_pid" 2>/dev/null | tr -d ' ')
+    [ -n "$anc_pid" ] && [ "$anc_pid" -gt 1 ] || break
+  done
+  if [ "$omp_in_ancestry" = no ]; then
+    for decoy in ompd comp; do
+      # shellcheck disable=SC2016 # the quoted body expands inside the named shell
+      out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+        "$bin/$decoy" -c '"$1"; :' _ "$HARNESS")
+      [ "$out" != omp ] || fail "'$decoy' merely contains omp and must not detect as omp"
+    done
+  fi
   # The marker beats an inherited CLAUDECODE only under a real omp ancestor.
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
-  # ...and is inert when it leaks into a worker with no omp ancestor.
-  # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
-    bash -c '"$1"; :' _ "$HARNESS")
-  [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
-  pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
+  # ...and is inert when it leaks into a worker with no omp ancestor. This arm
+  # needs a genuinely omp-free ancestry for the same reason as the decoys above.
+  if [ "$omp_in_ancestry" = no ]; then
+    # shellcheck disable=SC2016 # the quoted body expands inside the named shell
+    out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
+      bash -c '"$1"; :' _ "$HARNESS")
+    [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
+    pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
+  else
+    pass "fm-harness: omp's anchored name and marker precedence hold; the ancestry-free arms were not asserted because a real omp process is this suite's own ancestor"
+  fi
 }
 
 test_lock_identity_and_liveness_classification() {
@@ -165,8 +192,8 @@ test_spawn_launch_line_and_worker_wiring() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 '$FAKEBIN_DIR/omp'" \
     "omp launch did not clear foreign markers and establish its own at the launch boundary"
-  assert_contains "$launch" "--config '$ROOT/.omp/fm-worker-overlay.yml' --auto-approve --cwd '$WT_DIR'" \
-    "omp launch did not carry the tracked posture overlay, --auto-approve, and the pinned working directory"
+  assert_contains "$launch" "--config '$ROOT/.omp/fm-worker-overlay.yml' --max-time=3h --auto-approve --cwd '$WT_DIR'" \
+    "omp launch did not carry the tracked posture overlay, the default runtime bound, --auto-approve, and the pinned working directory"
   assert_contains "$launch" "--model 'openai-codex/gpt-6-astra' --thinking 'medium' -e '$state/$id.omp-ext.ts'" \
     "omp launch did not pass the model, thinking level, and the state-resident worker extension"
   assert_contains "$launch" "encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md'" "omp launch lost the canonical typed launch-brief envelope"
@@ -177,6 +204,47 @@ test_spawn_launch_line_and_worker_wiring() {
   [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy fm-spawn" ] \
     || fail "omp spawn must seed the busy-state contract"
   pass "fm-spawn: the omp launch line clears markers, pins posture, and wires the state-resident extension"
+}
+
+# The runtime bound exists so an unattended omp worker cannot run forever, so
+# this drives every branch of the axis through a real spawn rather than the
+# resolver alone: the default, an operator override, `off`, and a refusal.
+test_spawn_runtime_bound_is_operator_controlled() {
+  local rec id=omp-maxtime-q1 out status launch
+  rec=$(make_spawn_case maxtime omp "$id")
+  read_case_record "$rec"
+  fm_test_spawn_brief "$HOME_DIR" "$id-off"
+  fm_test_spawn_brief "$HOME_DIR" "$id-bad"
+
+  printf '25m\n' > "$HOME_DIR/config/omp-max-time"
+  : > "$LAUNCH_LOG"
+  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp)
+  expect_code 0 "$?" "omp spawn with an overridden bound should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--max-time=25m --auto-approve" "an overridden config/omp-max-time must reach the launch"
+  case "$launch" in
+    *--max-time=3h*) fail "the override must replace the default, not accompany it: $launch" ;;
+  esac
+
+  printf '# operator note\n\noff\n' > "$HOME_DIR/config/omp-max-time"
+  : > "$LAUNCH_LOG"
+  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id-off" "$PROJ_DIR" --harness omp)
+  expect_code 0 "$?" "omp spawn with the bound disabled should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  case "$launch" in
+    *--max-time=*) fail "off must produce an unbounded launch with no --max-time: $launch" ;;
+  esac
+  assert_contains "$launch" "--auto-approve --cwd" "disabling the bound must not disturb the rest of the launch"
+
+  printf 'later\n' > "$HOME_DIR/config/omp-max-time"
+  : > "$LAUNCH_LOG"
+  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id-bad" "$PROJ_DIR" --harness omp 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unparseable config/omp-max-time must refuse the spawn, not launch unbounded: $out"
+  assert_contains "$out" "config/omp-max-time" "the refusal must name the file the operator has to fix"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused bound must not have launched anything: $(cat "$LAUNCH_LOG")"
+
+  pass "fm-spawn: the omp runtime bound honours the default, an override, off, and refuses an unparseable value"
 }
 
 test_spawn_model_validation_scoped_to_listed_providers() {
@@ -239,7 +307,7 @@ test_secondmate_launch_relies_on_discovery() {
   case "$launch" in
     *" -e "*) fail "an omp secondmate launch must name no -e: omp auto-discovers .omp/extensions and a file named both ways loads twice: $launch" ;;
   esac
-  assert_contains "$launch" "--config '$ROOT/.omp/fm-worker-overlay.yml' --auto-approve --cwd '$home'" "secondmate launch lost the posture overlay or the pinned home directory: $launch"
+  assert_contains "$launch" "--config '$ROOT/.omp/fm-worker-overlay.yml' --max-time=3h --auto-approve --cwd '$home'" "secondmate launch lost the posture overlay, the default runtime bound, or the pinned home directory: $launch"
   assert_contains "$launch" "FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 '$fakebin/omp'" "secondmate launch lost the omp marker or executable"
   assert_contains "$launch" "FM_SUPERVISION_MODEL=extension" "an omp secondmate must run the extension supervision model"
   assert_absent "$world/home/state/sm.omp-ext.ts" "a secondmate must not receive a per-task worker extension"
@@ -577,6 +645,7 @@ EOF
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
+test_spawn_runtime_bound_is_operator_controlled
 test_spawn_model_validation_scoped_to_listed_providers
 test_secondmate_launch_relies_on_discovery
 test_secondmate_config_pinned_model_is_validated

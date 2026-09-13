@@ -276,6 +276,7 @@
 #                  turn-end extension, written by this script; outside the worktree so
 #                  omp's cwd-only auto-discovery cannot load it a second time)
 #     __OMPWORKERCFG__ absolute path to the tracked .omp/fm-worker-overlay.yml posture overlay
+#     __OMPMAXTIME__ omp-only `--max-time=<duration>` fragment from config/omp-max-time
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
@@ -1574,8 +1575,10 @@ launch_template() {
     # secondmate loads its two primary extensions by that discovery alone:
     # naming them with -e as well loads each twice (verified), doubling every
     # session_stop continuation.
+    # __OMPMAXTIME__ carries the runtime bound from omp_max_time_flag, so an
+    # unattended worker cannot run unbounded; it is empty only for `off`.
     omp)
-      printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 __OMPBIN__ --config __OMPWORKERCFG__ --auto-approve --cwd __WORKTREE__'
+      printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 __OMPBIN__ --config __OMPWORKERCFG__ __OMPMAXTIME__--auto-approve --cwd __WORKTREE__'
       if [ "$kind" = secondmate ]; then
         printf '%s' ' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
@@ -1978,6 +1981,45 @@ muse_worker_meta_api_key_present() {
 muse_credential_present() {
   local auth=$1
   [ -s "$auth" ] || muse_worker_meta_api_key_present
+}
+
+# Print the verified omp-only runtime-bound fragment from config/omp-max-time.
+# The first non-empty, non-comment line is authoritative, matching the per-home
+# text config pattern owned by bin/fm-harness.sh's secondmate_line.
+# The 3h default is an operator-controlled backstop against an unattended omp
+# worker running unbounded, and `off` restores an unbounded launch.
+# Verified against omp 18.1.19, which advertises --max-time=<value>.
+omp_max_time_flag() {
+  local config_file="$CONFIG/omp-max-time" line value=3h amount
+  if [ -e "$config_file" ]; then
+    [ -f "$config_file" ] || {
+      echo "error: config/omp-max-time must be a regular file containing off or a positive duration such as 3600, 10m, or 1h" >&2
+      return 1
+    }
+    value=
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      [ -n "$line" ] || continue
+      case "$line" in
+        '#'*) continue ;;
+      esac
+      value=$line
+      break
+    done < "$config_file"
+  fi
+  [ "$value" != off ] || return 0
+  case "$value" in
+    *m|*h) amount=${value%?} ;;
+    *) amount=$value ;;
+  esac
+  case "$amount" in
+    ''|0*|*[!0-9]*)
+      echo "error: config/omp-max-time must contain off or a positive integer number of seconds, minutes (10m), or hours (1h)" >&2
+      return 1
+      ;;
+  esac
+  printf -- '--max-time=%s ' "$value"
 }
 
 model_flag_for_harness() {
@@ -4038,6 +4080,10 @@ EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
+if [ "$HARNESS" = omp ]; then
+  OMPMAXTIME=$(omp_max_time_flag) || exit 1
+  LAUNCH=${LAUNCH//__OMPMAXTIME__/$OMPMAXTIME}
+fi
 if [ "$HARNESS" = rovo ]; then
   ROVOCONFIGOVERRIDE=$(rovo_config_override_flag "$EFFORT" "$DATA" "$STATE" "$ID") || {
     echo "error: could not resolve this task's home paths for rovo's allowedExternalPaths grant" >&2

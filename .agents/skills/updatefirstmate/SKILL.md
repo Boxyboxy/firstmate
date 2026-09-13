@@ -83,7 +83,18 @@ This touches only the firstmate repo and its own worktrees, never anything under
    It is a gentle steer, not an interruption: the mate already got a safe tracked-files fast-forward, and the steer never forces, tears down, or discards its work.
    Never describe one of these as reloaded; its agent is still running the wiring it launched with.
 
-5. **Report to the captain in plain outcomes, in one line where you can.**
+5. **Refresh the omp harness executable.**
+   ```sh
+   bin/fm-omp-update.sh
+   ```
+   This is the live update path, and the only path allowed to install: it replaces omp through whichever channel `which omp` already resolves, never a second private copy, and reports that channel plus the before and after versions.
+   `omp` is one machine-wide executable, so swapping it can break any worker on this machine, not just this home's.
+   The helper therefore installs only after confirming that every worker recorded here and in every registered local second mate home has stopped; a second mate reached over SSH runs on another machine and never blocks this one.
+   When it refuses, it names exactly what it could not confirm stopped: a running worker, a record it could not classify, or a home or registry it could not read.
+   Relay that to the captain and leave omp alone, because the fleet is still up and the swap would break it.
+   The unattended overnight cron never runs this step; it runs `bin/fm-omp-update.sh --check`, which is detect-only and can never install with nobody present to read a refusal.
+
+6. **Report to the captain in plain outcomes, in one line where you can.**
    Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
    For example: "Captain, firstmate and both second mates are now on the latest."
    Say plainly when a mate got the message rather than a clean reload, and why - never let a partial reload read as a full one.
