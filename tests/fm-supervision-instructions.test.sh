@@ -42,6 +42,31 @@ test_conditional_stanzas() {
   pass "renderer includes read-only, afk, and effective x-mode current-state stanzas"
 }
 
+test_quiet_mode_stanzas() {
+  local home config out
+  home="$TMP_ROOT/quiet-home"
+  config="$TMP_ROOT/quiet-config"
+  mkdir -p "$home/state" "$config"
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness codex --afk 1 --afk-mode quiet)
+  assert_contains "$out" "- Quiet mode: active" "quiet stanza missing"
+  assert_contains "$out" "load /quiet" "quiet stanza did not name the /quiet skill"
+  assert_contains "$out" "Ordinary captain chat does NOT exit it" "quiet stanza lost the explicit-only exit rule"
+  assert_not_contains "$out" "- Away mode: active" "quiet mode incorrectly rendered as away mode"
+  out=$(FM_HOME="$home" "$RENDER" --harness codex --afk 1 --afk-mode quiet --repair-line)
+  assert_contains "$out" "Quiet mode owns watcher supervision; load /quiet" "quiet repair line did not name /quiet"
+
+  out=$(FM_HOME="$home" "$RENDER" --harness codex --afk 1)
+  assert_contains "$out" "- Away mode: active" "omitting --afk-mode did not default to away (regression)"
+  assert_not_contains "$out" "Quiet mode" "omitting --afk-mode leaked quiet-mode text"
+
+  out=$(FM_HOME="$home" "$RENDER" --harness codex --afk 1 --afk-mode not-a-real-mode)
+  assert_contains "$out" "- Away mode: active" "unrecognized --afk-mode value did not fall back to away"
+
+  out=$(FM_HOME="$home" "$RENDER" --harness codex --afk 0)
+  assert_contains "$out" "- Away/quiet mode: inactive" "inactive stanza missing"
+  pass "renderer's away/quiet stanzas are mode-aware, default to away, and fall back safely on garbage input"
+}
+
 test_repair_lines() {
   local home out
   home="$TMP_ROOT/repair-home"
@@ -68,6 +93,10 @@ test_repair_lines() {
   out=$(FM_HOME="$home" "$RENDER" --harness pi --repair-line)
   assert_contains "$out" "Pi tool fm_watch_arm_pi" "pi repair line does not direct the model to the extension-owned tool"
   assert_not_contains "$out" "extension command /fm-watch-arm-pi" "pi repair line still directs the model to the human slash command"
+  out=$(FM_HOME="$home" "$RENDER" --harness omp --repair-line)
+  assert_contains "$out" "omp tool fm_watch_arm_omp" "omp repair line does not direct the model to the extension-owned tool"
+  assert_contains "$out" ".omp/extensions/fm-primary-turnend-guard.ts" "omp repair line does not name its own turn-end extension"
+  assert_not_contains "$out" "fm_watch_arm_pi" "omp repair line must not borrow the Pi tool"
   pass "renderer repair-line mode is harness-aware and honors conditional state"
 }
 
@@ -80,6 +109,17 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_not_contains "$ordinary" "fm_watch_arm_pi" "pi ordinary-wake line incorrectly calls the recovery tool"
   out=$("$RENDER" --harness pi --repair-line)
   assert_contains "$out" "fm_watch_arm_pi" "pi recovery line lost the extension-owned repair tool"
+
+  out=$("$RENDER" --harness omp)
+  assert_contains "$out" "primary harness: omp" "omp heading missing"
+  assert_contains "$out" "Mode: omp (Oh My Pi) extension background wake." "omp snippet missing"
+  assert_contains "$out" "the omp extension already owns watcher continuity" "omp ordinary-wake line does not leave continuity to the extension"
+  assert_contains "$out" ".omp/extensions/fm-primary-omp-watch.ts" "omp snippet did not substitute its watch extension path"
+  assert_not_contains "$out" "__FM_OMP_EXT__" "omp snippet left a placeholder unsubstituted"
+  assert_not_contains "$out" "__FM_OMP_TURNEND_EXT__" "omp snippet left the turn-end placeholder unsubstituted"
+  assert_not_contains "$out" "project trust" "omp snippet must not carry Pi's trust prerequisite"
+  out=$("$RENDER" --harness omp --repair-line)
+  assert_contains "$out" "fm_watch_arm_omp" "omp recovery line lost the extension-owned repair tool"
 
   out=$("$RENDER" --harness opencode)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
@@ -107,16 +147,6 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   out=$("$RENDER" --harness grok --repair-line)
   assert_contains "$out" "Grok tracked background task" "grok recovery line lost its tracked background repair"
   assert_contains "$out" "bin/fm-watch-arm.sh" "grok recovery line lost the arm command"
-
-  out=$("$RENDER" --harness omp)
-  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
-  assert_contains "$ordinary" "re-arm" "omp ordinary-wake line does not tell the model to re-arm"
-  assert_contains "$ordinary" "omp background async job" "omp ordinary-wake line fell through to the generic continuation"
-  assert_contains "$ordinary" "bin/fm-watch-arm.sh" "omp ordinary-wake line lost the background arm command"
-  assert_contains "$ordinary" "command deadline disabled" "omp ordinary-wake line lost the deadline-disabled arm requirement"
-  out=$("$RENDER" --harness omp --repair-line)
-  assert_contains "$out" "omp background async job" "omp recovery line lost its background async repair"
-  assert_contains "$out" "command deadline disabled" "omp recovery line lost the deadline-disabled arm requirement"
 
   out=$("$RENDER" --harness codex)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
@@ -180,54 +210,21 @@ test_pi_snippet_uses_effective_extension_path() {
   assert_contains "$out" "-e $turnend -e $watch" "pi snippet did not render both effective extension launch paths"
   assert_contains "$out" "The turn-end guard extension lives at \`$turnend\`" "pi snippet did not render the turn-end guard extension path"
   assert_contains "$out" "The watcher extension lives at \`$watch\`" "pi snippet did not render the watcher extension path"
+  assert_contains "$out" "MAIN must not re-drain, re-run, or acknowledge it" "pi snippet lost merged-event ownership"
+  assert_contains "$out" "MAIN applies judgment about whether and how to surface, summarize, reference, or incorporate a merged sailboat outcome" "pi snippet imposed a mechanical sailboat treatment"
   assert_not_contains "$out" "__FM_PI_EXT__" "renderer leaked the Pi extension path placeholder"
   assert_not_contains "$out" "__FM_PI_TURNEND_EXT__" "renderer leaked the Pi turn-end extension path placeholder"
   assert_not_contains "$out" "state/fm-primary-pi-watch.ts" "pi snippet kept the old generated state-relative extension path"
   pass "pi supervision snippet renders the effective extension path"
 }
 
-test_omp_is_background_notify() {
-  local out
-  out=$("$RENDER" --harness omp)
-  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: omp" "omp heading missing"
-  assert_contains "$out" "Mode: omp background-notify supervision." "omp snippet missing background-notify mode line"
-  assert_contains "$out" "bin/fm-watch-arm.sh" "omp snippet missing the watcher arm step"
-  assert_contains "$out" "command deadline is disabled" \
-    "omp snippet does not require arming with the command deadline disabled, so a quiet fleet loses the wake delivery path"
-  assert_not_contains "$out" "Mode: Unknown harness fallback." "omp resolved the unknown fallback instead of omp.md"
-  assert_not_contains "$out" "__FM_X_MODE_ENV" "renderer leaked an x-mode path placeholder when x-mode is off"
-  pass "omp supervision is background-notify (fm-watch-arm.sh), not the unknown fallback, no x-mode leak"
-}
-
-test_omp_command_sources_effective_config() {
-  local home config out
-  home="$TMP_ROOT/omp-home"
-  config="$TMP_ROOT/omp-config"
-  mkdir -p "$home/state" "$config"
-  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness omp --x-mode 1)
-  assert_contains "$out" "$config/x-mode.env" "omp x-mode snippet did not render the effective config path"
-  pass "omp supervision snippet substitutes the effective x-mode config path"
-}
-
-test_omp_repair_line_is_background_notify() {
-  local home out
-  home="$TMP_ROOT/omp-repair-home"
-  mkdir -p "$home/state" "$home/config"
-  out=$(FM_HOME="$home" "$RENDER" --harness omp --repair-line)
-  assert_contains "$out" "bin/fm-watch-arm.sh" "omp repair line missing the background-notify watcher arm"
-  assert_not_contains "$out" "session-start block for this harness" "omp repair line fell through to the generic fallback"
-  pass "omp repair line is the tailored background-notify arm, not the generic fallback"
-}
-
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
+test_quiet_mode_stanzas
 test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path
-test_omp_is_background_notify
-test_omp_command_sources_effective_config
-test_omp_repair_line_is_background_notify

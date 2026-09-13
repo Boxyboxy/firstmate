@@ -2,15 +2,23 @@
 # Scaffold a crewmate brief or persistent secondmate charter at
 # data/<task-id>/brief.md under the active firstmate home.
 # For ordinary tasks, the standard Setup/Rules/Definition-of-done contract is
-# filled in. Firstmate then replaces the {TASK} placeholder with the task
-# description, acceptance criteria, and context, and may adjust other sections
-# when the task genuinely deviates (e.g. working an existing external PR instead
-# of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--base <ref>] [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--base <ref>] [--herdr-lab]
+# filled in. Ship and scout `# Task` sections have two subsections Firstmate
+# fills before dispatch: `{TASK}` under `## Captain's intent` (the captain's
+# own ask plus the context needed to read it, including the substance of any
+# report, decision, or PR the ask refers to) and `{FIRSTMATE_SPEC}`
+# under `## Firstmate spec` (build instructions, which are never the captain's
+# intent). bin/fm-dod-lib.sh owns the no-mistakes `--intent` contract those
+# subsections feed; bin/fm-spawn.sh refuses leftover placeholders. Secondmate
+# charters still use a single `{TASK}` charter fill. Firstmate may adjust other
+# sections when the task genuinely deviates (e.g. working an existing external
+# PR instead of shipping a new one).
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
+#   confirms the supported lavish-axi floor; otherwise it asks for a text report.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -24,34 +32,10 @@
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
-#   The flag must be explicit because {TASK} is filled after scaffolding and the
-#   caller-supplied repo string cannot reliably identify this repo. Briefs made
-#   without it carry a loud declaration so an omitted contract cannot be silent.
-#   --base <ref> records the branch on origin the task worktree is cut from, so the
-#   generated Setup states the ACTUAL base, plus the branch a ship task's PR must
-#   target, instead of asserting a default the spawn never guaranteed. Without it
-#   a worktree's base falls back to the REMOTE's default branch (bin/fm-spawn.sh's
-#   freshen_spawn_worktree_base), which is a per-repo property and frequently not
-#   the branch a task's code lives on, so the base is an input here rather than an
-#   assumption. Ship and scout scaffolds record it as a fixed machine-readable
-#   "Base contract: base=<ref>" line that bin/fm-spawn.sh checks against its own
-#   --base before launching, so the worker's stated base and the spawned base
-#   cannot drift apart. Like --herdr-lab, the flag is explicit because the base
-#   cannot be detected here: this script never touches a worktree, and {TASK} is
-#   filled in after scaffolding. Omitting it is never silent - the Setup section
-#   then declares the base unrecorded and requires the worker to establish it
-#   before branching, rather than claiming a default branch.
-#   A base must name a branch on origin ("origin/<branch>"); every other shape is
-#   refused, because a base has to be provable as current against the remote and
-#   a tag, a raw commit, a revision expression, a local branch, or another
-#   remote's ref cannot be. origin/HEAD is refused with it, along with anything
-#   else whose stripped branch is not a branch name (origin/refs/heads/x,
-#   origin/origin/x): the PR target derived from those names no branch, and
-#   origin/HEAD is a symbolic ref that follows whichever branch the remote calls
-#   default - the unstated base this contract exists to eliminate.
-#   Nothing but the PR target is derived from the base:
-#   local-only lands on the project's local default branch, which is
-#   bin/fm-merge-local.sh's business and never this base's.
+#   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
+#   after scaffolding and the caller-supplied repo string cannot reliably
+#   identify this repo. Briefs made without it carry a loud declaration so an
+#   omitted contract cannot be silent.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
@@ -65,38 +49,11 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
-# Ship briefs begin with a worktree-isolation assertion before the branch step,
-# then require the worker to prove its base contains the code the task names
-# before implementing, and then require dependency installation before tooling or
-# tests so fresh worktrees have usable language servers and test environments.
-# Isolation and base are independent premises: an isolated worktree cut from a
-# base that lacks the feature under change still makes every later diff and test
-# meaningless, so both are asserted rather than assumed.
-# Generated ship rules require work-in-progress commits at natural boundaries so
-# an unexpected stop cannot destroy a large uncommitted tree.
+# Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
-# Ship and scout scaffolds state the ABSOLUTE firstmate path for any report or
-# evidence output, because a relative data/ path resolves inside the disposable
-# worktree and is destroyed with it at cleanup. The ship scaffold keeps worktree
-# isolation as its default and permits that one write only when the # Task
-# section explicitly asks for a report or evidence file, and only as
-# data/<id>/report.md or an evidence file that section names beside it - never
-# data/<id>/brief.md, which is the crewmate's own instructions and the channel
-# firstmate amends to hand it a decision, so a permitted evidence write must not
-# be able to destroy it. The scout scaffold's deliverable is always that report.
-# Every firstmate path a scaffold bakes in - the firstmate root whose skills and
-# helpers the crewmate is told to read and run, the report or evidence dir, and
-# the status file alike - is resolved to a real absolute path first, and a
-# relative root, data, or state dir that cannot be resolved is refused rather
-# than asserted absolute.
-# Every ship and scout scaffold carries a premise check: before building on the
-# task text, the crewmate re-verifies its central factual claims against current
-# code and reports rather than implements when one no longer holds. It belongs to
-# the scaffold contract, not to firstmate's memory, because the task text is
-# written from an observation made before dispatch and decays with the code.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -107,8 +64,11 @@
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
-# over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
-# self-governance section when a touched project AGENTS.md lacks it.
+# over copied detail) and defers self-governance recognition and insertion to
+# fm-ensure-agents-md.sh's contract.
+# Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
+# fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
+# second owner of a contract that must stay current across relaunches.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -130,52 +90,39 @@ esac
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
-# shellcheck source=bin/fm-base-lib.sh
-. "$SCRIPT_DIR/fm-base-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
-# Every firstmate path a scaffold bakes in - the firstmate root whose skills and
-# helpers the crewmate is told to read and run, the report or evidence dir, and
-# the status file alike - is resolved by the crewmate from inside its own
-# disposable worktree, so each has to be genuinely absolute rather than merely
-# called absolute: a relative path resolves inside that worktree, where a helper
-# is simply not there and a write is destroyed at cleanup. Resolve them here,
-# and refuse rather than bake in a path the crewmate cannot reach.
-# The variables that can actually clear a refusal differ per dir: FM_ROOT is
-# resolved before FM_HOME is derived from it, so naming FM_HOME there would send
-# an operator back to the identical refusal.
-resolve_home_dir() {  # <name> <label> <path> <settable-vars>
-  local name=$1 label=$2 path=$3 settable=$4 resolved
-  if [ -d "$path" ]; then
-    # An inherited CDPATH would otherwise resolve a relative dir against a
-    # directory the caller never named, so ignore it here.
-    resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd) || {
-      echo "error: $name directory cannot be resolved: $path - the firstmate $label dir could not be resolved to an absolute path" >&2
-      return 1
-    }
-    path=$resolved
-  fi
+resolve_directory_input() {
+  local name=$1 path=$2 resolved
   case "$path" in
-    /*) ;;
-    *)
-      echo "error: $name directory cannot be resolved: $path - the firstmate $label dir is relative and does not exist, so a brief cannot name a path the crewmate can reach from its own worktree; set $settable to an absolute path" >&2
-      return 1
-      ;;
+    /*) printf '%s\n' "$path"; return 0 ;;
   esac
-  printf '%s\n' "$path"
+  resolved=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || {
+    echo "error: $name directory cannot be resolved: $path" >&2
+    return 1
+  }
+  printf '%s\n' "$resolved"
 }
 
-FM_ROOT=$(resolve_home_dir FM_ROOT_OVERRIDE root "${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}" FM_ROOT_OVERRIDE) || exit 1
-FM_HOME=$(resolve_home_dir FM_HOME home "${FM_HOME:-$FM_ROOT}" FM_HOME) || exit 1
-DATA=$(resolve_home_dir FM_DATA_OVERRIDE data "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "FM_HOME or FM_DATA_OVERRIDE") || exit 1
-STATE=$(resolve_home_dir FM_STATE_OVERRIDE state "${FM_STATE_OVERRIDE:-$FM_HOME/state}" "FM_HOME or FM_STATE_OVERRIDE") || exit 1
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME=$(resolve_directory_input FM_HOME "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}") || exit 1
+if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
+  DATA=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
+else
+  DATA="$FM_HOME/data"
+fi
+if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+  STATE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || exit 1
+else
+  STATE="$FM_HOME/state"
+fi
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
-BASE=
-BASE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -185,7 +132,6 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
-      base) BASE=$a; BASE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -198,8 +144,6 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
-    --base) want_value=base ;;
-    --base=*) BASE=${a#--base=}; BASE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -234,33 +178,6 @@ if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   exit 1
 fi
 
-# A secondmate home is a persistent lease, not a task worktree cut from a base,
-# so a base contract has nothing to describe there.
-if [ "$KIND" = secondmate ] && [ "$BASE_SET" -eq 1 ]; then
-  echo "error: --base applies only to crewmate ship or scout briefs; a secondmate home is a persistent lease, not a worktree cut from a task base" >&2
-  exit 1
-fi
-
-# An empty --base would scaffold a brief asserting a base of "", which is worse
-# than the honest unrecorded declaration, so it stops here.
-[ "$BASE_SET" -eq 0 ] || [ -n "$BASE" ] || { echo "error: --base requires a non-empty value" >&2; exit 1; }
-
-# The PR target is derived from the base rather than taken as a second input, so
-# the two can never disagree: a branch cut from a base belongs in a PR against
-# that same base. Stripping a leading "origin/" turns the remote-tracking ref the
-# spawn resolves into the branch name a forge expects as a PR base.
-#
-# That derivation only yields a branch for a ref on origin, and "origin/<branch>"
-# is in any case the ONE shape a base may take. What is admissible, and why, is
-# owned by bin/fm-base-lib.sh and applied by bin/fm-spawn.sh from that same
-# helper, so a brief and its spawn cannot disagree about a base's SHAPE. See that
-# header for what is admissible and for the one admissibility rule the two do not
-# share.
-if [ "$BASE_SET" -eq 1 ]; then
-  fm_base_shape_check "$BASE" --base || exit 1
-fi
-BASE_BRANCH=${BASE#origin/}
-
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
   exit 1
@@ -269,6 +186,11 @@ fi
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
+
+ASK_USER_BLOCK=
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
+fi
 
 shell_quote() {
   printf "'"
@@ -334,13 +256,20 @@ You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
 
+# The captain and the parent channel
+Nobody reads this chat: the captain and the main firstmate see only what is appended to $STATUS_FILE, and a captain-facing sentence that is not appended there has not been sent.
+That file is your parent channel, and in this home it IS the captain: every sentence you would say to the captain, and every outcome the local AGENTS.md tells a firstmate to bring to the captain, is one appended line there, never chat.
+Your own machinery publishes the durable facts about your crew's work for you (\`bin/fm-parent-channel-lib.sh\`): a child's terminal done or failed line with its note and PR on every supervision poll, a PR-ready line when you register a PR, a task you hold for the captain and its answer, a merge, and a child's final line at cleanup all reach the parent channel from the scripts that record them, whether or not you append anything.
+What only you can append is judgement: the answer to a marked request below, a recommendation or caveat on a delivered outcome, a blocker or failure of your own, and anything else you would otherwise say to the captain.
+
 # Requests from the main firstmate
 You are a firstmate in your own home, so an incoming message reaches you in your own chat.
 You must distinguish who it is from, because the answer goes to a different place.
 A request relayed to you by the main firstmate is tagged with a leading \`$FM_FROMFIRST_LABEL\` marker followed by an invisible system separator; this marker is untypable, so a human never produces it.
 When a message carries that marker, do the work, then respond via the STATUS/ESCALATION path below, never only in this chat: the main firstmate does not read your chat, so a chat-only reply is lost.
 Marked requests also carry a privacy-safe \`corr=<id>\` token after the marker; include that exact token in your parent status reply (or in the status pointer to a detailed doc) so the parent can correlate the answer.
-Optional helper: \`bin/fm-secondmate-report.sh\` can append a correlated status line for you, but a plain \`echo\` that includes the same \`corr=<id>\` is equally valid - do not depend on the helper being present.
+Optional helper: \`bin/fm-secondmate-report.sh <verb> <corr_id> <note>\` appends that correlated line to the parent channel itself - do not pass a status path, and do not write a hand path under this home.
+A plain \`echo\` that includes the same \`corr=<id>\` on this parent channel is equally valid; do not depend on the helper being present.
 For a terse result, a status line is the whole answer.
 For a detailed answer (an investigation, a plan, an audit), write it to a doc under your home's \`data/\` and append a status line that points to that doc - the scout-report pattern - so the main firstmate is woken and can read it.
 Before treating an investigation or visual review as complete, load \`captain-hold-lifecycle\` from this home's \`.agents/skills/\` and pass its shared completion gate.
@@ -354,8 +283,9 @@ Handle routine work yourself.
 Report only true captain-relevant outcomes or a declared external wait by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
-Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
-Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
+Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own, naming when it clears with \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) when you know; use \`blocked:\` when you are stuck and need firstmate to act.
+Use this only for material phase changes, a captain decision, a real blocker, a failure, work ready for review, or work you landed.
+Work you landed includes a merge you performed yourself under standing merge authority and one the captain merged on the forge: under that authority nothing is ever \"ready for review\", so a landed merge that goes unreported reaches the captain as silence.
 This is also how you return the answer to a marked from-firstmate request above.
 A marked request requires one correlated answer after the work; it does not require a separate receipt or start acknowledgement.
 Never append \`working:\` merely to acknowledge receipt or announce that a marked request has started.
@@ -415,88 +345,31 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
-# Base statement shared by the ship and scout Setup sections. The scaffold cannot
-# inspect a worktree, so an omitted --base is declared rather than guessed: a
-# brief must never assert a base the spawn did not guarantee. The leading
-# "Base contract: base=<ref>" line is the machine-readable record bin/fm-spawn.sh
-# reads back and refuses to contradict.
-#
-# This section deliberately carries NO instruction for the worker to verify its
-# own base commit, and one must not be re-added. The brief is rendered before the
-# spawn resolves the base, so any check it could write compares against a MOVING
-# ref rather than the commit the worktree was cut to. Both settings of that dial
-# were tried and each is wrong in an opposite direction: a strict equality
-# comparison blocks a legitimately resumed worker as soon as the ref advances
-# (relaunch re-delivers this same brief and deliberately does not re-cut the
-# worktree), while a lenient ancestry comparison accepts any descendant, which is
-# precisely the wrong-base case this contract exists to prevent. Base
-# verification therefore belongs to bin/fm-spawn.sh, which resets the worktree to
-# the resolved base and refuses to launch unless HEAD matches it, and to the
-# ship assertion below that the base must CONTAIN THE CODE THE TASK NAMES, which
-# is semantic rather than ref-based and so does not depend on a moving ref.
-if [ "$BASE_SET" -eq 1 ]; then
-# shellcheck disable=SC2016  # single quotes are deliberate: the backticked ref below is literal brief markup for the reading agent and must not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
-BASE_SETUP=$(printf '%s\n' \
-'Base contract: base='"$BASE" \
-'You are in a disposable git worktree of '"$REPO"', at a detached HEAD cut from `'"$BASE"'`.')
-# The PR target is ship-only language: a scout never pushes or opens one.
-BASE_PR_TARGET='Your PR must target `'"$BASE_BRANCH"'`, which is NOT necessarily this repository'"'"'s default branch; confirm the target rather than accepting the forge'"'"'s default.'
-else
-IFS= read -r -d '' BASE_SETUP <<EOF || true
-Base contract: base=unrecorded
-You are in a disposable git worktree of $REPO at a detached HEAD, and **the base it was cut from was NOT recorded**, so this brief does not know it.
-Do not assume it is the default branch: a task worktree's base is resolved from the REMOTE's default branch, a per-repo property that is frequently not the branch your task's code lives on.
-Establish your actual base before you branch: \`git rev-parse HEAD\`, \`git log --oneline -1 HEAD\`, and \`git branch -r --contains HEAD\`.
-EOF
-BASE_SETUP=${BASE_SETUP%$'\n'}
-BASE_PR_TARGET='Derive the branch your PR must target from the base you just established, never from the forge'"'"'s default, and say which branch you chose when you report the PR.'
-fi
+IFS= read -r -d '' TASK_SECTION <<'EOF' || true
+# Task
+## Captain's intent
+{TASK}
 
-# Ship-only base premise assertion. Worktree isolation and base correctness are
-# independent premises, so proving one never proves the other.
-#
-# The instruction is the same either way; only the reason it is worth doing
-# varies. A recorded base must NOT be explained as the remote default, which
-# would contradict the Setup section's own Base contract line and invite a worker
-# standing on the recorded base to "correct" itself back toward the default.
-if [ "$BASE_SET" -eq 1 ]; then
-  BASE_ASSERT_WHY='Your base `'"$BASE"'` was chosen for this task, but choosing a base is not the same as verifying it: a base that lacks the very feature you were asked to change is a routine outcome, not a rare one.'
-else
-  BASE_ASSERT_WHY="This brief does not know your base, and an unrecorded base comes from the repository's remote default branch rather than from your task, so a base that lacks the very feature you were asked to change is a routine outcome, not a rare one."
-fi
-IFS= read -r -d '' BASE_ASSERT_BODY <<'EOF' || true
-Before implementing anything, prove the code the `# Task` section names is present in your base: search for the symbols, files, or behavior it names, for example `git grep <symbol> HEAD -- <path>` or `git log --oneline -1 HEAD -- <path>`.
-If the named code is absent, or present only in a form the task does not describe, STOP - do not implement - append `blocked: base does not contain {the named code}` to the status file and stop.
-A diff and a test written on a base that lacks the feature measure the wrong tree, however careful the change itself is.
+## Firstmate spec
+{FIRSTMATE_SPEC}
 EOF
-BASE_ASSERT="**Confirm your base contains the code this task names.** $BASE_ASSERT_WHY
-${BASE_ASSERT_BODY%$'\n'}"
-# Standing premise check, carried by every ship and scout scaffold. The task text
-# is written from an observation made before dispatch, and code moves between the
-# observation and the worker reading it, so the worker - not the scaffold, which
-# cannot inspect {TASK} - is the only party positioned to re-verify it.
-IFS= read -r -d '' PREMISE_SECTION <<'EOF' || true
-# Verify the premise before you build on it
-The `# Task` section above was written from an earlier reading of the code, and code moves.
-Before you implement or investigate, confirm its central factual claims against the code as it is now: that the behavior, symptom, gap, or file it names is still real and still unfixed.
-If a central premise no longer holds - the work already shipped, the code moved on, or the described problem cannot be reproduced - stop and report that instead of building on it: append `blocked: {the premise that no longer holds}`, or `needs-decision: {options}` when the dead premise leaves a real choice.
-Report it the same way when the premise holds only in part, and say which part failed; do not quietly re-scope the task around it.
-EOF
-PREMISE_SECTION=${PREMISE_SECTION%$'\n'}
+TASK_SECTION=${TASK_SECTION%$'\n'}
 
 if [ "$KIND" = scout ]; then
+if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
+  LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.'
+else
+  LAVISH_LINE='Lavish is unavailable (lavish-axi is missing or below its supported version floor), so deliver your findings as a text report without Lavish, even for a visual deliverable.'
+fi
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
-# Task
-{TASK}
-
-$PREMISE_SECTION
+$TASK_SECTION
 
 $HERDR_SECTION
 
 # Setup
-$BASE_SETUP
+You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
@@ -511,156 +384,88 @@ The report is the only thing that survives, so anything worth keeping must be in
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
+   Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
+   https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
+   copies that URL from your line rather than assembling one.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
    firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
-   treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   treating it as a possible wedge. When you know when the wait clears, say so in the line with
+   \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) and firstmate rechecks at that time instead.
+   Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
-   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+   every lane/home, so restarting it kills other lanes' in-flight pipeline runs; only firstmate
+   manages the daemon.
+   Before you append \`blocked:\` about the pipeline, run \`no-mistakes daemon status\` and
+   \`no-mistakes axi status\`. If the daemon socket refuses connections or is missing, append
+   \`blocked: {the daemon error}\` and stop even when the local run record still says running or
+   fixing, because that record can be stale after the daemon exits. A run record failed with a
+   daemon error is also a real block.
+   Only after ruling out socket refusal, if the run is still running or fixing, reattach and keep
+   going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
+   the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
+   timed-out call was only waiting for a read while the run kept working.
 
 $INBOX_SECTION
 
 # Definition of done
-Write your findings to the absolute path \`$DATA/$ID/report.md\`.
-Use that absolute path, never a relative \`data/...\` one: a relative path lands inside this worktree, and the worktree is destroyed at cleanup.
+Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
-If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.
+$LAVISH_LINE
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
-echo "scaffolded: $BRIEF (scout; replace {TASK})"
+echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
 exit 0
 fi
 
-# Ship task: shape Setup / Rule 1 / Definition of done by this task's explicit
-# delivery mode, validated above. The generated DOD opens with the fixed
-# "Delivery contract: mode=<mode>" line that bin/fm-spawn.sh checks against its own
-# explicit --mode before launching.
+# Ship task: shape Setup / Rule 1 by this task's explicit delivery mode, validated
+# above, and render the Definition of done from its single owner, bin/fm-dod-lib.sh,
+# which bin/fm-promote.sh renders too so a promoted scout receives the same contract.
+# The block opens with the fixed "Delivery contract: mode=<mode>" line that
+# bin/fm-spawn.sh checks against its own explicit --mode before launching.
 case "$MODE" in
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    IFS= read -r -d '' DOD <<EOF || true
-# Definition of done
-Delivery contract: mode=direct-PR
-This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
-EOF
     ;;
   local-only)
     SETUP2=""
-    # local-only never opens a PR, so the Setup section carries no PR target.
-    BASE_PR_TARGET=
-    # This section names the project's LOCAL default branch, and that is
-    # deliberate: it is NOT an instance of the remote-default defect --base
-    # exists to fix, so do not make it base-explicit or resolve it through
-    # origin/HEAD. bin/fm-merge-local.sh lands a local-only task by
-    # fast-forwarding the LOCAL default branch and refuses a branch that is not
-    # an ancestor of it, and that local branch routinely sits AHEAD of its remote
-    # because a previous local-only landing fast-forwarded it and never pushed.
-    # A worker sent to any remote-tracking ref would then rebase onto an older
-    # commit and be refused at the merge gate, so the literal local branch is the
-    # correct target here.
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    IFS= read -r -d '' DOD <<EOF || true
-# Definition of done
-Delivery contract: mode=local-only
-This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
-EOF
     ;;
   *)  # no-mistakes
-    # Stated limitation of this delivery mode, not backlog work: the worker does
-    # not open the PR here, the no-mistakes pipeline does, and that pipeline
-    # resolves its own base from the remote's default branch rather than from
-    # this task's base. The PR target stated above is therefore something the
-    # worker must ensure rather than something the pipeline honors, so the brief
-    # says so instead of asserting a target the mode does not guarantee. It is
-    # stated rather than refused because a non-default base is exactly what this
-    # contract exists to serve on the primary delivery mode. It attaches whether
-    # or not a base was recorded: --base is optional, so the unrecorded arm is
-    # what the default dispatch renders, and it states a PR target of its own for
-    # the worker to derive.
-    BASE_PR_TARGET="$BASE_PR_TARGET
-Known limitation of this delivery mode: you do not open the PR, the no-mistakes pipeline does, and it resolves its own base from the remote's default branch rather than from this task's base.
-If your base is not that default, the PR target above is yours to ensure rather than something the pipeline honors automatically - deliver such a task as direct-PR, or open the PR by hand."
     SETUP2="
-3. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
-    IFS= read -r -d '' DOD <<EOF || true
-# Definition of done
-Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
-
-You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
-Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
-
-Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
-  Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
-  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
-
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
-EOF
     ;;
 esac
-
-# read -r -d '' preserves the heredoc's trailing newline that the removed
-# $(...) command substitution used to strip. Drop that one newline so generated
-# briefs stay byte-identical to the historical Bash 5 output.
-DOD=${DOD%$'\n'}
-
-# The PR target is a ship-mode concern, so it joins the shared base statement
-# only for the modes that actually open one. Appending it here keeps an empty
-# value from leaving a stray blank line inside the Setup section.
-BASE_SETUP_SHIP=$BASE_SETUP
-[ -z "$BASE_PR_TARGET" ] || BASE_SETUP_SHIP="$BASE_SETUP
-$BASE_PR_TARGET"
+DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
-# Task
-{TASK}
-
-$PREMISE_SECTION
+$TASK_SECTION
 
 $HERDR_SECTION
 
 # Setup
-$BASE_SETUP_SHIP
+You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-$BASE_ASSERT
-
-1. First action: create your branch: \`git checkout -b fm/$ID\`
-2. Install this worktree's dependencies before any tooling or tests: it was freshly cut and has no .venv/node_modules, so language servers and test runs are degraded until you do. Detect the stack and run the project's setup - Python (pyproject.toml/requirements*.txt): create a .venv and install (prefer \`uv sync\`, else \`pip install -r requirements*.txt\` plus any requirements-dev.txt); Node/TypeScript (package.json): \`npm ci\` (or the project's package manager). Prefer any setup command the README/AGENTS.md documents. Skip only if there's no dependency manifest.$SETUP2
+1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
 # Rules
 $RULE1
-2. Stay inside this worktree; the status file below is the only file you write outside it.
-   The single exception: if the \`# Task\` section above explicitly asks you for a report or evidence file, write it at the absolute path \`$DATA/$ID/report.md\`, or at the absolute path of an evidence file that section names in that same directory - never \`$DATA/$ID/brief.md\`, which is these instructions and may be amended with a decision you must read - and nowhere else outside this worktree.
-   Never use a relative \`data/...\` path for it: a relative path lands inside this worktree, and the worktree is destroyed at cleanup.
+2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -669,6 +474,9 @@ $RULE1
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
+   Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
+   https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
+   copies that URL from your line rather than assembling one.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
@@ -676,14 +484,23 @@ $RULE1
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
    cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
-6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
+6. If a decision belongs above the implementation worker (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+$ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
-   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
-8. Commit work in progress at natural boundaries so an unexpected stop cannot destroy uncommitted work.
+   every lane/home, so restarting it kills other lanes' in-flight pipeline runs; only firstmate
+   manages the daemon.
+   Before you append \`blocked:\` about the pipeline, run \`no-mistakes daemon status\` and
+   \`no-mistakes axi status\`. If the daemon socket refuses connections or is missing, append
+   \`blocked: {the daemon error}\` and stop even when the local run record still says running or
+   fixing, because that record can be stale after the daemon exits. A run record failed with a
+   daemon error is also a real block.
+   Only after ruling out socket refusal, if the run is still running or fixing, reattach and keep
+   going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
+   the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
+   timed-out call was only waiting for a read while the run kept working.
 
 $INBOX_SECTION
 
@@ -691,9 +508,9 @@ $INBOX_SECTION
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
 Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
-If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
+If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 $DOD
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"

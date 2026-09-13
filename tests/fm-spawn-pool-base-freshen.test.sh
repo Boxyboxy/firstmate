@@ -4,35 +4,14 @@
 # A treehouse pool can return a clean detached worktree whose origin/main was
 # advanced after the worktree was allocated.
 # These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin/main tip or stops when origin is
-# unreachable.
+# starts the worker from the fetched origin tip, launches a clean origin-less
+# pool as-is, or stops when a configured origin is unusable.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
-SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-pool-base-freshen)
-
-make_spawn_fakebin() {
-  local dir=$1 fakebin
-  fakebin=$(fm_fakebin "$dir")
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:?FM_FAKE_PANE_PATH unset}"; exit 0 ;;
-esac
-case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows|has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
-  printf '%s\n' "$fakebin"
-}
 
 make_case() {
   local name=$1 id=$2 default=${3:-main} case_dir home project origin pool publisher fakebin initial
@@ -46,7 +25,7 @@ make_case() {
 
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
-  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  fm_test_spawn_brief "$home" "$id"
   touch "$home/state/.last-watcher-beat"
 
   git init --quiet -b "$default" "$project"
@@ -73,19 +52,115 @@ $1
 EOF
 }
 
-run_spawn_argv() {
-  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
-    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
-    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
-    PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$@" 2>&1
-}
-
 run_spawn() {
   local id=$1
   shift
-  run_spawn_argv "$id" "$PROJECT_DIR" "$@"
+  fm_test_run_spawn "$HOME_DIR" "$POOL_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJECT_DIR" "$@"
+}
+
+test_remote_seeded_home_spawns_from_treehouse_pool() {
+  local rec id out status lock
+  id='pool-remote-seeded-r13'
+  rec=$(make_case remote-seeded "$id")
+  read_case_record "$rec"
+  cat > "$HOME_DIR/.fm-secondmate-parent" <<'REC'
+schema=fm-secondmate-parent.v1
+route=remote
+parent_host=parent-machine
+REC
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" \
+    "a remote-seeded secondmate home should allocate and launch from its Treehouse pool"$'\n'"$out"
+  assert_contains "$out" "spawned $id" \
+    "the remote-seeded spawn did not report success"
+  assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
+    "the remote-seeded spawn did not publish its allocated pool worktree"
+  lock=$(FM_HOME="$HOME_DIR" bash -c '. "$1"; fm_treehouse_project_lock_path "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$PROJECT_DIR") \
+    || fail "the launched remote-seeded home could not resolve its Treehouse project lock"
+  case "$lock" in
+    "$HOME_DIR/state/"*) ;;
+    *) fail "the remote-seeded spawn anchored its lock outside its local root: $lock" ;;
+  esac
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# remote-seeded Treehouse spawn command\n'
+    printf '$ FM_HOME=%s bin/fm-spawn.sh %s %s --scout\n%s\nexit=%s\n' \
+      "$HOME_DIR" "$id" "$PROJECT_DIR" "$out" "$status"
+    printf 'published worktree=%s\nresolved project lock=%s\n' "$POOL_DIR" "$lock"
+  fi
+  pass "a remote-seeded secondmate home allocates and launches from its Treehouse pool"
+}
+
+test_linked_spawning_home_rejects_primary_before_refresh() {
+  local rec id out status returned primary spawning before_reflog
+  for returned in primary primary-alias spawning scout; do
+    id="pool-linked-${returned}-r12"
+    rec=$(make_case "linked-$returned" "$id")
+    read_case_record "$rec"
+    primary=$PROJECT_DIR
+    spawning="$CASE_DIR/secondmate"
+    git -C "$primary" worktree add --quiet --detach "$spawning" HEAD
+    PROJECT_DIR=$spawning
+    case "$returned" in
+      primary) POOL_DIR=$primary ;;
+      primary-alias)
+        ln -s "$primary" "$CASE_DIR/primary-alias"
+        POOL_DIR="$CASE_DIR/primary-alias"
+        ;;
+      spawning) POOL_DIR=$spawning ;;
+    esac
+    before_reflog=$(git -C "$primary" reflog)
+    # The assertion concerns identity, not how long an unchanged cwd is polled.
+    fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+    out=$(run_spawn "$id" --scout)
+    status=$?
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# evidence begin: linked-home spawn, returned=%s\n' "$returned"
+      printf '$ bin/fm-spawn.sh %s %s --scout\n%s\nexit=%s\n' "$id" "$PROJECT_DIR" "$out" "$status"
+      printf 'primary HEAD before=%s after=%s\n' "$INITIAL_SHA" "$(git -C "$primary" rev-parse HEAD)"
+      printf 'primary reflog before:\n%s\nprimary reflog after:\n%s\n' "$before_reflog" "$(git -C "$primary" reflog)"
+      if [ -e "$primary/.git/FETCH_HEAD" ]; then
+        printf 'FETCH_HEAD:\n'; cat "$primary/.git/FETCH_HEAD"
+      else
+        printf 'FETCH_HEAD absent\n'
+      fi
+      if [ -e "$HOME_DIR/state/$id.meta" ]; then
+        printf 'saved task metadata:\n'; cat "$HOME_DIR/state/$id.meta"
+        printf 'worker HEAD=%s origin/main=%s\n' "$(git -C "$POOL_DIR" rev-parse HEAD)" "$(git -C "$POOL_DIR" rev-parse origin/main)"
+      else
+        printf 'task metadata absent\n'
+      fi
+      printf '# evidence end\n'
+    fi
+    if [ "$returned" = scout ]; then
+      expect_code 0 "$status" "a genuine scout copy from a linked home should launch"$'\n'"$out"
+      assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
+        "spawn did not record the genuine scout copy"
+      [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
+        || fail "spawn did not refresh the genuine scout copy"
+    else
+      [ "$status" -ne 0 ] || fail "linked spawning home accepted $returned as a disposable copy"
+      # None of these is an isolated copy, so the worktree poll never adopts one
+      # and the wait runs out instead: the spawning directory fails the poll's
+      # own project comparison, and the repository primary (named directly or
+      # through a symlink) fails the isolation screen the poll shares with the
+      # guard. The refusal names the last path the pane reported.
+      assert_contains "$out" "did not enter an isolated worktree" \
+        "spawn did not explain its isolation refusal"
+      assert_contains "$out" "last seen" "refusal did not name the path the pane reported"
+      [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+      [ ! -e "$primary/.git/FETCH_HEAD" ] || fail "refused spawn fetched before proving isolation"
+    fi
+    [ "$(git -C "$primary" rev-parse HEAD)" = "$INITIAL_SHA" ] \
+      || fail "spawn reset the repository primary from a linked home"
+    [ "$(git -C "$primary" reflog)" = "$before_reflog" ] \
+      || fail "spawn touched the primary reflog from a linked home"
+    pass "linked spawning home: $returned preserves the primary before any refresh"
+  done
 }
 
 test_stale_pool_base_refreshes_before_branching() {
@@ -109,8 +184,7 @@ test_stale_pool_base_refreshes_before_branching() {
   fi
 
   id='pool-current-base-repeat-r1'
-  mkdir -p "$HOME_DIR/data/$id"
-  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "repeating the base refresh should be idempotent"
@@ -139,6 +213,154 @@ test_non_main_default_branch_refreshes_before_branching() {
   [ "$branch_head" = "$current" ] || fail "spawn did not refresh to current origin/$DEFAULT_BRANCH"
   [ "$branch_head" != "$INITIAL_SHA" ] || fail "fixture did not prove origin/$DEFAULT_BRANCH advanced past the pool base"
   pass "a stale pooled worktree resolves and refreshes a non-main default branch"
+}
+
+make_originless_case() {  # <name> <id>
+  local name=$1 id=$2 case_dir home project pool fakebin initial
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_test_spawn_brief "$home" "$id"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|main"
+}
+
+test_originless_pool_launches_without_a_freshness_fetch() {
+  local rec id out status before
+  id='pool-originless-r6'
+  rec=$(make_originless_case originless "$id")
+  read_case_record "$rec"
+  ! git -C "$POOL_DIR" remote get-url origin >/dev/null 2>&1 \
+    || fail "fixture unexpectedly configured an origin remote"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should launch a local-only pooled worktree with no origin"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "spawn did not report success for the origin-less pool"
+  assert_not_contains "$out" "could not fetch origin" \
+    "spawn attempted a freshness fetch against a nonexistent origin"
+  [ ! -e "$POOL_DIR/.git/FETCH_HEAD" ] || fail "spawn fetched against a pooled worktree with no origin"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD on an origin-less pooled worktree that had nothing to refresh against"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed origin-less launch: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+  fi
+  pass "an origin-less pooled worktree launches as-is, skipping the freshness gate"
+}
+
+test_originless_dirty_pool_refuses_without_discarding_work() {
+  local rec id out status before
+  id='pool-originless-dirty-r1'
+  rec=$(make_originless_case originless-dirty "$id")
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  printf 'keep this local work\n' > "$POOL_DIR/uncommitted.txt"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a dirty origin-less pooled worktree"
+  assert_contains "$out" "is not clean" \
+    "spawn did not clearly refuse a dirty origin-less pooled worktree"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD while refusing a dirty origin-less pooled worktree"
+  assert_grep 'keep this local work' "$POOL_DIR/uncommitted.txt" \
+    "spawn discarded local work from an origin-less pool"
+  pass "a dirty origin-less pooled worktree is refused without discarding its local work"
+}
+
+test_origin_config_without_url_refuses_pool() {
+  local rec id out status before
+  id='pool-origin-without-url-r1'
+  rec=$(make_originless_case origin-without-url "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an origin configuration with no URL"
+  assert_contains "$out" "could not fetch origin" \
+    "spawn did not refuse an origin configuration with no URL as unusable"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after finding an unusable origin configuration"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "an origin configuration without a URL refuses the pooled worktree"
+}
+
+test_empty_origin_config_section_refuses_pool() {
+  local rec id out status before config
+  id='pool-empty-origin-section-r1'
+  rec=$(make_originless_case empty-origin-section "$id")
+  read_case_record "$rec"
+  config=$(git -C "$POOL_DIR" rev-parse --path-format=absolute --git-path config)
+  printf '\n[remote "origin"]\n' >> "$config"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an empty origin configuration section"
+  assert_contains "$out" "could not fetch origin" \
+    "spawn did not refuse an empty origin configuration section as unusable"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after finding an empty origin configuration section"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "an empty origin configuration section refuses the pooled worktree"
+}
+
+test_empty_only_included_origin_config_section_launches_pool() {
+  local rec id out status before config included
+  id='pool-empty-only-included-origin-section-r1'
+  rec=$(make_originless_case empty-only-included-origin-section "$id")
+  read_case_record "$rec"
+  config=$(git -C "$POOL_DIR" rev-parse --path-format=absolute --git-path config)
+  included=$(dirname "$config")/empty-origin.inc
+  printf '[remote "origin"]\n' > "$included"
+  git -C "$POOL_DIR" config include.path "$(basename "$included")"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should proceed when an included empty origin section is not enumerable"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "spawn did not report success for the undetectable included section"
+  assert_not_contains "$out" "could not fetch origin" \
+    "spawn treated an undetectable included empty section as a configured origin"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD despite treating the included empty section as origin-less"
+  pass "an empty-only included origin section documents the accepted detection boundary"
+}
+
+test_inactive_conditional_origin_include_launches_pool() {
+  local rec id out status before config included
+  id='pool-inactive-origin-include-r1'
+  rec=$(make_originless_case inactive-origin-include "$id")
+  read_case_record "$rec"
+  config=$(git -C "$POOL_DIR" rev-parse --path-format=absolute --git-path config)
+  included=$(dirname "$config")/inactive-origin.inc
+  printf '[fm-test]\n\tmarker = true\n[remote "origin"]\n' > "$included"
+  git -C "$POOL_DIR" config 'includeIf.gitdir:/never/matches/this/worktree/.path' "$included"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should ignore an inactive conditional origin include"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "spawn did not report success with an inactive origin include"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD despite having no effective origin"
+  pass "an inactive conditional origin include leaves the pooled worktree origin-less"
 }
 
 test_unreachable_origin_refuses_stale_pool_base() {
@@ -231,347 +453,315 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
-# Publish a branch carrying content the remote default does not have, so a test
-# can prove which base a spawn actually landed on rather than only that it moved.
-publish_feature_branch() {  # <branch> <marker-file>
-  local branch=$1 marker=$2 publisher="$CASE_DIR/publisher"
-  git -C "$publisher" checkout --quiet -b "$branch"
-  printf 'execution_kind lives only on this branch\n' > "$publisher/$marker"
-  git -C "$publisher" add "$marker"
-  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm "$branch"
-  git -C "$publisher" push --quiet origin "$branch"
-  git -C "$publisher" rev-parse HEAD
+# A slot left on a stale submodule pin is the field failure this diagnosis exists
+# for: a refresh moved the superproject and left the submodule behind, so the
+# refusal fires a spawn later, on a slot whose own `git status` looks clean to the
+# operator. Nothing here is converged - the gate only has to say why. The fixture
+# only builds the repositories; the residue itself is produced by a real spawn, so
+# these tests cover the reset that actually strands the submodule.
+make_submodule_case() {  # <name> <id>
+  local name=$1 id=$2 case_dir home project origin pool publisher fakebin sub subpin1 subpin2 advanced
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  origin="$case_dir/origin.git"
+  pool="$case_dir/pool"
+  publisher="$case_dir/publisher"
+  sub="$case_dir/sub-origin"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_test_spawn_brief "$home" "$id"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b main "$sub"
+  printf 'pin one\n' > "$sub/lib.txt"
+  git -C "$sub" add lib.txt
+  git -C "$sub" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm sub-one
+  subpin1=$(git -C "$sub" rev-parse HEAD)
+  printf 'pin two\n' > "$sub/lib.txt"
+  git -C "$sub" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qam sub-two
+  subpin2=$(git -C "$sub" rev-parse HEAD)
+  git -C "$sub" checkout --quiet "$subpin1"
+
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c protocol.file.allow=always -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    submodule --quiet add "file://$sub" ui
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$project" remote add origin "file://$origin"
+  git -C "$project" worktree add --quiet --detach "$pool" HEAD
+  git -C "$pool" -c protocol.file.allow=always submodule --quiet update --init
+
+  # Advance origin and move the submodule pin, exactly as the field incident did.
+  git clone --quiet "file://$origin" "$publisher"
+  git -C "$publisher" -c protocol.file.allow=always submodule --quiet update --init
+  git -C "$publisher/ui" checkout --quiet "$subpin2"
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qam advance-pin
+  git -C "$publisher" push --quiet origin main
+  advanced=$(git -C "$publisher" rev-parse HEAD)
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$subpin1|$subpin2|$advanced"
 }
 
-# Every brief bin/fm-brief.sh scaffolds records its base, and bin/fm-spawn.sh
-# refuses an explicit --base against a brief that carries no such line, because
-# such a brief predates the contract and still asserts the worktree is on a clean
-# default branch. A fixture that means to reach the base machinery therefore has
-# to state its base the way a real scaffolded brief does.
-declare_brief_base() {  # <id> <base>
-  printf 'Base contract: base=%s\n' "$2" >> "$HOME_DIR/data/$1/brief.md"
+read_submodule_case() {
+  IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR SUBPIN1 SUBPIN2 ADVANCED_SHA <<EOF
+$1
+EOF
 }
 
-test_explicit_base_cuts_from_requested_branch() {
-  local rec id out status feature_sha meta
-  id='pool-explicit-base-r7'
-  rec=$(make_case explicit-base "$id")
-  read_case_record "$rec"
-  feature_sha=$(publish_feature_branch feat/campaigns campaigns.txt)
-  meta="$HOME_DIR/state/$id.meta"
-  declare_brief_base "$id" origin/feat/campaigns
-
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base origin/feat/campaigns)
+# The first of two consecutive spawns: it succeeds, resets the superproject onto
+# the base that moved the pin, and leaves the submodule checkout on the pin the
+# old base recorded. That reset is what strands the slot, so every case below
+# starts from residue this code path actually produced rather than a hand-built one.
+strand_submodule_pin_via_spawn() {  # <seed-id>
+  local id=$1 out status
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
-  expect_code 0 "$status" "spawn should accept an explicit base"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$feature_sha" ] \
-    || fail "an explicit base did not cut the worktree from the requested branch"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" != "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
-    || fail "fixture did not prove the requested base differs from the remote default"
-  [ -f "$POOL_DIR/campaigns.txt" ] \
-    || fail "the requested base is missing the feature content the task would name"
-  grep -qx 'base=origin/feat/campaigns' "$meta" \
-    || fail "metadata did not record the requested base"
-  grep -qx "base_commit=$feature_sha" "$meta" \
-    || fail "metadata did not record the resolved base commit"
-  grep -qx 'base_source=requested' "$meta" \
-    || fail "metadata did not record the base as requested rather than defaulted"
-  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
-    printf '# observed explicit base: %s\n' "$(grep '^base' "$meta" | tr '\n' ' ')"
-  fi
-  pass "an explicit base cuts the worktree from the requested branch and records it"
+  expect_code 0 "$status" "the spawn that moves the submodule pin should succeed"
+  assert_contains "$out" "spawned $id" "the spawn that moves the submodule pin did not report success"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$ADVANCED_SHA" ] \
+    || fail "the first spawn did not move the pooled base across the moved submodule pin"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN1" ] \
+    || fail "the first spawn did not strand the submodule on the pin the old base recorded"
 }
 
-test_defaulted_base_is_recorded_and_declared() {
-  local rec id out status meta
-  id='pool-default-base-r8'
-  rec=$(make_case default-base "$id")
-  read_case_record "$rec"
-  meta="$HOME_DIR/state/$id.meta"
+test_stale_submodule_pin_explains_itself() {
+  local rec id out status before before_sub
+  id='pool-stale-pin-r7'
+  rec=$(make_submodule_case stale-pin "$id")
+  read_submodule_case "$rec"
+  strand_submodule_pin_via_spawn 'pool-stale-pin-seed-r7'
+  git -C "$POOL_DIR" remote remove origin
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  before_sub=$(git -C "$POOL_DIR/ui" rev-parse HEAD)
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
-  expect_code 0 "$status" "spawn should still launch without an explicit base"
-  assert_contains "$out" 'no --base given' \
-    "spawn applied the remote-default base without declaring it"
-  grep -qx 'base=origin/main' "$meta" \
-    || fail "metadata did not record the defaulted base"
-  grep -qx 'base_source=remote-default' "$meta" \
-    || fail "metadata did not distinguish a defaulted base from a requested one"
-  grep -q '^base_commit=[0-9a-f]\{40\}$' "$meta" \
-    || fail "metadata did not record the defaulted base commit"
-  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
-    printf '# observed defaulted base: %s\n' "$(grep '^base' "$meta" | tr '\n' ' ')"
-  fi
-  pass "a defaulted base is announced and recorded as remote-default"
-}
-
-test_unknown_explicit_base_refuses() {
-  local rec id out status before
-  id='pool-unknown-base-r9'
-  rec=$(make_case unknown-base "$id")
-  read_case_record "$rec"
-  before=$(git -C "$POOL_DIR" rev-parse HEAD)
-  declare_brief_base "$id" origin/no-such-branch
-
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base origin/no-such-branch)
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn succeeded on a base that does not exist"
-  assert_contains "$out" 'could not fetch requested base' \
-    "spawn did not clearly refuse an unresolvable requested base"
+  [ "$status" -ne 0 ] || fail "the second spawn launched from a slot carrying a stale submodule pin"
+  assert_contains "$out" "stale submodule checkout" \
+    "refusal did not name the cause as a stale submodule checkout"
+  assert_contains "$out" "submodule 'ui'" "refusal did not name the submodule"
+  assert_contains "$out" "$SUBPIN1" "refusal did not report the pin the slot actually has"
+  assert_contains "$out" "$SUBPIN2" "refusal did not report the pin the base records"
+  # No remedy is printed on purpose: the containment check reads local refs only,
+  # so a stale remote-tracking ref can make an unpushed commit look contained, and
+  # a checkout command on that judgement could cost the operator a commit.
+  assert_not_contains "$out" "submodule update --checkout" \
+    "refusal printed a remedy command the containment check cannot stand behind"
+  assert_not_contains "$out" "refusing to discard uncommitted work" \
+    "a stale pin was misreported as uncommitted work"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "spawn moved HEAD after refusing an unresolvable requested base"
-  [ -f "$HOME_DIR/state/$id.meta" ] \
-    && fail "spawn recorded metadata for a task it refused to launch"
-  pass "an unresolvable requested base refuses before the worktree moves"
-}
-
-test_brief_base_contract_mismatch_refuses() {
-  local rec id out status before
-  id='pool-base-mismatch-r10'
-  rec=$(make_case base-mismatch "$id")
-  read_case_record "$rec"
-  publish_feature_branch feat/campaigns campaigns.txt >/dev/null
-  printf 'Delivery contract: mode=no-mistakes\nBase contract: base=origin/feat/campaigns\n' \
-    > "$HOME_DIR/data/$id/brief.md"
-  before=$(git -C "$POOL_DIR" rev-parse HEAD)
-
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base origin/main)
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn launched a worker whose brief names a different base"
-  assert_contains "$out" 'base mismatch' \
-    "spawn did not clearly refuse a brief/spawn base disagreement"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "spawn moved HEAD after refusing a base disagreement"
-  pass "a brief naming a different base refuses the spawn"
-}
-
-test_unrecorded_brief_base_refuses_explicit_base() {
-  local rec id out status
-  id='pool-base-unrecorded-r11'
-  rec=$(make_case base-unrecorded "$id")
-  read_case_record "$rec"
-  printf 'Delivery contract: mode=no-mistakes\nBase contract: base=unrecorded\n' \
-    > "$HOME_DIR/data/$id/brief.md"
-
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base origin/main)
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn accepted a base its brief declares unrecorded"
-  assert_contains "$out" 'declares its base unrecorded' \
-    "spawn did not name the unrecorded brief base as the disagreement"
-  pass "a brief declaring its base unrecorded refuses an explicit base"
-}
-
-test_base_refused_on_secondmate_spawn() {
-  local rec id out status
-  id='pool-base-secondmate-r12'
-  rec=$(make_case base-secondmate "$id")
-  read_case_record "$rec"
-
-  out=$(run_spawn "$id" --secondmate --base origin/main)
-  status=$?
-  [ "$status" -ne 0 ] || fail "a secondmate spawn accepted a task base"
-  assert_contains "$out" '--base applies only to crewmate ship or scout spawns' \
-    "a secondmate spawn did not refuse --base with its own reason"
-  pass "a secondmate spawn refuses a task base"
-}
-
-test_batch_dispatch_forwards_the_requested_base() {
-  local rec id out status feature_sha meta
-  id='pool-batch-base-r13'
-  rec=$(make_case batch-base "$id")
-  read_case_record "$rec"
-  feature_sha=$(publish_feature_branch feat/campaigns campaigns.txt)
-  meta="$HOME_DIR/state/$id.meta"
-  declare_brief_base "$id" origin/feat/campaigns
-
-  out=$(run_spawn_argv "$id=$PROJECT_DIR" --mode no-mistakes --yolo off --base origin/feat/campaigns)
-  status=$?
-  expect_code 0 "$status" "batch dispatch should spawn the pair"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$feature_sha" ] \
-    || fail "batch dispatch dropped the requested base and cut from somewhere else"
-  [ -f "$POOL_DIR/campaigns.txt" ] \
-    || fail "the batched pair is missing the feature content its requested base carries"
-  grep -qx 'base=origin/feat/campaigns' "$meta" \
-    || fail "batch dispatch did not record the requested base for its pair"
-  grep -qx 'base_source=requested' "$meta" \
-    || fail "batch dispatch recorded the base as defaulted rather than requested"
-  case "$out" in
-    *'no --base given'*) fail "batch dispatch announced a defaulted base despite an explicit --base" ;;
-  esac
+    || fail "spawn moved HEAD while refusing a stale submodule pin"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$before_sub" ] \
+    || fail "spawn converged the submodule; this gate must never touch the slot"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
-    printf '# observed batched base: %s\n' "$(grep '^base' "$meta" | tr '\n' ' ')"
+    printf '# observed stale-pin refusal: %s\n' "$(printf '%s\n' "$out" | grep 'submodule' | head -n 1)"
   fi
-  pass "batch dispatch forwards the requested base to every pair it spawns"
+  pass "an origin-less pool with a stale submodule pin refuses while naming both pins and no remedy"
 }
 
-# A base must be provable as current against origin, and only a branch on origin
-# can be, so every other shape is refused before the worktree is touched. The
-# revision expressions matter most: they resolve through whatever local ref they
-# name, which `git fetch origin` never refreshes, so accepting one would land a
-# task on a stale tree and record it as intended.
-test_base_shape_is_restricted_to_a_branch_on_origin() {
-  local rec id out status before ref stale
-  id='pool-base-form-r14'
-  rec=$(make_case base-form "$id")
-  read_case_record "$rec"
+test_unpushed_submodule_commit_is_still_uncommitted_work() {
+  local rec id out status unpushed before before_sub
+  id='pool-sub-unpushed-r10'
+  rec=$(make_submodule_case sub-unpushed "$id")
+  read_submodule_case "$rec"
+  strand_submodule_pin_via_spawn 'pool-sub-unpushed-seed-r10'
+  # A commit made inside the submodule and never pushed leaves the submodule work
+  # tree clean and the pins different - the same two facts a stale pin shows. Any
+  # checkout of the recorded pin would move HEAD off this commit and leave it
+  # unreferenced, so this case must keep the conservative refusal.
+  printf 'unlanded submodule work\n' > "$POOL_DIR/ui/unlanded.txt"
+  git -C "$POOL_DIR/ui" add unlanded.txt
+  git -C "$POOL_DIR/ui" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm unlanded-submodule-work
+  unpushed=$(git -C "$POOL_DIR/ui" rev-parse HEAD)
+  [ -z "$(git -C "$POOL_DIR/ui" status --porcelain)" ] \
+    || fail "fixture did not leave the submodule work tree clean"
+  [ "$unpushed" != "$(git -C "$POOL_DIR" rev-parse "HEAD:ui")" ] \
+    || fail "fixture did not leave the recorded pin different from what is checked out"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
-  git -C "$POOL_DIR" fetch --quiet origin
-  stale=$(git -C "$PROJECT_DIR" rev-parse main)
-  [ "$stale" != "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
-    || fail "fixture did not prove refs/heads/main lags origin/main"
-
-  for ref in main 'main~1' 'main^' 'HEAD^' 'HEAD~1' 'origin/main~1' refs/heads/main \
-    upstream/main v1.2.3 "$INITIAL_SHA" origin/HEAD origin/refs/heads/main origin/origin/main; do
-    out=$(run_spawn "$id" --mode no-mistakes --yolo off --base "$ref")
-    status=$?
-    [ "$status" -ne 0 ] || fail "a ship spawn accepted the base '$ref', which cannot be proven current"
-    assert_contains "$out" "$ref" "the refusal of base '$ref' did not name the value that was passed"
-    assert_contains "$out" "must name a branch on origin" \
-      "the refusal of base '$ref' did not say what a base must be"
-
-    out=$(run_spawn "$id" --scout --base "$ref")
-    status=$?
-    [ "$status" -ne 0 ] || fail "a scout spawn accepted the base '$ref', which cannot be proven current"
-    assert_contains "$out" "$ref" "the scout refusal of base '$ref' did not name the value that was passed"
-
-    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-      || fail "spawn moved HEAD after refusing the base '$ref'"
-    [ -f "$HOME_DIR/state/$id.meta" ] \
-      && fail "spawn recorded metadata for the task it refused with base '$ref'"
-  done
-  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
-    printf '# observed shape refusals with stale refs/heads/main=%s vs origin/main=%s\n' \
-      "$stale" "$(git -C "$POOL_DIR" rev-parse origin/main)"
-  fi
-  pass "only a branch on origin is accepted as a base; every other shape is refused before the worktree moves"
-}
-
-# A base whose leading "origin/" strips to something that is not a branch name
-# passes the character screen but cannot be a PR target: origin/HEAD is a
-# symbolic ref that follows whichever branch the remote calls default, which is
-# the unstated base this whole contract exists to eliminate. The refusal has to
-# come from the shape gate and has to name the concrete remedy, rather than
-# arriving later as an unrelated-sounding fetch failure.
-test_a_symbolic_base_is_refused_with_the_branch_to_name_instead() {
-  local rec id out status before ref
-  id='pool-base-symbolic-r18'
-  rec=$(make_case base-symbolic "$id")
-  read_case_record "$rec"
-  before=$(git -C "$POOL_DIR" rev-parse HEAD)
-
-  for ref in origin/HEAD origin/refs/heads/main origin/origin/main; do
-    out=$(run_spawn "$id" --mode no-mistakes --yolo off --base "$ref")
-    status=$?
-    [ "$status" -ne 0 ] || fail "a spawn accepted the base '$ref', which names no branch a PR could target"
-    assert_contains "$out" "must name a branch on origin" \
-      "the refusal of base '$ref' did not say what a base must be"
-    assert_contains "$out" "is not a branch name" \
-      "the refusal of base '$ref' did not say why the derived target is unusable"
-    assert_contains "$out" "origin/feat/omp-adaptor" \
-      "the refusal of base '$ref' did not point at naming the concrete branch"
-    case "$out" in
-      *'could not fetch requested base'*)
-        fail "base '$ref' was refused by the fetch rather than by the shape gate" ;;
-    esac
-    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-      || fail "spawn moved HEAD after refusing the base '$ref'"
-    [ -f "$HOME_DIR/state/$id.meta" ] \
-      && fail "spawn recorded metadata for the task it refused with base '$ref'"
-  done
-  pass "a base that derives no branch is refused at the shape gate, naming the branch to pass instead"
-}
-
-# A brief carrying no base contract line predates this contract, and such a brief
-# does not merely omit its base: it asserts the worktree sits at a detached HEAD
-# on a clean default branch. Launching it against an explicit --base would hand
-# the worker exactly that false premise, so it is refused rather than warned
-# about. The same brief with NO --base keeps launching as it always did.
-test_legacy_brief_without_a_base_contract_refuses_an_explicit_base() {
-  local rec id out status before meta
-  id='pool-base-legacy-r19'
-  rec=$(make_case base-legacy "$id")
-  read_case_record "$rec"
-  publish_feature_branch feat/campaigns campaigns.txt >/dev/null
-  meta="$HOME_DIR/state/$id.meta"
-  grep -q '^Base contract:' "$HOME_DIR/data/$id/brief.md" \
-    && fail "fixture brief already records a base, so it cannot stand for a pre-contract brief"
-  before=$(git -C "$POOL_DIR" rev-parse HEAD)
-
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base origin/feat/campaigns)
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn launched a worker whose brief still claims a clean default-branch base"
-  assert_contains "$out" 'records no base contract line' \
-    "spawn did not name the missing base contract as the reason it refused"
-  assert_contains "$out" 'fm-brief.sh' \
-    "spawn did not name re-scaffolding the brief as the remedy"
-  # bin/fm-brief.sh refuses to overwrite an existing brief, and this arm is only
-  # reached once the brief was read, so a bare "re-scaffold" would send the
-  # operator into a second refusal and silently lose the filled-in task text.
-  assert_contains "$out" 'aside' \
-    "the remedy did not say to move the existing brief aside, so re-scaffolding would refuse"
-  assert_contains "$out" '# Task' \
-    "the remedy did not say to restore the task text a fresh scaffold replaces"
-  assert_contains "$out" 'origin/feat/campaigns' \
-    "spawn did not name the base to re-scaffold the brief with"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "spawn moved HEAD after refusing a brief that records no base"
-  [ -f "$meta" ] && fail "spawn recorded metadata for the task it refused to launch"
+  before_sub=$unpushed
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
-  expect_code 0 "$status" "the same pre-contract brief with no --base should launch exactly as before"
-  grep -qx 'base_source=remote-default' "$meta" \
-    || fail "a pre-contract brief without --base stopped taking the remote-default base"
-  pass "a brief recording no base refuses an explicit base and still launches without one"
-}
-
-test_local_only_base_must_be_the_branch_the_merge_fast_forwards() {
-  local rec id out status before meta
-  id='pool-local-only-base-r17'
-  rec=$(make_case local-only-base "$id")
-  read_case_record "$rec"
-  publish_feature_branch feat/campaigns campaigns.txt >/dev/null
-  before=$(git -C "$POOL_DIR" rev-parse HEAD)
-  declare_brief_base "$id" origin/feat/campaigns
-
-  out=$(run_spawn "$id" --mode local-only --yolo off --base origin/feat/campaigns)
-  status=$?
-  [ "$status" -ne 0 ] || fail "a local-only task was cut from a base its guarded merge can never fast-forward"
-  assert_contains "$out" "cannot be combined with --mode local-only" \
-    "spawn did not explain why a local-only task cannot use a non-default base"
-  assert_contains "$out" "fm-merge-local.sh" \
-    "spawn did not name the landing path that makes the default branch authoritative"
+  [ "$status" -ne 0 ] || fail "spawn launched from a slot holding an unpushed submodule commit"
+  assert_contains "$out" "refusing to discard uncommitted work" \
+    "an unpushed submodule commit was not refused as uncommitted work"
+  assert_not_contains "$out" "stale submodule checkout" \
+    "an unpushed submodule commit was misreported as a stale pin"
+  assert_not_contains "$out" "is checked out at" \
+    "an unpushed submodule commit still drew the stale-pin diagnosis"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$before_sub" ] \
+    || fail "spawn moved the submodule off its unpushed commit"
+  git -C "$POOL_DIR/ui" cat-file -e "$unpushed^{commit}" \
+    || fail "the unpushed submodule commit did not survive the refusal"
+  assert_grep 'unlanded submodule work' "$POOL_DIR/ui/unlanded.txt" \
+    "spawn discarded the unpushed submodule work while refusing the pool"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "spawn moved HEAD after refusing a local-only base"
-
-  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
-  declare_brief_base "$id" "origin/$DEFAULT_BRANCH"
-  out=$(run_spawn "$id" --mode local-only --yolo off --base "origin/$DEFAULT_BRANCH")
-  status=$?
-  expect_code 0 "$status" "a local-only task based on the default branch should still launch"
-  meta="$HOME_DIR/state/$id.meta"
-  grep -qx "base=origin/$DEFAULT_BRANCH" "$meta" \
-    || fail "a local-only task did not record the default branch it was based on"
-  pass "a local-only base is constrained to the branch its guarded merge fast-forwards"
+    || fail "spawn moved HEAD while refusing a slot holding an unpushed submodule commit"
+  pass "an unpushed submodule commit keeps the uncommitted-work refusal and survives it"
 }
 
+test_work_inside_submodule_is_still_uncommitted_work() {
+  local rec id out status
+  id='pool-sub-work-r8'
+  rec=$(make_submodule_case sub-work "$id")
+  read_submodule_case "$rec"
+  strand_submodule_pin_via_spawn 'pool-sub-work-seed-r8'
+  # Put the submodule back on the pin the base records, so the ONLY deviation is
+  # real work inside it. This must never be softened into a stale-pin diagnosis.
+  git -C "$POOL_DIR/ui" checkout --quiet "$SUBPIN2"
+  printf 'work that must survive\n' > "$POOL_DIR/ui/keep-me.txt"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from a slot holding work inside a submodule"
+  assert_contains "$out" "refusing to discard uncommitted work" \
+    "work inside a submodule was not refused as uncommitted work"
+  assert_not_contains "$out" "stale submodule checkout" \
+    "real work inside a submodule was misreported as a stale pin"
+  assert_grep 'work that must survive' "$POOL_DIR/ui/keep-me.txt" \
+    "spawn discarded work inside the submodule while refusing the pool"
+  pass "work inside a submodule is still refused as uncommitted work, not called stale"
+}
+
+test_stale_pin_carrying_real_work_is_not_called_stale() {
+  local rec id out status
+  id='pool-sub-both-r9'
+  rec=$(make_submodule_case sub-both "$id")
+  read_submodule_case "$rec"
+  strand_submodule_pin_via_spawn 'pool-sub-both-seed-r9'
+  # Stale pin AND real work inside it: calling this merely stale would be wrong, so
+  # the refusal must stay the conservative one.
+  printf 'work that must survive\n' > "$POOL_DIR/ui/keep-me.txt"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from a slot with a stale pin and work inside it"
+  assert_contains "$out" "refusing to discard uncommitted work" \
+    "a stale pin carrying real work was not refused as uncommitted work"
+  assert_not_contains "$out" "stale submodule checkout" \
+    "a submodule holding real work was reported as merely stale"
+  assert_grep 'work that must survive' "$POOL_DIR/ui/keep-me.txt" \
+    "spawn discarded work inside the submodule while refusing the pool"
+  pass "a stale pin carrying real work is refused conservatively, never called stale"
+}
+
+test_stale_pin_beside_other_dirt_reports_one_verdict() {
+  local rec id out status
+  id='pool-sub-mixed-r11'
+  rec=$(make_submodule_case sub-mixed "$id")
+  read_submodule_case "$rec"
+  strand_submodule_pin_via_spawn 'pool-sub-mixed-seed-r11'
+  # Git sorts status paths, so the stale 'ui' entry is scanned before this file.
+  # The conservative verdict must not arrive contradicted by a stale-pin line.
+  printf 'notes the operator still wants\n' > "$POOL_DIR/zz-notes.txt"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from a slot with a stale pin beside an untracked file"
+  assert_contains "$out" "refusing to discard uncommitted work" \
+    "a stale pin beside an untracked file was not refused as uncommitted work"
+  assert_not_contains "$out" "stale submodule checkout" \
+    "a slot carrying more than a stale pin was reported as merely stale"
+  assert_not_contains "$out" "is checked out at" \
+    "the stale-pin diagnosis was printed alongside the conservative refusal"
+  assert_grep 'notes the operator still wants' "$POOL_DIR/zz-notes.txt" \
+    "spawn discarded the untracked file while refusing the pool"
+  pass "a stale pin beside other dirt yields the conservative refusal alone, with no stale-pin line"
+}
+
+# Re-lay a case's pooled worktree as a managed Treehouse slot: <pool>/<slot>/<repo>
+# with the pool's state file beside the slot, which is the shape fm-spawn claims
+# for its task. Rewrites POOL_DIR to the relocated checkout.
+lay_out_as_pool_slot() {
+  local slot_root="$CASE_DIR/slots"
+  mkdir -p "$slot_root/1"
+  git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$slot_root/1/project"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot_root/1/project" \
+    > "$slot_root/treehouse-state.json"
+  POOL_DIR="$slot_root/1/project"
+  SLOT_CLAIM="$slot_root/1/.fm-slot-owner"
+}
+
+# The spawn side of the slot-owner claim that bin/fm-teardown.sh later reads:
+# a launched task's claim names it, a slot that cannot be claimed refuses before
+# anything is published, and an abort while the allocation lock is still held
+# leaves no claim naming a task with no record.
+test_pool_slot_claim_follows_the_spawn_outcome() {
+  local rec id out status before
+
+  id='pool-slot-claim-r1'
+  rec=$(make_case slot-claim "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn from a Treehouse slot should launch"$'\n'"$out"
+  assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
+    "spawn did not publish the relocated slot as its worktree"
+  [ -f "$SLOT_CLAIM" ] || fail "spawn left its Treehouse slot unclaimed: $out"
+  grep -Fxq -- "task=$id" "$SLOT_CLAIM" \
+    || fail "the slot claim does not name the spawned task: $(cat "$SLOT_CLAIM")"
+  grep -Fxq -- "home=$HOME_DIR" "$SLOT_CLAIM" \
+    || fail "the slot claim does not name the spawning home: $(cat "$SLOT_CLAIM")"
+
+  id='pool-slot-unclaimable-r1'
+  rec=$(make_case slot-unclaimable "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  mkdir -p "$SLOT_CLAIM"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched a worker on a slot it could not claim"
+  assert_contains "$out" "could not claim Treehouse pool slot" \
+    "spawn did not name the unclaimable slot as the reason"
+  [ -d "$SLOT_CLAIM" ] || fail "spawn replaced the directory blocking its slot claim"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record for an unclaimable slot"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved the slot's HEAD after failing to claim it"
+
+  id='pool-slot-claim-aborted-r1'
+  rec=$(make_originless_case slot-claim-aborted "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  git -C "$POOL_DIR" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an unusable origin on the slot"
+  assert_contains "$out" "could not fetch origin" \
+    "the aborted spawn did not refuse on its unusable origin"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the aborted spawn published task metadata"
+  [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
+    || fail "the aborted spawn left a slot claim naming a task with no record: $(cat "$SLOT_CLAIM")"
+  pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
+}
+
+test_remote_seeded_home_spawns_from_treehouse_pool
+test_pool_slot_claim_follows_the_spawn_outcome
+test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
-test_explicit_base_cuts_from_requested_branch
-test_defaulted_base_is_recorded_and_declared
-test_unknown_explicit_base_refuses
-test_brief_base_contract_mismatch_refuses
-test_unrecorded_brief_base_refuses_explicit_base
-test_base_refused_on_secondmate_spawn
-test_batch_dispatch_forwards_the_requested_base
-test_base_shape_is_restricted_to_a_branch_on_origin
-test_a_symbolic_base_is_refused_with_the_branch_to_name_instead
-test_legacy_brief_without_a_base_contract_refuses_an_explicit_base
-test_local_only_base_must_be_the_branch_the_merge_fast_forwards
+test_originless_pool_launches_without_a_freshness_fetch
+test_originless_dirty_pool_refuses_without_discarding_work
+test_origin_config_without_url_refuses_pool
+test_empty_origin_config_section_refuses_pool
+test_empty_only_included_origin_config_section_launches_pool
+test_inactive_conditional_origin_include_launches_pool
+test_stale_submodule_pin_explains_itself
+test_unpushed_submodule_commit_is_still_uncommitted_work
+test_work_inside_submodule_is_still_uncommitted_work
+test_stale_pin_carrying_real_work_is_not_called_stale
+test_stale_pin_beside_other_dirt_reports_one_verdict
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

@@ -67,15 +67,6 @@
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
 #                strict rule's unidentifiable blank row.
-#   arc-pair   - omp: a status row `╭── π > … ▶───╮` with the input row
-#                `╰─ <typed text> ─╯` DIRECTLY below it, the typed text sitting
-#                ON the closing arc row. The complete-box machine cannot see it
-#                because a box needs content rows BETWEEN its corners and this
-#                pair has none. Adjacency bounds it (a transcript box spans its
-#                content rows, so only the live composer presents a back-to-back
-#                pair), and it is provable only with a live agent identity
-#                reporting an idle/done/blocked omp, because omp closes ordinary
-#                transcript boxes with the same `╰────╯` glyph.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -299,7 +290,7 @@ fm_composer_strip_ghost() {
 # Matching a footer to confirm a keystroke landed is a different question from
 # asking what a worker is doing, and the two must not be conflated.
 # Delivery-only rendered busy footers per harness. claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel".
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; omp: "Working…"; grok: "Ctrl+c:cancel"; agy: "esc to cancel".
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
 # signature separate from the shared default because that shape is not generic
@@ -320,13 +311,32 @@ fm_composer_strip_ghost() {
 # part of that union for the same reason the others are: without it a cursor
 # submit could never be acknowledged, because cursor parks its terminal cursor
 # outside its composer and the composer verdict is therefore always `unknown`.
-# omp's `⟦esc⟧` is in the union too: unlike the ambiguous claude/kimi spinners
-# that bracketed token is omp-unique, so it is safe to match harness-agnostically.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop|⟦esc⟧'
+# agy's `esc to cancel` is part of the union for the same reason: an explicit
+# tmux agy endpoint reaches the submit core with no recorded harness, and its
+# bare `>` composer verdict is `unknown`, so the busy footer is the only
+# turn-started acknowledgement that path can read.
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
+# omp (Oh My Pi) renders its TUI busy line as `Working…` with U+2026 HORIZONTAL
+# ELLIPSIS, not Pi's three ASCII dots (verified byte-level on omp 18.1.2,
+# re-verified live on 18.1.11 through the Herdr backend). Only the TUI form is
+# accepted: every supervised omp pane is the TUI, and the three-dot spelling its
+# headless -p mode writes to stderr never reaches a pane. The status row's
+# leading braille spinner plus elapsed cell (`⠧ 11s`) is the second, independent
+# busy signal, so no single vendor string is load-bearing; its idle form is a
+# static identity glyph with no elapsed time.
+# The spinner is an alternation of omp 18.1.11's unicode-preset frames (its
+# `status` set ⣾⣽⣻⢿⡿⣟⣯⣷ and `activity` set ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏, read from the
+# build that rendered the live `⠧`), declared once for the busy regex and the
+# status-row furniture rule below. It is deliberately NOT a bracket range over
+# the braille block: GNU grep rejects a range between multibyte endpoints
+# ("Invalid collation character"), so `[⠁-⣿]` compiled on macOS and failed
+# every omp busy and furniture read on Linux CI.
+FM_OMP_SPINNER_FRAMES_RE='(⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|⣾|⣽|⣻|⢿|⡿|⣟|⣯|⣷)'
+FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT='Working…|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]'
 FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 # cursor-agent's busy footer. The TOKEN is matched, not the spinner verb: the
 # same version rendered both `Working` and `Running` beside its braille spinner
@@ -336,12 +346,15 @@ FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 # injection. Cursor's recorded worker state comes from its transcript fold in
 # bin/fm-busy-lib.sh, never from this row.
 FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
+# agy (Antigravity CLI) renders a pinned status row while a turn runs: the
+# `esc to cancel` token on the left and the model cell on the right (verified
+# live, agy 1.2.0; the idle row shows `? for shortcuts` instead). The
+# `Generating...` spinner word beside it is a free-floating output line and is
+# deliberately not matched, so echoed worker output cannot fake an
+# acknowledgement. Delivery guard only; recorded worker state comes from the
+# agy-regex fold in bin/fm-busy-lib.sh.
+FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT='esc[[:space:]]+to[[:space:]]+cancel'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
-# omp's busy footer is its interrupt hint `⟦esc⟧`. omp's own `Working…` uses a
-# U+2026 ellipsis, so pi's `Working\.\.\.` never matches omp and this token is
-# the only reliable rendered signal (re-verified omp 16.4.8, re-confirmed live
-# 2026-07-27 on omp 17.1.5).
-FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT='⟦esc⟧'
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
@@ -354,10 +367,11 @@ fm_busy_lines_match() {  # [harness]
       codex) regex=$FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT ;;
       opencode) regex=$FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT ;;
       pi|pi-signed) regex=$FM_DELIVERY_PI_BUSY_REGEX_DEFAULT ;;
+      omp) regex=$FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
+      agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
       cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
-      omp) regex=$FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.
@@ -392,6 +406,25 @@ FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything\.\.\.|^Plan, s
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
 # text, and only the run's LAST row is ever matched against it.
 FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
+# omp (Oh My Pi) draws a one-row status line directly BELOW its borderless
+# composer: an identity or spinner cell, then middle-dot separated model, path,
+# git, and context cells. Verified live through Herdr on omp 18.1.11:
+# ` π  · ◔ GPT-6-Astra · 🌳 …-workspace · ⑂ detached · ◫ 15.4%/272K ⟲ · (sub)`
+# idle under the unicode preset, ` 󰵗  ·  qwen3:8b ·  … ·  36.7%/41K` under
+# nerd, and ` ⠧ 11s  · …` while busy. Without this rule the bare composer's
+# wrap region walks straight into that row and an idle omp pane reads
+# `pending`, the false verdict that skipped the doorbell on the first live omp
+# worker. A row is omp status furniture when it opens with omp's identity cell
+# then a middle dot (`π` under the unicode preset, `󰵗` under nerd: the
+# `icon.omp` of those omp 18.1.11 presets, never an arbitrary short token, so
+# a wrapped typed row such as `fix · tests` stays composer input; the ascii
+# preset's `pi` is deliberately absent because that preset's `sep.dot` is
+# ` - `, so its status row never carries a middle dot and a `pi ·` alternative
+# could only ever match typed text), when it opens with one of omp's spinner
+# frames then an elapsed cell, or when it carries the context-usage cell after
+# a middle dot. It is consulted only as the boundary BELOW a bare composer,
+# never on the composer row itself.
+FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
 
 # The bounded row window adapters should capture for a composer read. One
 # shared policy (previously three per-backend variables that had drifted to
@@ -626,10 +659,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_OPEN=-1
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
-  FM_COMPOSER_SCAN_OMP_PAIR_FOUND=0
-  FM_COMPOSER_SCAN_OMP_OPEN=-1
-  FM_COMPOSER_SCAN_OMP_CLOSE=-1
-  local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max omp_open=-1
+  local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
   while IFS= read -r line; do
@@ -680,28 +710,6 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         FM_COMPOSER_SCAN_LEFTBAR_END=$row
         ;;
       *) leftbar_start=-1 ;;
-    esac
-    # omp's composer is a bottom-anchored ROUNDED ARC PAIR (verified omp 17.2.2
-    # under herdr 0.7.5, protocol 17): a status row `╭── π > <model> > <cwd> >
-    # <branch> ▶───╮` with the input row `╰─ <typed text> ─╯` DIRECTLY below it.
-    # The typed text sits ON the closing arc row, so the complete-box machine
-    # above never sees it - that box needs content rows BETWEEN its corners, and
-    # this pair has none. Matching only the LEADING glyph is deliberate: pane
-    # width decides whether omp renders the trailing `─╯`. Adjacency is the
-    # bound that keeps the pair honest - a transcript box spans its content
-    # rows, so only the composer's own back-to-back pair qualifies - and
-    # scanning forward while keeping the last match makes the bottom-anchored
-    # composer outrank anything earlier in the capture.
-    case "$trimmed" in
-      '╭'*) omp_open=$row ;;
-      '╰'*)
-        if [ "$omp_open" -ge 0 ] && [ "$row" -eq "$((omp_open + 1))" ]; then
-          FM_COMPOSER_SCAN_OMP_PAIR_FOUND=1
-          FM_COMPOSER_SCAN_OMP_OPEN=$omp_open
-          FM_COMPOSER_SCAN_OMP_CLOSE=$row
-        fi
-        omp_open=-1
-        ;;
     esac
     # Bare agent-glyph rows: the glyph itself is the container proof. Bare
     # shell glyphs are deliberately not candidates (dead-shell rule). Keep
@@ -970,6 +978,13 @@ _fm_composer_classify_bare_row() {  # <screen> <styled> <row>
   printf '%s' "$state"
 }
 
+# _fm_composer_row_is_omp_status: 0 when the trimmed row is omp's status line
+# (FM_COMPOSER_OMP_STATUS_RE_DEFAULT above) - composer furniture that sits
+# below a bare composer and must bound its wrap region exactly as an edge does.
+_fm_composer_row_is_omp_status() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_OMP_STATUS_RE:-$FM_COMPOSER_OMP_STATUS_RE_DEFAULT}" sensitive
+}
+
 # _fm_composer_wrap_region_ok: 0 when every row STRICTLY BELOW <glyph-row>
 # through <cursor-row> is non-blank and carries no structural edge - the
 # contiguity proof that those rows are the bare composer's wrapped input
@@ -983,6 +998,7 @@ _fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row>
     fm_composer_normalize_trim_var trimmed
     [ -n "$trimmed" ] || return 1
     if fm_composer_row_has_edge "$trimmed"; then return 1; fi
+    if _fm_composer_row_is_omp_status "$trimmed"; then return 1; fi
     if fm_composer_leading_shell_glyph_var glyph "$trimmed"; then return 1; fi
     row=$((row + 1))
   done
@@ -1090,15 +1106,7 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_LEFTBAR_START
     FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_LEFTBAR_END
   fi
-  # An unclosed box below the candidate is a partially drawn container and
-  # refuses. omp's arc pair registers here too, because the complete-box machine
-  # reads the status row as a `╭…╮` top whose `╰…╯` arrives with no content rows
-  # between them. Excuse exactly the arc pair's own two rows and nothing else, so
-  # every other unclosed box still refuses.
-  if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ] \
-     && ! { [ "$FM_COMPOSER_SCAN_OMP_PAIR_FOUND" = 1 ] \
-            && { [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" = "$FM_COMPOSER_SCAN_OMP_OPEN" ] \
-                 || [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" = "$FM_COMPOSER_SCAN_OMP_CLOSE" ]; }; }; then
+  if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ]; then
     FM_COMPOSER_SELECTED_KIND=
     return 1
   fi
@@ -1115,17 +1123,6 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_KIND=
     return 1
   fi
-  # omp's arc pair, applied AFTER every pi rule above so it can only ADD a
-  # recognized shape and never weaken a pi refusal. The input row IS the closing
-  # arc row, so the selected span is that single row.
-  if [ "$FM_COMPOSER_SCAN_OMP_PAIR_FOUND" = 1 ] \
-     && [ "$FM_COMPOSER_SCAN_OMP_CLOSE" -gt "$generic" ] \
-     && [ "$generic" -lt "$FM_COMPOSER_SCAN_OMP_OPEN" ]; then
-    generic=$FM_COMPOSER_SCAN_OMP_CLOSE
-    FM_COMPOSER_SELECTED_KIND=omp
-    FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_OMP_CLOSE
-    FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_OMP_CLOSE
-  fi
   if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$generic" ]; then
     FM_COMPOSER_SELECTED_KIND=
     return 1
@@ -1138,6 +1135,7 @@ _fm_composer_select_cursorless() {
       fm_composer_normalize_trim_var trimmed
       [ -n "$trimmed" ] || break
       fm_composer_row_has_edge "$trimmed" && break
+      _fm_composer_row_is_omp_status "$trimmed" && break
       FM_COMPOSER_SELECTED_LAST=$next
       next=$((next + 1))
     done
@@ -1327,9 +1325,6 @@ EOF
     pi)
       _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
       ;;
-    omp)
-      _fm_composer_omp_verdict "$screen" "$styled" "$has_identity" "$identity"
-      ;;
     box)
       _fm_composer_classify_rows "$screen" "$styled" "$FM_COMPOSER_SELECTED_AMBIG" \
         "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
@@ -1475,54 +1470,6 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   fi
   case "$agent_status" in
     idle|done) printf 'empty' ;;
-    *) printf 'unknown' ;;
-  esac
-}
-
-# The omp rounded-arc verdict: the same identity + structure conjunction the pi
-# shape uses, because structure alone is not enough. omp closes ordinary
-# transcript boxes with the same `╰────╯` glyph, so an adjacent-pair match on a
-# leftover output box would otherwise read as a ready composer - the dead-shell
-# hazard this owner exists to prevent. Before this shape existed, an idle omp
-# holding unsubmitted captain text let an unrelated row higher up the capture
-# win and classified `empty`, which is the away-mode injector's go-signal.
-_fm_composer_omp_verdict() {  # <screen> <styled> <has_identity> <identity>
-  local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status raw content
-  if [ "$has_identity" != 1 ]; then
-    printf 'unknown'
-    return 0
-  fi
-  if [ -z "$identity" ]; then
-    printf 'need-identity'
-    return 0
-  fi
-  if [ "$identity" = probe-absent ]; then
-    printf 'unknown'
-    return 0
-  fi
-  agent=${identity%%$'\t'*}
-  agent_status=${identity#*$'\t'}
-  if [ "$agent" != omp ]; then
-    printf 'unknown'
-    return 0
-  fi
-  raw=$(_fm_composer_screen_row "$FM_COMPOSER_SCAN_OMP_CLOSE" "$screen")
-  content=$(_fm_composer_row_content "$raw" "$styled")
-  # omp de-emphasises its own arcs, so the ghost stripper normally drops them
-  # with the rest of the border styling, but a light theme can leave them
-  # behind. Strip the row's own leading `╰─…` and trailing `…─╯` explicitly so
-  # an EMPTY composer cannot read as pending.
-  content=${content#╰}
-  while [ "${content#─}" != "$content" ]; do content=${content#─}; done
-  content=${content%╯}
-  while [ "${content%─}" != "$content" ]; do content=${content%─}; done
-  fm_composer_normalize_trim_var content
-  if [ -n "$content" ]; then
-    printf 'pending'
-    return 0
-  fi
-  case "$agent_status" in
-    idle|done|blocked) printf 'empty' ;;
     *) printf 'unknown' ;;
   esac
 }

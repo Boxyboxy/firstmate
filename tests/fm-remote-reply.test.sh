@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end remote reply relay through fm-on and the process-event runner.
-#
-# fm-on captures the caller's stdin as bounded job input, so bind this script's
-# stdin to an already-at-EOF source; see tests/fm-on.test.sh's header for the
-# mechanism. Per-command redirects still take precedence over this default.
 set -u
-exec </dev/null
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -460,8 +455,7 @@ pass "a quiet reply window publishes the caught-up watermark the reply guard rea
 # quiet, observed through the same seen-signature gate the watcher consumes.
 FM_STATE_OVERRIDE="$PARENT/state" bash -c '
   . "$1/bin/fm-wake-lib.sh"
-  sig=$(fm_wake_signal_sig "$2/state/ios.status") || exit 1
-  printf "%s" "$sig" > "$(fm_wake_signal_seen_path "$2/state" "$2/state/ios.status")"
+  fm_wake_status_mark_current "$2/state" "$2/state/ios.status"
 ' _ "$ROOT" "$PARENT" || fail "could not prime the seen marker for the replay leg"
 cp "$PARENT/state/ios.status" "$TMP_ROOT/ios-status-before-replay"
 mv "$PARENT/state/.wake-queue" "$TMP_ROOT/wake-queue-before-replay" 2>/dev/null || true

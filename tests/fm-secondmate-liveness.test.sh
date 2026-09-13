@@ -97,10 +97,7 @@ SH
 test_tmux_agent_state_classifies() {
   local fb out
 
-  # Foreground process names bin/backends/tmux.sh must classify as a live agent.
-  # This is the process-name list, not the verified-harness list: it carries
-  # pi's launcher/capitalized process spellings alongside each harness name.
-  for harness in claude codex opencode grok kimi pi pi-signed pi-launcher Pi omp; do
+  for harness in claude codex opencode grok kimi pi pi-signed pi-launcher Pi; do
     fb=$(make_probe_tmux "$TMP_ROOT/tmux-$harness" "$harness")
     out=$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux sess:win' "$ROOT")
     [ "$out" = alive ] || fail "a live $harness foreground process should classify as alive, got '$out'"
@@ -236,7 +233,7 @@ SH
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.31.2 (fake)'
+  printf '%s\n' 'no-mistakes version v1.46.0 (fake)'
   exit 0
 fi
 exit 0

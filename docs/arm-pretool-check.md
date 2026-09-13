@@ -162,7 +162,7 @@ Prose may improve without changing adapter behavior.
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |
 | Pi / pi-signed | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
-| omp | `event.input.command` | `.omp/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
+| omp | `event.input.command` | `.omp/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true, reason}` only for exit 2; omp surfaces the reason verbatim to the model (verified 18.1.2). |
 | Cursor | `.tool_input.command` | `.cursor/hooks.json` matches `tool_name` `Shell` and forwards stdin with `--cursor`. Cursor reads the RETURNED object rather than the exit status, so `--cursor` prints `{"permission":"deny","user_message":"[code] reason"}` on stdout and exits 0; only that rendering is verified to block the command and surface the reason. |
 
 Cursor also loads `<project>/.claude/settings.json`, so the tracked Claude entry receives the same event. Without `--cursor` a Cursor-delivered payload is that duplicate and allows without re-classifying, decided from the payload's own `cursor_version` by `bin/fm-hook-host-lib.sh`; [`turnend-guard.md`](turnend-guard.md#harness-integrations) owns why that predicate reads the payload rather than the environment.
@@ -230,13 +230,6 @@ Native supervision paths were also validated in the same scratch project:
 - Pi loaded both primary extensions, called `fm_watch_arm_pi`, and created the scratch automatic-arm marker.
 
 Every native-path automatic marker was present and every deny sentinel remained absent.
-
-## omp live validation record, 2026-07-13
-
-Validation ran on omp 16.4.8 with the tracked `.omp/extensions/fm-primary-turnend-guard.ts` auto-discovered from this isolated task worktree.
-The prompt requested one bash tool call running `pkill -f '/definitely-nonexistent/bin/fm-watch.sh'`, a harmless nonexistent target that still exercises the broad-watcher-kill policy.
-omp returned `BLOCKED` and reported `[broad-watcher-kill]` from the pre-execution guard before the command ran.
-This confirms that omp's `tool_call` callback honors `{ block: true, reason }`; the shared acceptance matrices separately pin exact arm-check and cd-check transport and decisions.
 
 ## Automated validation
 

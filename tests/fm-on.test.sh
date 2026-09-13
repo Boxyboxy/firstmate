@@ -1,16 +1,6 @@
 #!/usr/bin/env bash
 # Behavior tests for the generic SSH transport and fixed remote entrypoint.
-#
-# fm-on captures the caller's stdin as bounded job input (bin/fm-remote-job-lib.sh
-# stages it with a bounded `head -c`), so every fm_on call below inherits this
-# script's stdin. Bind it to an already-at-EOF source: inheriting the runner's
-# stdin made the transport's capture block forever whenever that stdin was a
-# terminal or a pipe nobody closes, which is how this file wedged a whole suite
-# run on 2026-08-22 while passing in CI, where stdin is already closed. The one
-# case that asserts stdin passthrough still redirects per command, which takes
-# precedence over this default.
 set -u
-exec </dev/null
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -21,7 +11,20 @@ TMP_ROOT=$(fm_test_tmproot fm-on)
 # and physicalize macOS's /var -> /private/var alias before transport validation.
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
-trap 'if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+cleanup() {
+  local pid
+  if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
+    pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
+    # Stop the detached Linux supervisor's whole process group and wait for its
+    # cleanup before removing the fixture tree.
+    # shellcheck source=bin/fm-remote-job-lib.sh
+    . "$ROOT/bin/fm-remote-job-lib.sh"
+    FM_REMOTE_JOB_STATE="$TMP_ROOT/remote-jobs"
+    fm_remote_job_stop_worker_tree "$pid" 2>/dev/null || true
+  fi
+  rm -rf -- "$TMP_ROOT"
+}
+trap cleanup EXIT
 LOCAL_HOME="$TMP_ROOT/local-home"
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
@@ -64,12 +67,8 @@ case "\${1:-}:\${2:-}" in
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
 esac
 SH
-# The doctor resolves the backend adapter on the remote root, so the fixture
-# needs everything that adapter sources. Without them the probe fails only on a
-# host that actually has the backend CLI installed.
 cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
-  "$ROOT/bin/fm-backend.sh" "$ROOT/bin/fm-composer-lib.sh" \
-  "$ROOT/bin/fm-transition-lib.sh" "$REMOTE_ROOT/bin/"
+  "$ROOT/bin/fm-remote-herdr-owner-lib.sh" "$ROOT/bin/fm-backend.sh" "$REMOTE_ROOT/bin/"
 mkdir -p "$REMOTE_ROOT/bin/backends"
 cp "$ROOT/bin/backends/herdr.sh" "$REMOTE_ROOT/bin/backends/herdr.sh"
 cat > "$REMOTE_ROOT/bin/fm-mutate.sh" <<'SH'
@@ -133,7 +132,8 @@ fm_on() {
 
 # The pre-feature user path had no executable transport at all. The regression
 # exercises the adopted public surface end to end through a deterministic SSH
-# process boundary rather than checking script source.
+# process boundary rather than checking script source. A payload caller passes
+# --stdin explicitly; without it the remote command's stdin is /dev/null.
 ARGV_ACTUAL="$REMOTE_HOME/argv.bin"
 ARGV_EXPECTED="$TMP_ROOT/argv-expected.bin"
 # shellcheck disable=SC2016 # Literal shell-looking argv is the injection probe.
@@ -141,7 +141,7 @@ printf '%s\0' 'plain' 'two words' '$(touch /tmp/fm-on-injected)' '' $'line one\n
 printf 'payload one\npayload two\n' > "$TMP_ROOT/stdin"
 set +e
 # shellcheck disable=SC2016 # Literal shell-looking argv is the injection probe.
-fm_on ios fm-probe-one.sh "$ARGV_ACTUAL" 23 \
+fm_on --stdin ios fm-probe-one.sh "$ARGV_ACTUAL" 23 \
   'plain' 'two words' '$(touch /tmp/fm-on-injected)' '' $'line one\nline two' \
   < "$TMP_ROOT/stdin" > "$TMP_ROOT/stdout" 2> "$TMP_ROOT/stderr"
 rc=$?
@@ -153,7 +153,21 @@ assert_grep 'stdin: payload one' "$TMP_ROOT/stdout" "remote stdin was not preser
 assert_grep 'stdin: payload two' "$TMP_ROOT/stdout" "remote stdin lost its second line"
 assert_grep 'stderr: separate' "$TMP_ROOT/stderr" "remote stderr was not preserved separately"
 assert_absent /tmp/fm-on-injected "shell-looking argv was interpreted"
-pass "fm-on preserves argv, stdin, stdout, stderr, and exit status without shell interpretation"
+pass "fm-on --stdin preserves argv, stdin, stdout, stderr, and exit status without shell interpretation"
+
+# Without --stdin the remote command must see EOF even when the caller's own
+# stdin holds bytes: staging captures stdin to EOF, so an open caller stream
+# must never reach it by default.
+set +e
+fm_on ios fm-probe-one.sh "$REMOTE_HOME/argv-default.bin" 0 'default-closed' \
+  < "$TMP_ROOT/stdin" > "$TMP_ROOT/stdout-default" 2> "$TMP_ROOT/stderr-default"
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail "the default-closed invocation did not preserve exit status (got $rc)"
+if grep -q 'stdin:' "$TMP_ROOT/stdout-default"; then
+  fail "caller stdin crossed the transport without --stdin: $(cat "$TMP_ROOT/stdout-default")"
+fi
+pass "fm-on defaults the remote command's stdin to /dev/null"
 
 # A vanished remote peer must become a bounded ssh failure instead of an
 # indefinite hang on a half-open TCP connection, so the existing no-result ->

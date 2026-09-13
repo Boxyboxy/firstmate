@@ -271,21 +271,84 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
   # footer, whose real content turns an idle pane into a false `pending`.
   # Captured live from a herdr cursor pane.
   local screen plain out
-  plain=$'transcript\n \u2584\u2584\u2584\u2584\u2584\u2584\u2584\u2584\n  \u2192 Add a follow-up\n \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\n  Cursor Grok 4.5 High \u00b7 6.7%   Run Everything\n  ~/wt \u00b7 64cdd3a'
+  plain=$'transcript\n ▄▄▄▄▄▄▄▄\n  → Add a follow-up\n ▀▀▀▀▀▀▀▀\n  Cursor Grok 4.5 High · 6.7%   Run Everything\n  ~/wt · 64cdd3a'
   # The closing rule must bound the region, so the footer below is not input.
-  fm_composer_row_has_edge " $(printf '\u2580\u2580\u2580')" \
+  fm_composer_row_has_edge ' ▀▀▀' \
     || fail "a half-block rule row must count as a structural edge"
-  fm_composer_row_has_edge " $(printf '\u2584\u2584\u2584')" \
+  fm_composer_row_has_edge ' ▄▄▄' \
     || fail "the upper half-block rule must count as a structural edge"
   # Non-vacuousness: the footer rows really are non-blank content that would be
   # swallowed if the rule did not bound the region.
   case "$plain" in *"Run Everything"*) : ;; *) fail "fixture lost its footer content" ;; esac
   ESC_LOCAL=$(printf '\033')
-  screen=$'transcript\n \u2584\u2584\u2584\u2584\u2584\u2584\u2584\u2584\n'"  ${ESC_LOCAL}[2m\u2192 ${ESC_LOCAL}[0;7mA${ESC_LOCAL}[0;2mdd a follow-up${ESC_LOCAL}[0m"$'\n \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\n  Cursor Grok 4.5 High \u00b7 6.7%   Run Everything\n  ~/wt \u00b7 64cdd3a'
-  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$(printf '%b' "$screen")")
+  screen=$'transcript\n ▄▄▄▄▄▄▄▄\n'"  ${ESC_LOCAL}[2m→ ${ESC_LOCAL}[0;7mA${ESC_LOCAL}[0;2mdd a follow-up${ESC_LOCAL}[0m"$'\n ▀▀▀▀▀▀▀▀\n  Cursor Grok 4.5 High · 6.7%   Run Everything\n  ~/wt · 64cdd3a'
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen")
   [ "$out" = empty ] \
     || fail "an idle cursor composer inside herdr half-block rules must read empty, got '$out'"
   pass "matrix: herdr half-block rules bound a bare composer's wrap region"
+}
+
+test_matrix_omp_status_row_bounds_bare_composer() {
+  # omp (Oh My Pi) draws its status line directly BELOW the borderless `❯`
+  # composer. Captured live through Herdr on omp 18.1.11 under the captain's
+  # unicode preset (idle), plus the nerd-preset idle row and the busy spinner
+  # row from the 18.1.2 investigation. Without the status-row rule the bare
+  # wrap region swallows that row and an idle omp pane reads `pending`, which
+  # skipped the doorbell on the first live omp worker.
+  local idle_unicode idle_nerd busy typed wrapped
+  idle_unicode=$'transcript line
+
+❯
+ π  · ◔ GPT-6-Astra · 🌳 …-workspace · ⑂ detached · ◫ 15.4%/272K ⟲ · (sub)'
+  idle_nerd=$'transcript line
+
+❯
+ 󰵗  ·  qwen3:8b ·  kun-agent-workspace/… ·  detached ?1 ·  36.7%/41K'
+  busy=$'transcript line
+
+  ⎋ Working…
+
+❯
+ ⠧ 11s  · ◔ GPT-6-Astra · ◫ 15.4%/272K'
+  typed=$'transcript line
+
+❯ fix the flaky test
+ π  · ◔ GPT-6-Astra · 🌳 …-workspace · ⑂ detached · ◫ 15.4%/272K ⟲ · (sub)'
+  # Non-vacuousness: each status row is real non-blank content that the wrap
+  # region would otherwise take as typed input.
+  _fm_composer_row_is_omp_status ' π  · ◔ GPT-6-Astra · 🌳 …-workspace' \
+    || fail "the unicode-preset omp status row must be recognized as furniture"
+  _fm_composer_row_is_omp_status ' 󰵗  ·  qwen3:8b ·  kun-agent-workspace/… ·  detached ?1 ·  36.7%/41K' \
+    || fail "the nerd-preset omp status row must be recognized as furniture"
+  _fm_composer_row_is_omp_status ' ⠧ 11s  · ◔ GPT-6-Astra' \
+    || fail "the busy omp spinner row must be recognized as furniture"
+  _fm_composer_row_is_omp_status 'fix the flaky test' \
+    && fail "ordinary typed text must not be mistaken for omp status furniture"
+  _fm_composer_row_is_omp_status 'please rerun the suite and report' \
+    && fail "ordinary prose must not be mistaken for omp status furniture"
+  # Only omp's identity cell opens the row: a wrapped typed row that happens
+  # to begin with a short word and a spaced middle dot is composer input.
+  _fm_composer_row_is_omp_status 'fix · tests before pushing' \
+    && fail "wrapped typed text with a middle dot must not be mistaken for omp status furniture"
+  # The ascii preset's identity cell is `pi`, but that preset separates its
+  # cells with ` - `, so a row opening `pi ·` is never omp furniture.
+  _fm_composer_row_is_omp_status 'pi · e · phi as the three constants' \
+    && fail "typed text opening 'pi ·' must not be mistaken for omp status furniture"
+  _fm_composer_row_is_omp_status ' ⣾ 3s  · ◔ GPT-6-Astra' \
+    || fail "the status-set omp spinner row must be recognized as furniture"
+  assert_screen "idle omp (unicode preset)" empty "$CAPS_STYLED" "$idle_unicode"
+  assert_screen "idle omp (nerd preset)" empty "$CAPS_STYLED" "$idle_nerd"
+  assert_screen "busy omp keeps an empty composer" empty "$CAPS_STYLED" "$busy"
+  assert_screen "typed omp text is pending" pending "$CAPS_STYLED" "$typed"
+  assert_screen "idle omp on a plain capture" empty "$CAPS_PLAIN" "$idle_unicode"
+  # The boundary must not cut a bare composer's own wrapped input: with the
+  # cursor on a continuation row that opens `fix · tests`, the composer is a
+  # proven wrap region and reads pending, exactly as it did before the rule.
+  wrapped=$'transcript line\n\n❯ please run the suite and then\nfix · tests before pushing'
+  assert_screen "wrapped typed text with a middle dot stays pending" pending "$CAPS_TMUX" "$wrapped" 3
+  wrapped=$'transcript line\n\n❯ document the constants in the order\npi · e · phi with one example each'
+  assert_screen "wrapped typed text opening 'pi ·' stays pending" pending "$CAPS_TMUX" "$wrapped" 3
+  pass "matrix: omp's status row bounds the bare composer's wrap region"
 }
 
 test_matrix_pi_separated_needs_identity() {
@@ -325,44 +388,6 @@ test_matrix_pi_separated_needs_identity() {
   assert_screen "lone glyph on plain backend" empty "$CAPS_PLAIN" "$typed"
   assert_screen "lone glyph with non-pi identity" empty "$CAPS_STYLED" "$typed" '' "$none"
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
-}
-
-test_matrix_omp_arc_pair_needs_identity() {
-  # Real omp: a `╭── π > … ▶───╮` status row with the input row `╰─ … ─╯`
-  # DIRECTLY below it, the typed text sitting ON the closing arc row. The
-  # complete-box machine cannot see it - a box needs content rows BETWEEN its
-  # corners and this pair has none - so before this shape existed an unrelated
-  # row higher up the capture won and an idle omp holding unsubmitted captain
-  # text classified `empty`, which is the away-mode injector's go-signal.
-  local status empty_pair typed_pair narrow_pair stale omp_idle omp_working none
-  status='╭── π > opus > ~/repo > main ▶───╮'
-  omp_idle=$(printf 'omp\tidle'); omp_working=$(printf 'omp\tworking'); none=$(printf 'zsh\t')
-  empty_pair="$status"$'\n''╰─  ─╯'
-  typed_pair="$status"$'\n''╰─ merge fork/main please ─╯'
-  # Pane width decides whether omp renders the closing `─╯`, so the shape is
-  # matched on the leading glyph alone and a narrow pane must still read.
-  narrow_pair="$status"$'\n''╰─ merge fork/main please'
-  assert_screen "omp idle with identity" empty "$CAPS_STYLED" "$empty_pair" '' "$omp_idle"
-  assert_screen "omp typed with identity" pending "$CAPS_STYLED" "$typed_pair" '' "$omp_idle"
-  assert_screen "omp typed in a narrow pane" pending "$CAPS_STYLED" "$narrow_pair" '' "$omp_idle"
-  # Identity is the whole safety conjunction: omp closes ordinary transcript
-  # boxes with the same `╰────╯` glyph, so structure alone must never authorize
-  # an injection.
-  [ "$(fm_composer_classify_screen "$CAPS_STYLED" "$empty_pair")" = need-identity ] \
-    || fail "an identity-capable profile should request the lazy identity probe for omp's arc pair"
-  assert_screen "omp pair without identity capability" unknown "$CAPS_PLAIN" "$empty_pair"
-  assert_screen "working omp defers" unknown "$CAPS_STYLED" "$empty_pair" '' "$omp_working"
-  assert_screen "absent identity cannot prove omp's arc pair" unknown "$CAPS_STYLED" "$empty_pair" '' probe-absent
-  assert_screen "non-omp identity cannot prove the arc pair" unknown "$CAPS_STYLED" "$empty_pair" '' "$none"
-  # Adjacency is the bound that separates the composer from a transcript box: a
-  # box spans its content rows, so it can never present a back-to-back pair.
-  stale=$'╭─ tool output ─╮\n│ ran the suite │\n╰───────────────╯'
-  [ "$(fm_composer_classify_screen "$CAPS_STYLED" "$stale" '' "$omp_idle")" != empty ] \
-    || fail "a closed transcript box must not be read as omp's empty composer"
-  # A live pair BELOW a stale bordered banner is what the shape exists to win.
-  assert_screen "omp pair below a stale banner" pending "$CAPS_STYLED" \
-    "$stale"$'\n'"$typed_pair" '' "$omp_idle"
-  pass "matrix: omp's arc-pair composer needs identity + adjacency; a transcript box never proves it"
 }
 
 test_matrix_opencode_leftbar_signals() {
@@ -655,8 +680,8 @@ test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
+test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_pi_separated_needs_identity
-test_matrix_omp_arc_pair_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box

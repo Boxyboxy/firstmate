@@ -3,8 +3,8 @@
 # foreground process when one is not already alive.
 #
 # Usage: fm-afk-start.sh
-#   Sets state/.afk unless FM_AFK_STATE_PREPARED=1, checks
-#   state/.supervise-daemon.lock, and:
+#   Sets state/.afk (mode preserved on refresh, see fm_afk_flag_write) unless
+#   FM_AFK_STATE_PREPARED=1, checks state/.supervise-daemon.lock, and:
 #     - prints "afk: daemon already running pid=<pid>" then exits 0 when that
 #       lock is held by a live daemon (a REFRESH: no stale-artifact clear);
 #     - otherwise clears any prior away session's stale escalation artifacts
@@ -19,11 +19,9 @@
 #
 # This is the COMMON daemon entry for every backend. HOW it becomes a tracked
 # background process differs by harness/backend and is owned elsewhere:
-#   - Harnesses with a native in-pane tracked-background tool (e.g. claude, grok,
-#     omp) run this directly via that tool, so the daemon inherits the captain
-#     pane's env and auto-discovers it. On omp, that async background job needs
-#     the bash tool's `timeout` set to 0, since the daemon parks indefinitely and
-#     omp's default command deadline would otherwise kill it.
+#   - Harnesses with a native in-pane tracked-background tool (e.g. claude, grok)
+#     run this directly via that tool, so the daemon inherits the captain pane's
+#     env and auto-discovers it.
 #   - Harnesses with NO native background mechanism (e.g. pi) run this THROUGH
 #     bin/fm-afk-launch.sh, which creates a non-visible tracked terminal per
 #     backend (herdr tab/workspace, tmux detached session) and passes the
@@ -65,8 +63,7 @@ fm_afk_clear_stale_artifacts() {  # <state-dir>
   local state=$1
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
-        "$state/.subsuper-inject-wedged" \
-        "$state/.subsuper-durable-published" 2>/dev/null
+        "$state/.subsuper-inject-wedged" 2>/dev/null
 }
 
 daemon_lock_owner() {
@@ -113,12 +110,24 @@ daemon_lock_held_by_live_daemon() {
   daemon_pid_matches "$pid" "$owner"
 }
 
-fm_afk_flag_write() {  # <state-dir>
-  local state=$1 lock="$1/.cursor-park-owner.lock" pending attempt=0 status=1
+fm_afk_flag_write() {  # <state-dir> [mode]
+  local state=$1 requested_mode=${2:-} lock="$1/.cursor-park-owner.lock" \
+    pending attempt=0 status=1 mode
   mkdir -p "$state" || return 1
   [ ! -d "$state/.afk" ] || return 1
+  # An explicit mode is a caller's deliberate request (a fresh /afk or /quiet
+  # entry). Omitted means "just refresh" (an already-running daemon, or
+  # recovery re-entering generically) and PRESERVES whatever mode is already
+  # on disk via fm_afk_mode - which itself falls back to "away" when nothing
+  # is on disk yet, so a genuinely fresh unspecified entry still defaults
+  # away. This is what keeps a refresh from silently flipping a captain's
+  # quiet mode back to away underneath them (kunchenguid/firstmate#2356).
+  case "$requested_mode" in
+    away|quiet) mode=$requested_mode ;;
+    *) mode=$(fm_afk_mode "$state") ;;
+  esac
   pending=$(mktemp "$state/.afk.pending.XXXXXX") || return 1
-  date '+%s' > "$pending" || { rm -f "$pending"; return 1; }
+  { printf '%s\n' "$mode"; date '+%s'; } > "$pending" || { rm -f "$pending"; return 1; }
   while [ "$attempt" -lt 50 ]; do
     attempt=$((attempt + 1))
     if fm_lock_try_acquire "$lock"; then

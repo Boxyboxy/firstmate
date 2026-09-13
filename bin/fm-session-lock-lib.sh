@@ -16,9 +16,9 @@
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
 
-# Known harness command names; extend when a new adapter is verified. Short
-# names are anchored so they cannot collide with a substring of an unrelated
-# command name.
+# Known harness command names; extend when a new adapter is verified. omp is
+# anchored exactly like pi: its process name is the bare word `omp` (verified,
+# omp 18.1.11), and a substring match would claim ompd or comp.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 
 # The same harnesses as exact executable names. Keep in sync with
@@ -61,7 +61,7 @@ fm_harness_path_name() {  # <path>
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name script
+  local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
@@ -73,16 +73,11 @@ fm_harness_process_matches() {  # <comm> <args>
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
-  # Bare interpreter (e.g. node): identify an anchored short harness name from
-  # the script path first, then retain the loose whole-args fallback for
-  # interpreter-launched harnesses whose script file has another name.
+  # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
     *node*|*python*)
-      script=${args#* }
-      script=${script%% *}
-      if name=$(fm_harness_path_name "$script") \
-         || printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
-        case "${name:-}:$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+      if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
+        case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
         return 0
       fi
       ;;
@@ -127,7 +122,12 @@ fm_harness_ancestry_pids() {
       break
     fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
+    # Examine the top of the chain before stopping. Inside a PID namespace the
+    # harness itself is pid 1, so stopping as soon as the next pid is 1 hides the
+    # very process this walk exists to find. A host's real pid 1 (init, systemd,
+    # launchd) is not harness-shaped, so fm_harness_process_matches rejects it.
+    case "$pid" in '' | *[!0-9]*) break ;; esac
+    [ "$pid" -ge 1 ] || break
   done
   [ "$printed" -eq 1 ]
 }
