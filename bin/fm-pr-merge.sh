@@ -87,6 +87,17 @@
 # retains the lock until the accepted merge authority is persisted against the
 # still-matching task metadata.
 #
+# A merge is also refused while this home's backlog still orders other work
+# ahead of the task, which is how a change that needs a matching landing
+# elsewhere is recorded: two rows, one per repo, joined by a blocked-by edge
+# (`tasks-axi block <id> --by <other>`). tasks-axi resolves those edges, so an
+# already landed and closed blocker no longer holds the merge; every blocker it
+# still reports is named in the refusal together with the exact command that
+# records its landing and the exact command that drops an ordering that no
+# longer applies. A home with no backlog, or a backlog with no row for this
+# task, records no ordering and merges as before, while a row that exists and
+# cannot be read refuses rather than merging on an unread order.
+#
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha or --match-head-commit because the head comes only from the
@@ -113,9 +124,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
@@ -889,6 +903,88 @@ require_released_captain_hold() {
   esac
 }
 
+# The work this home's backlog still orders ahead of the task, read from the
+# task's own row. Returns 0 with FM_PR_ORDER_BLOCKERS set to the comma-separated
+# blockers (empty when none remain), 3 when this home carries no row for the
+# task, and 1 with FM_PR_ORDER_ERROR set when the answer cannot be read at all.
+#
+# A cross-repo ordering is two rows in one backlog joined by a blocked-by edge,
+# because `tasks-axi block --by` refuses a blocker it cannot find; each row
+# carries its own repo. tasks-axi resolves the edges, so a blocker that has
+# already landed and closed is gone from the row it prints and only unlanded
+# work is left to report.
+FM_PR_ORDER_BLOCKERS=
+FM_PR_ORDER_ERROR=
+read_landing_order() {
+  local data root backend file
+  FM_PR_ORDER_BLOCKERS=
+  FM_PR_ORDER_ERROR=
+  data=$(fm_backlog_data_absolute "$DATA") || {
+    FM_PR_ORDER_ERROR="data directory cannot be resolved: $DATA"
+    return 1
+  }
+  root=$(fm_backlog_root "$data") || {
+    FM_PR_ORDER_ERROR=$FM_BACKLOG_TRANSITION_ERROR
+    return 1
+  }
+  backend=$(fm_tasks_axi_backend_resolve "$root" 2>&1) || {
+    FM_PR_ORDER_ERROR=$backend
+    return 1
+  }
+  if [ "$backend" = markdown ]; then
+    file=$(fm_backlog_file "$data") || {
+      FM_PR_ORDER_ERROR=$FM_BACKLOG_TRANSITION_ERROR
+      return 1
+    }
+    # No backlog file at all: this home records no work items, so it records no
+    # landing order either. A file that EXISTS but cannot be read leaves by the
+    # error paths below, as bin/fm-captain-hold.sh's open draws the same line.
+    if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+      return 3
+    fi
+  fi
+  fm_tasks_axi_compatible || {
+    FM_PR_ORDER_ERROR="a compatible tasks-axi is required to read the task's landing order"
+    return 1
+  }
+  if ! fm_backlog_row_probe "$data" "$ID"; then
+    [ "$FM_BACKLOG_ROW_RESULT" != not_found ] || return 3
+    FM_PR_ORDER_ERROR=$FM_BACKLOG_ROW_ERROR
+    return 1
+  fi
+  FM_PR_ORDER_BLOCKERS=$FM_BACKLOG_ROW_BLOCKED_BY
+  return 0
+}
+
+# Refuse while the backlog still orders other work ahead of this task, which is
+# what a change that needs a matching landing elsewhere looks like here. This is
+# a refusal rather than a warning because the ordering only protects anything if
+# nothing can merge through it: the library whose migration a deployed consumer
+# has to tolerate first must not land on the hope that its counterpart follows.
+require_landed_order() {
+  local order_status=0 blocker blockers
+  read_landing_order || order_status=$?
+  case "$order_status" in
+    0) ;;
+    3) return 0 ;;
+    *)
+      echo "error: could not read whether other work must land before task $ID; refusing to merge${FM_PR_ORDER_ERROR:+: $FM_PR_ORDER_ERROR}" >&2
+      return 1
+      ;;
+  esac
+  [ -n "$FM_PR_ORDER_BLOCKERS" ] || return 0
+  blockers=${FM_PR_ORDER_BLOCKERS//,/ }
+  echo "error: PR merge refused - work this task is ordered after has not landed; nothing was merged" >&2
+  for blocker in $blockers; do
+    echo "error:   $blocker must land before $ID (run bin/fm-tasks-axi.sh show $blocker for what it covers)" >&2
+  done
+  for blocker in $blockers; do
+    echo "error: land $blocker and record it with: bin/fm-tasks-axi.sh done $blocker --pr <url>" >&2
+    echo "error: or, if that ordering no longer applies, drop it with: bin/fm-tasks-axi.sh unblock $ID --by $blocker" >&2
+  done
+  return 1
+}
+
 FM_PR_MERGE_AUTHORITY=
 # The gate on top of the shared authority read. bin/fm-merge-authority-lib.sh
 # owns what the away-posture record and the task's recorded yolo posture say;
@@ -1135,6 +1231,7 @@ require_current_away_authority || away_status=$?
 require_recorded_pr_identity || exit 1
 record_pr_metadata || exit 1
 require_released_captain_hold || exit 1
+require_landed_order || exit 1
 
 # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
 # oversight: if this lock-owning shell dies while its gh or glab child lives,

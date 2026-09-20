@@ -2228,6 +2228,73 @@ test_absent_backlog_still_merges() {
   pass "fm-pr-merge proceeds when the home carries no backlog at all"
 }
 
+# Seed one row in a case's own backlog, addressed through the .tasks.toml
+# make_case copied into that home.
+tasks_in_case() {  # <case-dir> <tasks-axi args...>
+  local case_dir=$1
+  shift
+  (cd "$case_dir/home" && tasks-axi "$@") >/dev/null \
+    || fail "could not seed the case backlog: tasks-axi $*"
+}
+
+# A change that needs a matching landing elsewhere is two backlog rows, one per
+# repo, joined by a blocked-by edge. The library row must not merge while the
+# consumer row that has to tolerate it is still open, and the refusal has to
+# name that row and the commands that clear it.
+test_unlanded_paired_landing_refuses_the_merge() {
+  local case_dir rc
+  case_dir=$(make_case unlanded-paired-landing-refuses)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8181818181818181818181818181818181818181
+  : > "$case_dir/gh-axi.log"
+  tasks_in_case "$case_dir" add sched-tolerant "tolerate the new error code" \
+    --kind ship --repo krew-scheduler --start
+  tasks_in_case "$case_dir" add task-x1 "apply the migrations" \
+    --kind ship --repo krewlib --start --blocked-by sched-tolerant
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/81 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unlanded-paired-landing-refuses: an unlanded paired landing must refuse the merge"
+  assert_grep 'sched-tolerant must land before task-x1' "$case_dir/stderr" \
+    "unlanded-paired-landing-refuses: the refusal did not name the landing that is missing"
+  assert_grep 'bin/fm-tasks-axi.sh done sched-tolerant --pr <url>' "$case_dir/stderr" \
+    "unlanded-paired-landing-refuses: the refusal did not name how to record that landing"
+  assert_grep 'bin/fm-tasks-axi.sh unblock task-x1 --by sched-tolerant' "$case_dir/stderr" \
+    "unlanded-paired-landing-refuses: the refusal did not name how to drop the ordering"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "unlanded-paired-landing-refuses: the forge merged work whose paired landing is still open"
+  pass "fm-pr-merge refuses a merge whose paired landing elsewhere has not landed"
+}
+
+test_landed_paired_landing_permits_the_merge() {
+  local case_dir rc
+  case_dir=$(make_case landed-paired-landing-merges)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8282828282828282828282828282828282828282
+  : > "$case_dir/gh-axi.log"
+  tasks_in_case "$case_dir" add sched-tolerant "tolerate the new error code" \
+    --kind ship --repo krew-scheduler --start
+  tasks_in_case "$case_dir" add task-x1 "apply the migrations" \
+    --kind ship --repo krewlib --start --blocked-by sched-tolerant
+  tasks_in_case "$case_dir" 'done' sched-tolerant --pr https://github.com/example/scheduler/pull/12
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/82 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "landed-paired-landing-merges: a confirmed paired landing must release the merge"
+  assert_no_grep 'must land before' "$case_dir/stderr" \
+    "landed-paired-landing-merges: a landed blocker was still reported as missing"
+  assert_logged_gh_merge "$case_dir" 82 example/repo --squash
+  pass "fm-pr-merge proceeds once the paired landing is recorded as landed"
+}
+
 test_unreadable_backlog_refuses_the_merge() {
   local case_dir rc
   case_dir=$(make_case unreadable-backlog-refuses)
@@ -3189,6 +3256,8 @@ test_distinct_merged_prs_keep_distinct_wakes
 test_uncommitted_marker_retry_is_never_silent
 test_secondmate_without_parent_binding_is_loud
 test_absent_backlog_still_merges
+test_unlanded_paired_landing_refuses_the_merge
+test_landed_paired_landing_permits_the_merge
 test_unreadable_backlog_refuses_the_merge
 test_unreadable_backend_config_refuses_the_merge
 test_unreadable_user_backend_config_refuses_the_merge
