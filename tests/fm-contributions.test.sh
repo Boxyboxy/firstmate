@@ -788,8 +788,36 @@ test_late_owner_keeps_failure_episode_suppressed() {
   pass 'a late owner does not restart a shared forge failure episode'
 }
 
+test_contribution_input_survives_oversized_backlog() {
+  local home limit bytes records pad i
+  home=$(new_home oversized-backlog)
+  pad=$(printf '%*s' 300 '' | tr ' ' x)
+  limit=$(getconf ARG_MAX 2>/dev/null || printf '1048576\n')
+  {
+    printf '# Backlog\n\n## Queued\n\n'
+    i=0
+    while [ "$i" -lt 6000 ]; do
+      printf -- '- [ ] task-%s - padded contribution row %s\n' "$i" "$pad"
+      i=$((i + 1))
+    done
+  } > "$home/data/backlog.md"
+  bytes=$(wc -c < "$home/data/backlog.md")
+  [ "$bytes" -gt "$limit" ] \
+    || fail "backlog fixture of $bytes bytes did not exceed the $limit argument limit"
+  with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input \
+    > "$home/contribution-input.json" 2> "$home/contribution-input.err" \
+    || fail "contribution input failed on an oversized backlog: $(cat "$home/contribution-input.err")"
+  [ ! -s "$home/contribution-input.err" ] \
+    || fail "contribution input reported an error on an oversized backlog: $(cat "$home/contribution-input.err")"
+  records=$(jq '.backlog.records | length' "$home/contribution-input.json") \
+    || fail 'contribution input did not emit valid JSON on an oversized backlog'
+  [ "$records" -eq 6000 ] \
+    || fail "contribution input lost backlog rows on an oversized backlog: $records"
+  pass 'contribution input survives a backlog larger than the argument limit'
+}
+
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_failure_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_failure_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_contribution_input_survives_oversized_backlog; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
