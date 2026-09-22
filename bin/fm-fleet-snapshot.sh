@@ -1988,8 +1988,8 @@ contribution_tasks_json() {
 if [ "$OUTPUT_MODE" = contribution-input ]; then
   # Reuse the canonical backlog parser, without observing workers or other homes.
   # Both payloads are unbounded (the backlog grows without limit), so they travel
-  # through the shared temporary transport directory instead of jq's argv, which
-  # ARG_MAX would otherwise truncate into a silent empty poll.
+  # through the shared temporary transport directory instead of jq's argv, where
+  # exceeding ARG_MAX makes exec fail with "Argument list too long".
   JSON_TRANSPORT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.XXXXXX") \
     || { echo "fm-fleet-snapshot: temporary transport directory creation failed" >&2; exit 1; }
   contribution_tasks=$(contribution_tasks_json) || { echo "fm-fleet-snapshot: contribution task read failed" >&2; exit 1; }
