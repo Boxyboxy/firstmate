@@ -833,17 +833,19 @@ test_contribution_input_survives_oversized_backlog() {
   home=$(new_home oversized-backlog)
   pad=$(printf '%*s' 300 '' | tr ' ' x)
   limit=$(getconf ARG_MAX 2>/dev/null || printf '1048576\n')
-  {
-    printf '# Backlog\n\n## Queued\n\n'
-    i=0
-    while [ "$i" -lt 6000 ]; do
-      printf -- '- [ ] task-%s - padded contribution row %s\n' "$i" "$pad"
-      i=$((i + 1))
-    done
-  } > "$home/data/backlog.md"
+  printf '# Backlog\n\n## Queued\n\n' > "$home/data/backlog.md"
+  i=0
   bytes=$(wc -c < "$home/data/backlog.md")
-  [ "$bytes" -gt "$limit" ] \
-    || fail "backlog fixture of $bytes bytes did not exceed the $limit argument limit"
+  while [ "$bytes" -le "$limit" ]; do
+    {
+      while :; do
+        printf -- '- [ ] task-%s - padded contribution row %s\n' "$i" "$pad"
+        i=$((i + 1))
+        [ $((i % 1000)) -ne 0 ] || break
+      done
+    } >> "$home/data/backlog.md"
+    bytes=$(wc -c < "$home/data/backlog.md")
+  done
   with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input \
     > "$home/contribution-input.json" 2> "$home/contribution-input.err" \
     || fail "contribution input failed on an oversized backlog: $(cat "$home/contribution-input.err")"
@@ -851,8 +853,8 @@ test_contribution_input_survives_oversized_backlog() {
     || fail "contribution input reported an error on an oversized backlog: $(cat "$home/contribution-input.err")"
   records=$(jq '.backlog.records | length' "$home/contribution-input.json") \
     || fail 'contribution input did not emit valid JSON on an oversized backlog'
-  [ "$records" -eq 6000 ] \
-    || fail "contribution input lost backlog rows on an oversized backlog: $records"
+  [ "$records" -eq "$i" ] \
+    || fail "contribution input lost backlog rows on an oversized backlog: $records of $i"
   pass 'contribution input survives a backlog larger than the argument limit'
 }
 
