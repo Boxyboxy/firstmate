@@ -716,7 +716,10 @@ export default function (pi: ExtensionAPI) {
     if (!pendingActionableIsLive(pending)) return false;
     const queued = owner.pendingActionables.find((item) => item.token === pending.token);
     if (queued) return !queued.delivered && !owner.unconsumedWakes.has(queued.token);
-    if (!pending.delivered && owner.pendingActionables.some((item) => !item.delivered && item.message === pending.message)) return false;
+    if (!pending.delivered) {
+      const duplicate = owner.pendingActionables.find((item) => !item.delivered && item.message === pending.message);
+      if (duplicate) return !owner.unconsumedWakes.has(duplicate.token);
+    }
     owner.pendingActionables.push(pending);
     if (owner.stopping && owner.replacement) {
       let replacementPending = pending;

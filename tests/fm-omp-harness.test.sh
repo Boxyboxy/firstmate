@@ -900,6 +900,66 @@ EOF
   pass ".omp watch extension: an arm close whose wake is a duplicate or names a torn-down task still starts a successor arm"
 }
 
+# A queued wake whose delivery failed is retried by the next close that
+# re-reports it, rather than being collapsed into that close and stranded.
+test_watch_extension_duplicate_close_retries_a_failed_delivery() {
+  local repo home out status
+  repo="$TMP_ROOT/dup-retry/repo"; home="$TMP_ROOT/dup-retry/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state="${FM_HOME:?}/state"
+n=$(( $(cat "$state/.arm-count" 2>/dev/null || echo 0) + 1 ))
+printf '%s\n' "$n" > "$state/.arm-count"
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-%s\n' "$$" "$n"
+sleep 1
+case "$n" in
+  1|2) printf 'signal: %s/live-1.turn-ended\n' "$state"; exit 0 ;;
+esac
+sleep 30
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
+const state = `${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+writeFileSync(`${state}/live-1.meta`, "kind=ship\n");
+const wake = `FIRSTMATE WATCHER WAKE: signal: ${state}/live-1.turn-ended`;
+const handlers = new Map(); let tool = null; const attempts = []; let failed = false;
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m) {
+    if (!m.includes(wake)) return undefined;
+    attempts.push(m);
+    if (!failed) { failed = true; throw new Error("omp rejected the follow-up"); }
+    return undefined;
+  },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+const arms = () => (existsSync(`${state}/.arm-count`) ? Number(readFileSync(`${state}/.arm-count`, "utf8").trim() || 0) : 0);
+const deadline = Date.now() + 15000;
+while ((arms() < 3 || attempts.length < 2) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+await new Promise((r) => setTimeout(r, 500));
+if (attempts.length !== 2) throw new Error(`the failed wake must be re-sent exactly once by the duplicate close, saw ${attempts.length} attempt(s) after ${arms()} arm(s)`);
+const again = await tool.execute();
+if (!/^watcher: unchanged - omp extension already owns an arm child/.test(again.content[0].text)) throw new Error(`no live successor arm after the retried delivery: ${again.content[0].text}`);
+await handlers.get("session_shutdown")({}, {});
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch duplicate close retry: $out"
+  [ -z "$out" ] || fail "omp watch duplicate close retry test printed output: $out"
+  pass ".omp watch extension: a duplicate close re-drives a queued wake whose earlier delivery failed"
+}
+
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
@@ -916,3 +976,4 @@ test_watch_extension_handoff_drops_wakes_for_torn_down_tasks
 test_watch_extension_handoff_collapses_duplicates_and_stays_bounded
 test_watch_extension_handoff_replays_a_live_undelivered_wake
 test_watch_extension_retired_close_keeps_the_watcher_armed
+test_watch_extension_duplicate_close_retries_a_failed_delivery
