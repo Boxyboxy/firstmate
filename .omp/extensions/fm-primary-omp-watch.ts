@@ -709,13 +709,14 @@ export default function (pi: ExtensionAPI) {
   function enqueuePendingActionable(
     owner: SessionGeneration,
     pending: PendingActionableClose,
-  ): void {
+  ): boolean {
     // Retention applies to the in-memory queue too: a wake about a torn-down
     // task is never queued, and an unread reason already queued is not queued
     // twice however many arm closes re-report it.
-    if (!pendingActionableIsLive(pending)) return;
-    if (owner.pendingActionables.some((item) => item.token === pending.token)) return;
-    if (!pending.delivered && owner.pendingActionables.some((item) => !item.delivered && item.message === pending.message)) return;
+    if (!pendingActionableIsLive(pending)) return false;
+    const queued = owner.pendingActionables.find((item) => item.token === pending.token);
+    if (queued) return !queued.delivered && !owner.unconsumedWakes.has(queued.token);
+    if (!pending.delivered && owner.pendingActionables.some((item) => !item.delivered && item.message === pending.message)) return false;
     owner.pendingActionables.push(pending);
     if (owner.stopping && owner.replacement) {
       let replacementPending = pending;
@@ -734,6 +735,7 @@ export default function (pi: ExtensionAPI) {
         replacementCoordinator.pending.push(replacementPending);
       }
     }
+    return !pending.delivered;
   }
 
   function finishPendingActionable(owner: SessionGeneration, pending: PendingActionableClose): void {
@@ -1080,10 +1082,19 @@ export default function (pi: ExtensionAPI) {
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
         const pending = armPendingActionable.get(armChild) ?? createPendingActionable(classification.message, predecessor);
-        enqueuePendingActionable(owner, pending);
+        const awaitingDelivery = enqueuePendingActionable(owner, pending);
         if (!generationIsLive(owner)) return;
         owner.retryFailures = 0;
-        void processPendingActionables(owner);
+        if (awaitingDelivery) {
+          void processPendingActionables(owner);
+          return;
+        }
+        if (owner.restoring) {
+          owner.deferredClose = { message: classification.message, predecessorArmPid: predecessor };
+          return;
+        }
+        const successor = startArm(owner, predecessor);
+        if (!successor.ok) scheduleRetry(owner, successor.message, predecessor);
         return;
       }
       if (!generationIsLive(owner)) return;

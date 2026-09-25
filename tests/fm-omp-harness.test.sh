@@ -842,6 +842,64 @@ EOF
   pass ".omp watch extension: a live task's undelivered wake still survives a session replacement and is replayed"
 }
 
+# A live arm close whose wake is retired - a copy of a wake omp still holds
+# unread, or a signal naming only a torn-down task - must still hand watching
+# on to a successor arm, or supervision goes dark with nothing left to re-arm it.
+test_watch_extension_retired_close_keeps_the_watcher_armed() {
+  local repo home out status
+  repo="$TMP_ROOT/retired-close/repo"; home="$TMP_ROOT/retired-close/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state="${FM_HOME:?}/state"
+n=$(( $(cat "$state/.arm-count" 2>/dev/null || echo 0) + 1 ))
+printf '%s\n' "$n" > "$state/.arm-count"
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-%s\n' "$$" "$n"
+sleep 1
+case "$n" in
+  1|2) printf 'signal: %s/live-1.turn-ended\n' "$state"; exit 0 ;;
+  3) printf 'signal: %s/gone-1.turn-ended\n' "$state"; exit 0 ;;
+esac
+sleep 30
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
+const state = `${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+writeFileSync(`${state}/live-1.meta`, "kind=ship\n");
+const handlers = new Map(); let tool = null; const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+const arms = () => (existsSync(`${state}/.arm-count`) ? Number(readFileSync(`${state}/.arm-count`, "utf8").trim() || 0) : 0);
+const deadline = Date.now() + 15000;
+while (arms() < 4 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+if (arms() < 4) throw new Error(`a retired arm close left the watcher dark after ${arms()} arm(s)`);
+await new Promise((r) => setTimeout(r, 500));
+if (sent.length !== 1) throw new Error(`only the first live wake may be delivered, saw ${sent.length}: ${JSON.stringify(sent.map((w) => w.m))}`);
+if (!sent[0].m.includes(`${state}/live-1.turn-ended`)) throw new Error(`unexpected wake text: ${sent[0].m}`);
+const again = await tool.execute();
+if (!/^watcher: unchanged - omp extension already owns an arm child/.test(again.content[0].text)) throw new Error(`no live successor arm after retired closes: ${again.content[0].text}`);
+await handlers.get("session_shutdown")({}, {});
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch retired close continuity: $out"
+  [ -z "$out" ] || fail "omp watch retired close test printed output: $out"
+  pass ".omp watch extension: an arm close whose wake is a duplicate or names a torn-down task still starts a successor arm"
+}
+
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
@@ -857,3 +915,4 @@ test_watch_extension_arms_and_delivers
 test_watch_extension_handoff_drops_wakes_for_torn_down_tasks
 test_watch_extension_handoff_collapses_duplicates_and_stays_bounded
 test_watch_extension_handoff_replays_a_live_undelivered_wake
+test_watch_extension_retired_close_keeps_the_watcher_armed
