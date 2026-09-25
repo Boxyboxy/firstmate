@@ -43,8 +43,9 @@
 #                           yaml), so something on disk still claims it.
 #   5. orphan             - the same match against a KNOWN but finished task id
 #                           (a data/<id>/ directory holding brief.md or report.md
-#                           with no state/<id>.meta; other data/ directories such
-#                           as handoff/ are not tasks and never match).
+#                           with no state/<id>.meta and no data/secondmates.md
+#                           record; other data/ directories such as handoff/ are
+#                           not tasks and never match).
 #                           Running orphans are removed only under --apply.
 #   6. keep:unattributed  - running and none of the above: KEPT and reported for
 #                           the captain to judge. Unattributable is never a
@@ -206,11 +207,19 @@ if [ -d "$STATE" ]; then
     printf '%s\n' "$id" >>"$WORK/live-ids"
   done
 fi
+: >"$WORK/secondmate-ids"
+REGISTRY="$DATA/secondmates.md"
+if [ -e "$REGISTRY" ] || [ -L "$REGISTRY" ]; then
+  [ -f "$REGISTRY" ] && [ -r "$REGISTRY" ] ||
+    refuse "secondmate registry $REGISTRY is unreadable, so registered secondmates cannot be told apart from finished tasks"
+  sed -n 's/^- \([A-Za-z0-9._-]\{1,\}\)\( .*\)\{0,1\}$/\1/p' "$REGISTRY" >"$WORK/secondmate-ids"
+fi
 if [ -d "$DATA" ]; then
   for dir in "$DATA"/*/; do
     [ -d "$dir" ] || continue
     id="$(basename "$dir")"
     grep -qxF "$id" "$WORK/live-ids" && continue
+    grep -qxF "$id" "$WORK/secondmate-ids" && continue
     [ -f "$dir/brief.md" ] || [ -f "$dir/report.md" ] || continue
     printf '%s\n' "$id" >>"$WORK/done-ids"
   done

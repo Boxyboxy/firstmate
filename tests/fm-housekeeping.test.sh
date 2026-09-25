@@ -383,11 +383,14 @@ test_nontask_data_directories_are_not_finished_tasks() {
   dir=$(fm_hk_case nontask-data)
   mkdir -p "$dir/home/data/handoff" "$dir/home/data/remote-secondmates" "$dir/home/data/mate-unlaunched"
   : >"$dir/home/data/handoff/mate.outbox.md"
-  fm_hk_finished_task "$dir" gone-beta
+  fm_hk_finished_task "$dir" gone-beta mate-remote
+  printf -- '- mate-remote - fixture (host: builder; root: /srv/fm; home: /srv/fm-home; scope: fixture; projects: sample; added 2026-09-20)\n' \
+    >"$dir/home/data/secondmates.md"
   fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
   fm_hk_container "$dir" fm-handoff-relay running '' '' '' ''
   fm_hk_container "$dir" fm-remote-secondmates-sync running '' '' '' ''
   fm_hk_container "$dir" fm-mate-unlaunched-db running '' '' '' ''
+  fm_hk_container "$dir" fm-mate-remote-db running '' '' '' ''
   fm_hk_container "$dir" fm-gone-beta-db running '' '' '' ''
 
   fm_hk_run "$dir" --apply --no-worktrees
@@ -401,10 +404,12 @@ test_nontask_data_directories_are_not_finished_tasks() {
     'removed a container attributed only to the remote-secondmates data directory'
   assert_no_grep fm-mate-unlaunched-db "$dir/docker.rm" \
     'removed a container attributed to a data directory with no task artifact'
+  assert_no_grep fm-mate-remote-db "$dir/docker.rm" \
+    'removed a container attributed to a registered secondmate'
   assert_grep 'keep    fm-handoff-relay' "$dir/out" \
     'the handoff-named container was not reported as kept'
   assert_no_kept_name_removed "$dir"
-  pass 'only data directories holding a task artifact count as finished tasks'
+  pass 'only unregistered data directories holding a task artifact count as finished tasks'
 }
 
 test_help_documents_environment_and_exit_status() {
