@@ -14,6 +14,8 @@
 //     session_start, in this process or a later one, replays it. Replaying a
 //     wake main has already drained is harmless (the queue is durable and the
 //     drain is idempotent); losing one across /new is not.
+//   - Handoff retention diverges from the Pi port: see "Handoff retention"
+//     below. The rest of the arm, successor, and retry logic is unchanged.
 //   - The Pi supervision branch is out of scope for omp: every actionable wake
 //     is delivered to main, so no branch offer is made and no calm presentation
 //     hooks exist.
@@ -40,9 +42,32 @@
 // consumes at the user message_start carrying the exact wake text; either
 // event finishes the pending record, and a still-unconsumed record rides the
 // replacement handoff.
+//
+// Handoff retention (stated once here):
+// Replay keeps an undelivered wake alive across a session replacement, so
+// without a retirement rule the store only ever grows: every arm close mints a
+// fresh token for the same unread reason, every shutdown re-persists the lot,
+// and the next session pays one model turn per record. Three rules bound it,
+// applied together wherever the store is read or written:
+//   - Liveness. A "signal:" reason names <state>/<id>.status and
+//     <state>/<id>.turn-ended files (bin/fm-watch.sh's scan_signals), and
+//     state/<id>.meta is that task's record: bin/fm-spawn.sh publishes it
+//     before the worker can write any signal file and bin/fm-teardown.sh
+//     removes it with the backlog transition. A record whose every named task
+//     has lost its meta is about work that no longer exists and is dropped
+//     rather than replayed. A record naming one live task among torn-down ones
+//     stays, and a reason naming no task at all (a "stale:", "check:" or
+//     "heartbeat" line) is unjudgeable, never dropped.
+//   - Identity. The wake is its message; the token only records which close
+//     minted it. Undelivered records collapse by message, keeping the earliest,
+//     so one unread reason is one queued turn however often it re-fires. A
+//     record already delivered is never collapsed into: it is about to be
+//     retired by consumption, and a later identical close is a new wake.
+//   - Bound. At most FM_OMP_HANDOFF_MAX_RECORDS records, none older than
+//     FM_OMP_HANDOFF_MAX_AGE_MS, oldest dropped first.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // typebox resolves inside omp's extension loader (verified, omp 18.1.11); the
@@ -128,6 +153,17 @@ const marker = `${state}/.omp-watch-extension-loaded`;
 const handoffDir = `${state}/extensions/omp-primary-watch`;
 const actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
+// A pending record costs main one model turn plus one arm restart to drain, so
+// the ceiling is what a session can absorb at startup without the queue itself
+// becoming the work: 32 distinct unread reasons already exceeds any fleet this
+// home supervises, and draining them is seconds rather than the ~100 empty
+// turns the unbounded store cost.
+const handoffMaxRecords = positiveInteger("FM_OMP_HANDOFF_MAX_RECORDS", 32);
+// A wake is a notification about the fleet's CURRENT state, and bin/fm-watch.sh
+// re-raises anything still true. A day is well past the point where replaying
+// one tells main something the session-start digest and the durable wake queue
+// do not already own, so beyond it the record is noise, not continuity.
+const handoffMaxAgeMs = positiveInteger("FM_OMP_HANDOFF_MAX_AGE_MS", 24 * 60 * 60 * 1000);
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
@@ -261,6 +297,60 @@ function nodeErrorCode(error: unknown): string {
     : "";
 }
 
+// The task ids a wake reason is ABOUT, read from the signal files the watcher
+// names. Only paths inside this home's own state directory identify a task this
+// extension can judge; a foreign path is left unjudged rather than guessed at.
+function actionableTaskIds(message: string): string[] {
+  const ids = new Set<string>();
+  for (const word of message.split(/\s+/)) {
+    if (!word.startsWith(`${state}/`)) continue;
+    const name = word.slice(state.length + 1);
+    const signal = /^([^/]+)\.(?:status|turn-ended)$/.exec(name);
+    if (signal) ids.add(signal[1]);
+  }
+  return [...ids];
+}
+
+// Live while ANY named task still has a record: one torn-down task in a
+// coalesced batch must not silence the others.
+function pendingActionableIsLive(pending: PendingActionableClose): boolean {
+  const ids = actionableTaskIds(pending.message);
+  return ids.length === 0 || ids.some((id) => existsSync(`${state}/${id}.meta`));
+}
+
+// createPendingActionable mints `<pid>-<Date.now()>-<seq>`, and
+// validatePendingActionable enforces that shape, so the middle field is when
+// the record was created.
+function pendingActionableMintedAt(pending: PendingActionableClose): number {
+  return Number(pending.token.split("-")[1]);
+}
+
+// The single owner of what the handoff store is allowed to retain. Applied on
+// every read and every write so a dead record is neither replayed nor carried
+// forward, whichever path the session takes.
+function retainedHandoffRecords(pending: PendingActionableClose[]): PendingActionableClose[] {
+  const now = Date.now();
+  const undeliveredMessages = new Set<string>();
+  const kept: PendingActionableClose[] = [];
+  for (const record of pending) {
+    if (!pendingActionableIsLive(record)) continue;
+    if (now - pendingActionableMintedAt(record) > handoffMaxAgeMs) continue;
+    if (!record.delivered) {
+      if (undeliveredMessages.has(record.message)) continue;
+      undeliveredMessages.add(record.message);
+    }
+    kept.push(record);
+  }
+  if (kept.length <= handoffMaxRecords) return kept;
+  const dropped = new Set(
+    [...kept]
+      .sort((left, right) => pendingActionableMintedAt(left) - pendingActionableMintedAt(right))
+      .slice(0, kept.length - handoffMaxRecords)
+      .map((record) => record.token),
+  );
+  return kept.filter((record) => !dropped.has(record.token));
+}
+
 function createPendingActionable(message: string, predecessorArmPid: string): PendingActionableClose {
   return {
     version: 1,
@@ -305,10 +395,22 @@ function validateReplacementHandoff(value: unknown): PendingActionableClose[] {
 }
 
 function writeReplacementHandoff(pending: PendingActionableClose[]): void {
-  replacementHandoff = [...pending];
+  const retained = retainedHandoffRecords(pending);
+  if (retained.length === 0) {
+    // Nothing left worth replaying: remove the store rather than publish a doc
+    // validateReplacementHandoff would reject on the next read.
+    replacementHandoff = null;
+    try {
+      unlinkSync(actionableHandoff);
+    } catch (error) {
+      if (nodeErrorCode(error) !== "ENOENT") throw error;
+    }
+    return;
+  }
+  replacementHandoff = [...retained];
   mkdirSync(handoffDir, { recursive: true });
   const temporary = `${actionableHandoff}.tmp-${process.pid}-${++nextHandoffId}`;
-  const handoff: ReplacementActionableHandoff = { version: 2, pending };
+  const handoff: ReplacementActionableHandoff = { version: 2, pending: retained };
   try {
     writeFileSync(temporary, `${JSON.stringify(handoff)}\n`, { mode: 0o600 });
     renameSync(temporary, actionableHandoff);
@@ -329,8 +431,20 @@ function persistReplacementHandoff(pending: PendingActionableClose[]): void {
 
 function loadReplacementHandoff(): PendingActionableClose[] {
   try {
-    const pending = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
-    replacementHandoff = pending;
+    const stored = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
+    const pending = retainedHandoffRecords(stored);
+    replacementHandoff = pending.length > 0 ? pending : null;
+    if (pending.length !== stored.length) {
+      // Retire the dropped records on disk now, so a session that never reaches
+      // shutdown cannot hand them to the next one. A failed rewrite costs only
+      // that: this session still works from the filtered set above.
+      try {
+        writeReplacementHandoff(pending);
+      } catch {
+        // The next persist retries; surfacing a cleanup error here would cost
+        // the live records this load just recovered.
+      }
+    }
     return [...pending];
   } catch (error) {
     if (nodeErrorCode(error) === "ENOENT") {
@@ -357,12 +471,7 @@ function clearReplacementHandoff(pending: PendingActionableClose): void {
     const stored = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
     const remaining = stored.filter((item) => item.token !== pending.token);
     if (remaining.length === stored.length) return;
-    if (remaining.length > 0) {
-      writeReplacementHandoff(remaining);
-    } else {
-      replacementHandoff = null;
-      unlinkSync(actionableHandoff);
-    }
+    writeReplacementHandoff(remaining);
   } catch (error) {
     if (nodeErrorCode(error) !== "ENOENT") throw error;
   }
@@ -601,7 +710,12 @@ export default function (pi: ExtensionAPI) {
     owner: SessionGeneration,
     pending: PendingActionableClose,
   ): void {
+    // Retention applies to the in-memory queue too: a wake about a torn-down
+    // task is never queued, and an unread reason already queued is not queued
+    // twice however many arm closes re-report it.
+    if (!pendingActionableIsLive(pending)) return;
     if (owner.pendingActionables.some((item) => item.token === pending.token)) return;
+    if (!pending.delivered && owner.pendingActionables.some((item) => !item.delivered && item.message === pending.message)) return;
     owner.pendingActionables.push(pending);
     if (owner.stopping && owner.replacement) {
       let replacementPending = pending;
@@ -659,6 +773,18 @@ export default function (pi: ExtensionAPI) {
           attemptedCleanup.add(delivered.token);
           try {
             finishPendingActionable(owner, delivered);
+          } catch (error) {
+            surfaceCleanupFailure(owner, error);
+          }
+        }
+        // A task torn down while its wake still sat in the queue: retire the
+        // record instead of spending a turn on work that no longer exists. A
+        // record omp already holds is left alone - consumption owns that one.
+        for (const dead of owner.pendingActionables.filter(
+          (item) => !item.delivered && !owner.unconsumedWakes.has(item.token) && !pendingActionableIsLive(item),
+        )) {
+          try {
+            finishPendingActionable(owner, dead);
           } catch (error) {
             surfaceCleanupFailure(owner, error);
           }
