@@ -204,6 +204,16 @@ fm_hk_case() {
   printf '%s\n' "$dir"
 }
 
+# fm_hk_finished_task <dir> <id>...: record finished tasks the way firstmate
+# leaves them: a data/<id>/ holding the task brief and no state/<id>.meta.
+fm_hk_finished_task() {
+  local dir="$1" id; shift
+  for id in "$@"; do
+    mkdir -p "$dir/home/data/$id"
+    : >"$dir/home/data/$id/brief.md"
+  done
+}
+
 # fm_hk_container <dir> <name> <state> <project> <task> <ports> <workdir>
 fm_hk_container() {
   printf '%s|%s|%s|%s|%s|%s\n' "$2" "$3" "$4" "$5" "$6" "$7" >>"$1/containers"
@@ -281,7 +291,7 @@ test_degraded_id_listing_still_reclaims_nothing() {
   dir=$(fm_hk_case degraded)
   # Simulate the degraded output itself: opaque IDs where names were expected.
   # A name filter matches none of them, and the kill-list must stay empty.
-  mkdir -p "$dir/home/data/gone-task"
+  fm_hk_finished_task "$dir" gone-task
   fm_hk_container "$dir" 4f1b26387088 running '' '' '127.0.0.1:8131->8131/tcp' ''
   fm_hk_container "$dir" 9ac31d0f1122 running '' '' '' ''
   fm_hk_container "$dir" 22b7714cc901 exited '' '' '' ''
@@ -302,7 +312,7 @@ test_refuses_a_listing_it_cannot_parse() {
   dir=$(fm_hk_case malformed)
   # The raw shape of the incident: the listing lost its fields and is nothing
   # but container IDs. Nothing here can be classified, so nothing may be swept.
-  mkdir -p "$dir/home/data/gone-task"
+  fm_hk_finished_task "$dir" gone-task
   printf '%s\n' 4f1b26387088 9ac31d0f1122 22b7714cc901 >"$dir/containers"
 
   fm_hk_run "$dir" --apply --no-worktrees
@@ -324,7 +334,8 @@ test_refuses_a_listing_it_cannot_parse() {
 test_orphan_removed_while_live_task_and_stack_are_kept() {
   local dir
   dir=$(fm_hk_case orphan)
-  mkdir -p "$dir/home/data/live-alpha" "$dir/home/data/gone-beta"
+  mkdir -p "$dir/home/data/live-alpha"
+  fm_hk_finished_task "$dir" gone-beta
   fm_write_meta "$dir/home/state/live-alpha.meta" 'kind=ship' 'worktree=/pool/live-alpha'
   fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
   fm_hk_container "$dir" fm-live-alpha-db running '' '' '' ''
@@ -347,7 +358,7 @@ test_orphan_removed_while_live_task_and_stack_are_kept() {
 test_orphan_that_becomes_live_before_removal_is_kept() {
   local dir code
   dir=$(fm_hk_case late-live-container)
-  mkdir -p "$dir/home/data/gone-beta"
+  fm_hk_finished_task "$dir" gone-beta
   fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
   fm_hk_container "$dir" fm-gone-beta-db running '' '' '' ''
   printf 'gone-beta|1\n' >"$dir/container.late-live"
@@ -367,10 +378,58 @@ test_orphan_that_becomes_live_before_removal_is_kept() {
   pass 'a late-protected orphan is included in final verification'
 }
 
+test_nontask_data_directories_are_not_finished_tasks() {
+  local dir
+  dir=$(fm_hk_case nontask-data)
+  mkdir -p "$dir/home/data/handoff" "$dir/home/data/remote-secondmates" "$dir/home/data/mate-unlaunched"
+  : >"$dir/home/data/handoff/mate.outbox.md"
+  fm_hk_finished_task "$dir" gone-beta
+  fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
+  fm_hk_container "$dir" fm-handoff-relay running '' '' '' ''
+  fm_hk_container "$dir" fm-remote-secondmates-sync running '' '' '' ''
+  fm_hk_container "$dir" fm-mate-unlaunched-db running '' '' '' ''
+  fm_hk_container "$dir" fm-gone-beta-db running '' '' '' ''
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply beside non-task data directories'
+
+  assert_grep fm-gone-beta-db "$dir/docker.rm" \
+    'the orphaned container of a finished task survived the sweep'
+  assert_no_grep fm-handoff-relay "$dir/docker.rm" \
+    'removed a container attributed only to the handoff data directory'
+  assert_no_grep fm-remote-secondmates-sync "$dir/docker.rm" \
+    'removed a container attributed only to the remote-secondmates data directory'
+  assert_no_grep fm-mate-unlaunched-db "$dir/docker.rm" \
+    'removed a container attributed to a data directory with no task artifact'
+  assert_grep 'keep    fm-handoff-relay' "$dir/out" \
+    'the handoff-named container was not reported as kept'
+  assert_no_kept_name_removed "$dir"
+  pass 'only data directories holding a task artifact count as finished tasks'
+}
+
+test_help_documents_environment_and_exit_status() {
+  local out code
+  out=$(FM_HOME="$TMP_ROOT/help-home" "$HOUSEKEEPING" --help)
+  code=$?
+  expect_code 0 "$code" '--help'
+  case "$out" in
+    *FM_HOUSEKEEPING_VOLUME_STABILITY_SECONDS*) ;;
+    *) fail '--help omitted the environment section' ;;
+  esac
+  case "$out" in
+    *'3 refused for safety'*) ;;
+    *) fail '--help omitted the exit-status contract' ;;
+  esac
+  case "$out" in
+    *'set -u'*|*SCRIPT_DIR*) fail '--help printed script body past the header' ;;
+  esac
+  pass '--help prints the whole header including environment and exit status'
+}
+
 test_finished_task_name_with_bound_port_is_kept() {
   local dir
   dir=$(fm_hk_case serving-orphan)
-  mkdir -p "$dir/home/data/gone-beta"
+  fm_hk_finished_task "$dir" gone-beta
   fm_hk_container "$dir" fm-gone-beta-api running '' '' '127.0.0.1:3000->3000/tcp' ''
 
   fm_hk_run "$dir" --apply --no-worktrees
@@ -385,7 +444,7 @@ test_finished_task_name_with_bound_port_is_kept() {
 test_refuses_when_nothing_running_would_be_kept() {
   local dir code
   dir=$(fm_hk_case sweep-everything)
-  mkdir -p "$dir/home/data/gone-one" "$dir/home/data/gone-two"
+  fm_hk_finished_task "$dir" gone-one gone-two
   fm_hk_container "$dir" fm-gone-one-db running '' '' '' ''
   fm_hk_container "$dir" fm-gone-two-db running '' '' '' ''
 
@@ -402,7 +461,7 @@ test_refuses_when_nothing_running_would_be_kept() {
 test_refuses_when_a_name_lands_on_both_lists() {
   local dir code
   dir=$(fm_hk_case both-lists)
-  mkdir -p "$dir/home/data/gone-beta"
+  fm_hk_finished_task "$dir" gone-beta
   # An inconsistent inventory: the same name classified both ways. The name-wise
   # assert before deletion must stop the whole run.
   fm_hk_container "$dir" shared-name running '' '' '127.0.0.1:9000->9000/tcp' ''
@@ -426,7 +485,7 @@ test_configured_keep_and_stack_project_protect_stopped_members() {
   mkdir -p "$stack"
   printf 'docker run --name pinned-db postgres\n' >"$stack/stack.sh"
   printf '%s\n' 'reserved-*' "$stack" >"$dir/home/config/housekeeping-keep"
-  mkdir -p "$dir/home/data/gone-beta"
+  fm_hk_finished_task "$dir" gone-beta
   fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
   fm_hk_container "$dir" reserved-cache exited '' '' '' ''
   fm_hk_container "$dir" pinned-db exited '' '' '' ''
@@ -630,7 +689,7 @@ test_dry_run_models_post_orphan_volume_pass() {
   local dir volume
   dir=$(fm_hk_case dry-post-orphan-volume)
   volume=$(printf '9%.0s' {1..64})
-  mkdir -p "$dir/home/data/gone-beta"
+  fm_hk_finished_task "$dir" gone-beta
   fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
   fm_hk_container "$dir" fm-gone-beta-db running '' '' '' ''
   printf 'fm-gone-beta-db|%s\n' "$volume" >"$dir/container-mounts"
@@ -653,7 +712,7 @@ test_dry_run_deletes_nothing() {
   printf '%s\n' "$volume" >"$dir/volume-samples/1"
   printf '%s\n' "$volume" >"$dir/volume-samples/2"
   printf '%s|com.docker.volume.anonymous|\n' "$volume" >"$dir/volume-metadata"
-  mkdir -p "$dir/home/data/gone-beta"
+  fm_hk_finished_task "$dir" gone-beta
   fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
   fm_hk_container "$dir" fm-gone-beta-db running '' '' '' ''
   fm_hk_container "$dir" junk-cache exited '' '' '' ''
@@ -749,6 +808,8 @@ test_degraded_id_listing_still_reclaims_nothing
 test_refuses_a_listing_it_cannot_parse
 test_orphan_removed_while_live_task_and_stack_are_kept
 test_orphan_that_becomes_live_before_removal_is_kept
+test_nontask_data_directories_are_not_finished_tasks
+test_help_documents_environment_and_exit_status
 test_finished_task_name_with_bound_port_is_kept
 test_refuses_when_nothing_running_would_be_kept
 test_refuses_when_a_name_lands_on_both_lists

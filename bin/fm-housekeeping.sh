@@ -42,7 +42,9 @@
 #                           stack manifest (stack.sh, compose.sh, or a compose
 #                           yaml), so something on disk still claims it.
 #   5. orphan             - the same match against a KNOWN but finished task id
-#                           (a data/<id>/ directory with no state/<id>.meta).
+#                           (a data/<id>/ directory holding brief.md or report.md
+#                           with no state/<id>.meta; other data/ directories such
+#                           as handoff/ are not tasks and never match).
 #                           Running orphans are removed only under --apply.
 #   6. keep:unattributed  - running and none of the above: KEPT and reported for
 #                           the captain to judge. Unattributable is never a
@@ -136,7 +138,7 @@ DF_PATH="${FM_HOUSEKEEPING_DF_PATH:-/}"
 VOLUME_STABILITY_SECONDS="${FM_HOUSEKEEPING_VOLUME_STABILITY_SECONDS:-30}"
 
 usage() {
-  sed -n '2,115{s/^#$//;s/^# \{0,1\}//;p;}' "$0"
+  awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
 }
 
 if ! [[ "$VOLUME_STABILITY_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
@@ -209,6 +211,7 @@ if [ -d "$DATA" ]; then
     [ -d "$dir" ] || continue
     id="$(basename "$dir")"
     grep -qxF "$id" "$WORK/live-ids" && continue
+    [ -f "$dir/brief.md" ] || [ -f "$dir/report.md" ] || continue
     printf '%s\n' "$id" >>"$WORK/done-ids"
   done
 fi
