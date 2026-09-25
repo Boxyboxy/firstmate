@@ -642,6 +642,388 @@ EOF
   pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
 }
 
+# Shared handoff fixtures: a store seeded exactly as a real session leaves it,
+# one distinct token and predecessor pid per record, which is what the measured
+# 100-record store on the captain's home carried.
+omp_handoff_install_seed() {  # <repo>
+  cat > "$1/handoff-seed.mjs" <<'JS'
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
+export const state = `${process.env.FM_HOME}/state`;
+export const handoffPath = `${state}/extensions/omp-primary-watch/session-replacement-actionable.json`;
+mkdirSync(`${state}/extensions/omp-primary-watch`, { recursive: true });
+let seq = 0;
+export const record = (message, mintedAt) => ({
+  version: 1,
+  token: `${9000 + seq}-${mintedAt ?? Date.now()}-${++seq}`,
+  message,
+  predecessorArmPid: String(7000 + seq),
+});
+export const taskRecord = (id) => writeFileSync(`${state}/${id}.meta`, "kind=ship\n");
+export const ownLock = () => writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+export const seedHandoff = (pending) => writeFileSync(handoffPath, `${JSON.stringify({ version: 2, pending })}\n`, { mode: 0o600 });
+export const storedHandoff = () => (existsSync(handoffPath) ? JSON.parse(readFileSync(handoffPath, "utf8")).pending : []);
+JS
+}
+
+# An arm child that never closes on its own, so every actionable wake under test
+# comes from the seeded store and nothing the watcher discovers can be mistaken
+# for a replayed record.
+omp_handoff_install_quiet_arm() {  # <repo>
+  cat > "$1/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-1\n' "$$"
+sleep 30
+SH
+  chmod +x "$1/bin/fm-watch-arm.sh"
+}
+
+omp_handoff_fixture() {  # <name> -> sets repo/home
+  repo="$TMP_ROOT/$1/repo"; home="$TMP_ROOT/$1/home"
+  install_omp_extension_fixture "$repo"
+  omp_handoff_install_seed "$repo"
+  omp_handoff_install_quiet_arm "$repo"
+  mkdir -p "$home/state"
+}
+
+test_watch_extension_handoff_drops_wakes_for_torn_down_tasks() {
+  local repo home out status
+  omp_handoff_fixture handoff-dead
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    SEED="$repo/handoff-seed.mjs" EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const { state, record, taskRecord, ownLock, seedHandoff, storedHandoff } = await import(pathToFileURL(process.env.SEED).href);
+ownLock();
+taskRecord("live-1");
+const pending = [];
+// The measured shape: one torn-down task turn-end signal, re-minted once per
+// arm close until it filled the store.
+for (let i = 0; i < 94; i += 1) pending.push(record(`signal: ${state}/gone-1.turn-ended`));
+// A coalesced batch naming only torn-down tasks is dead too...
+pending.push(record(`signal: ${state}/gone-1.status ${state}/gone-2.status`));
+// ...while one naming a live task among them is not.
+pending.push(record(`signal: ${state}/gone-1.status ${state}/live-1.status`));
+pending.push(record(`signal: ${state}/live-1.turn-ended`));
+// A wake that names no task at all cannot be proven dead and must survive.
+pending.push(record("check: inactive-outcome"));
+seedHandoff(pending);
+const handlers = new Map(); const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await handlers.get("session_start")({}, {});
+// The store is rewritten at load, so dead records cannot be carried into
+// another session even if this one delivers nothing.
+const stored = storedHandoff();
+const deadOnly = (message) => /gone-/.test(message) && !/live-1/.test(message);
+if (stored.length !== 3) throw new Error(`load must retain only the judgeable-live records, kept ${stored.length}`);
+if (stored.some((entry) => deadOnly(entry.message))) throw new Error("a wake naming only torn-down tasks survived the load");
+if (!stored.some((entry) => entry.message === "check: inactive-outcome")) throw new Error("a wake naming no task must survive the load");
+await new Promise((r) => setTimeout(r, 6000));
+if (sent.length === 0) throw new Error("the live records were never delivered");
+for (const wake of sent) {
+  if (deadOnly(wake.m)) throw new Error(`a wake for a torn-down task was delivered: ${wake.m}`);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch handoff liveness: $out"
+  [ -z "$out" ] || fail "omp watch handoff liveness test printed output: $out"
+  pass ".omp watch extension: a handoff record whose task has no state/<id>.meta is dropped at load and never delivered"
+}
+
+test_watch_extension_handoff_collapses_duplicates_and_stays_bounded() {
+  local repo home out status
+  omp_handoff_fixture handoff-bound
+  # The arm never reports ready inside this window, so each store read below is
+  # the load-time result with no delivery having cleared anything yet.
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=30000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    FM_OMP_HANDOFF_MAX_RECORDS=3 FM_OMP_HANDOFF_MAX_AGE_MS=3600000 \
+    SEED="$repo/handoff-seed.mjs" EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const { state, record, taskRecord, ownLock, seedHandoff, storedHandoff } = await import(pathToFileURL(process.env.SEED).href);
+ownLock();
+for (const id of ["live-1", "live-2", "live-3", "live-4", "live-5", "old-1"]) taskRecord(id);
+const handlers = new Map();
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage() { return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+
+// 1. One notification, minted a hundred times over, is one notification.
+const duplicates = [];
+for (let i = 0; i < 100; i += 1) duplicates.push(record(`signal: ${state}/live-1.turn-ended`));
+if (new Set(duplicates.map((entry) => entry.token)).size !== 100) throw new Error("the seed must carry 100 distinct tokens");
+seedHandoff(duplicates);
+await handlers.get("session_start")({}, {});
+let stored = storedHandoff();
+if (stored.length !== 1) throw new Error(`100 copies of one message must collapse to one, kept ${stored.length}`);
+await handlers.get("session_shutdown")({}, {});
+
+// 2. The record bound drops the oldest first.
+const base = Date.now() - 60000;
+seedHandoff([1, 2, 3, 4, 5].map((n) => record(`signal: ${state}/live-${n}.turn-ended`, base + n * 1000)));
+await handlers.get("session_start")({}, {});
+stored = storedHandoff();
+if (stored.length !== 3) throw new Error(`the record bound must cap the store at 3, kept ${stored.length}`);
+const kept = stored.map((entry) => entry.message.replace(/^.*\/(live-[0-9]+)\.turn-ended$/, "$1")).sort().join(",");
+if (kept !== "live-3,live-4,live-5") throw new Error(`the bound must drop the oldest first, kept ${kept}`);
+await handlers.get("session_shutdown")({}, {});
+
+// 3. The age cut-off drops a record older than the window.
+seedHandoff([
+  record(`signal: ${state}/old-1.turn-ended`, Date.now() - 7200000),
+  record(`signal: ${state}/live-1.turn-ended`),
+]);
+await handlers.get("session_start")({}, {});
+stored = storedHandoff();
+if (stored.length !== 1) throw new Error(`the age cut-off must drop the aged record, kept ${stored.length}`);
+if (!stored[0].message.includes("live-1")) throw new Error(`the age cut-off dropped the wrong record: ${stored[0].message}`);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch handoff bounds: $out"
+  [ -z "$out" ] || fail "omp watch handoff bounds test printed output: $out"
+  pass ".omp watch extension: identical undelivered wakes collapse to one, and the record bound and age cut-off drop the oldest first"
+}
+
+test_watch_extension_handoff_replays_a_live_undelivered_wake() {
+  local repo home out status
+  omp_handoff_fixture handoff-live
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    SEED="$repo/handoff-seed.mjs" EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const { state, record, taskRecord, ownLock, seedHandoff, storedHandoff } = await import(pathToFileURL(process.env.SEED).href);
+ownLock();
+taskRecord("live-1");
+const wake = `signal: ${state}/live-1.turn-ended`;
+seedHandoff([record(wake)]);
+const handlers = new Map(); const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await handlers.get("session_start")({}, {});
+await new Promise((r) => setTimeout(r, 4000));
+if (sent.length !== 1) throw new Error(`a stored wake for a live task must be delivered once, saw ${sent.length}`);
+if (!sent[0].m.includes(wake)) throw new Error(`unexpected wake text: ${sent[0].m}`);
+// omp never consumed it, so the replacement must carry it forward...
+await handlers.get("session_shutdown")({}, {});
+const carried = storedHandoff();
+if (carried.length !== 1 || carried[0].message !== wake) throw new Error(`an unconsumed live wake must ride the replacement handoff, stored ${JSON.stringify(carried)}`);
+// ...and the replacement session must deliver it again.
+await handlers.get("session_start")({}, {});
+await new Promise((r) => setTimeout(r, 4000));
+if (sent.length !== 2) throw new Error(`the replacement must replay the undelivered wake, saw ${sent.length}`);
+if (!sent[1].m.includes(wake)) throw new Error(`the replay lost the wake text: ${sent[1].m}`);
+// Consuming it finally retires the record.
+await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: sent[1].m }, {});
+if (storedHandoff().length !== 0) throw new Error("a consumed wake must not stay in the handoff store");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch handoff continuity: $out"
+  [ -z "$out" ] || fail "omp watch handoff continuity test printed output: $out"
+  pass ".omp watch extension: a live task's undelivered wake still survives a session replacement and is replayed"
+}
+
+# A live arm close whose wake is retired - a copy of a wake omp still holds
+# unread, or a signal naming only a torn-down task - must still hand watching
+# on to a successor arm, or supervision goes dark with nothing left to re-arm it.
+test_watch_extension_retired_close_keeps_the_watcher_armed() {
+  local repo home out status
+  repo="$TMP_ROOT/retired-close/repo"; home="$TMP_ROOT/retired-close/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state="${FM_HOME:?}/state"
+n=$(( $(cat "$state/.arm-count" 2>/dev/null || echo 0) + 1 ))
+printf '%s\n' "$n" > "$state/.arm-count"
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-%s\n' "$$" "$n"
+sleep 1
+case "$n" in
+  1|2) printf 'signal: %s/live-1.turn-ended\n' "$state"; exit 0 ;;
+  3) printf 'signal: %s/gone-1.turn-ended\n' "$state"; exit 0 ;;
+esac
+sleep 30
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
+const state = `${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+writeFileSync(`${state}/live-1.meta`, "kind=ship\n");
+const handlers = new Map(); let tool = null; const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+const arms = () => (existsSync(`${state}/.arm-count`) ? Number(readFileSync(`${state}/.arm-count`, "utf8").trim() || 0) : 0);
+const deadline = Date.now() + 15000;
+while (arms() < 4 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+if (arms() < 4) throw new Error(`a retired arm close left the watcher dark after ${arms()} arm(s)`);
+await new Promise((r) => setTimeout(r, 500));
+if (sent.length !== 1) throw new Error(`only the first live wake may be delivered, saw ${sent.length}: ${JSON.stringify(sent.map((w) => w.m))}`);
+if (!sent[0].m.includes(`${state}/live-1.turn-ended`)) throw new Error(`unexpected wake text: ${sent[0].m}`);
+const again = await tool.execute();
+if (!/^watcher: unchanged - omp extension already owns an arm child/.test(again.content[0].text)) throw new Error(`no live successor arm after retired closes: ${again.content[0].text}`);
+await handlers.get("session_shutdown")({}, {});
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch retired close continuity: $out"
+  [ -z "$out" ] || fail "omp watch retired close test printed output: $out"
+  pass ".omp watch extension: an arm close whose wake is a duplicate or names a torn-down task still starts a successor arm"
+}
+
+# A queued wake whose delivery failed is retried by the next close that
+# re-reports it, rather than being collapsed into that close and stranded.
+test_watch_extension_duplicate_close_retries_a_failed_delivery() {
+  local repo home out status
+  repo="$TMP_ROOT/dup-retry/repo"; home="$TMP_ROOT/dup-retry/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state="${FM_HOME:?}/state"
+n=$(( $(cat "$state/.arm-count" 2>/dev/null || echo 0) + 1 ))
+printf '%s\n' "$n" > "$state/.arm-count"
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-%s\n' "$$" "$n"
+sleep 1
+case "$n" in
+  1|2) printf 'signal: %s/live-1.turn-ended\n' "$state"; exit 0 ;;
+esac
+sleep 30
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
+const state = `${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+writeFileSync(`${state}/live-1.meta`, "kind=ship\n");
+const wake = `FIRSTMATE WATCHER WAKE: signal: ${state}/live-1.turn-ended`;
+const handlers = new Map(); let tool = null; const attempts = []; let failed = false;
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m) {
+    if (!m.includes(wake)) return undefined;
+    attempts.push(m);
+    if (!failed) { failed = true; throw new Error("omp rejected the follow-up"); }
+    return undefined;
+  },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+const arms = () => (existsSync(`${state}/.arm-count`) ? Number(readFileSync(`${state}/.arm-count`, "utf8").trim() || 0) : 0);
+const deadline = Date.now() + 15000;
+while ((arms() < 3 || attempts.length < 2) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+await new Promise((r) => setTimeout(r, 500));
+if (attempts.length !== 2) throw new Error(`the failed wake must be re-sent exactly once by the duplicate close, saw ${attempts.length} attempt(s) after ${arms()} arm(s)`);
+const again = await tool.execute();
+if (!/^watcher: unchanged - omp extension already owns an arm child/.test(again.content[0].text)) throw new Error(`no live successor arm after the retried delivery: ${again.content[0].text}`);
+await handlers.get("session_shutdown")({}, {});
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch duplicate close retry: $out"
+  [ -z "$out" ] || fail "omp watch duplicate close retry test printed output: $out"
+  pass ".omp watch extension: a duplicate close re-drives a queued wake whose earlier delivery failed"
+}
+
+# A successor that closes with a copy of the wake a restoration is still
+# delivering must not leave the watcher dark once that delivery finishes.
+test_watch_extension_duplicate_close_during_restoration_keeps_the_watcher_armed() {
+  local repo home out status
+  repo="$TMP_ROOT/dup-restoring/repo"; home="$TMP_ROOT/dup-restoring/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  # The recovery watcher pid is dead and the handling confirmation is
+  # rejected, so delivery retires the successor mid-restoration, and that
+  # successor closes re-reporting the very wake being delivered.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --handling-delivered ] && exit 1
+state="${FM_HOME:?}/state"
+n=$(( $(cat "$state/.arm-count" 2>/dev/null || echo 0) + 1 ))
+printf '%s\n' "$n" > "$state/.arm-count"
+[ "$n" = 2 ] && trap 'kill "$sleeper"; printf "signal: %s/live-1.turn-ended\n" "$state"; exit 0' TERM
+printf 'watcher: started pid=999999 (beacon 0s) recovery-generation=gen-%s\n' "$n"
+if [ "$n" = 1 ]; then
+  sleep 1
+  printf 'signal: %s/live-1.turn-ended\n' "$state"
+  exit 0
+fi
+sleep 30 &
+sleeper=$!
+wait "$sleeper"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
+const state = `${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+writeFileSync(`${state}/live-1.meta`, "kind=ship\n");
+const wake = `FIRSTMATE WATCHER WAKE: signal: ${state}/live-1.turn-ended`;
+const handlers = new Map(); let tool = null; const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m) { if (m.includes(wake)) sent.push(m); return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+const arms = () => (existsSync(`${state}/.arm-count`) ? Number(readFileSync(`${state}/.arm-count`, "utf8").trim() || 0) : 0);
+const deadline = Date.now() + 15000;
+while (arms() < 3 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+if (arms() < 3) throw new Error(`a duplicate close during restoration left the watcher dark after ${arms()} arm(s)`);
+await new Promise((r) => setTimeout(r, 500));
+if (sent.length !== 1) throw new Error(`the wake must be delivered exactly once, saw ${sent.length}`);
+const again = await tool.execute();
+if (!/^watcher: unchanged - omp extension already owns an arm child/.test(again.content[0].text)) throw new Error(`no live successor arm after the restoration: ${again.content[0].text}`);
+await handlers.get("session_shutdown")({}, {});
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch duplicate close during restoration: $out"
+  [ -z "$out" ] || fail "omp watch duplicate close during restoration test printed output: $out"
+  pass ".omp watch extension: a duplicate close while a restoration delivers still leaves a successor arm"
+}
+
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
@@ -654,3 +1036,9 @@ test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
+test_watch_extension_handoff_drops_wakes_for_torn_down_tasks
+test_watch_extension_handoff_collapses_duplicates_and_stays_bounded
+test_watch_extension_handoff_replays_a_live_undelivered_wake
+test_watch_extension_retired_close_keeps_the_watcher_armed
+test_watch_extension_duplicate_close_retries_a_failed_delivery
+test_watch_extension_duplicate_close_during_restoration_keeps_the_watcher_armed
