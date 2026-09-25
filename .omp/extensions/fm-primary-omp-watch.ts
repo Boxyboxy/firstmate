@@ -1088,12 +1088,12 @@ export default function (pi: ExtensionAPI) {
         const awaitingDelivery = enqueuePendingActionable(owner, pending);
         if (!generationIsLive(owner)) return;
         owner.retryFailures = 0;
-        if (awaitingDelivery) {
-          void processPendingActionables(owner);
-          return;
-        }
         if (owner.restoring) {
           owner.deferredClose = { message: classification.message, predecessorArmPid: predecessor };
+          return;
+        }
+        if (awaitingDelivery) {
+          void processPendingActionables(owner);
           return;
         }
         const successor = startArm(owner, predecessor);

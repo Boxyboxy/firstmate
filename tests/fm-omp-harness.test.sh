@@ -960,6 +960,70 @@ EOF
   pass ".omp watch extension: a duplicate close re-drives a queued wake whose earlier delivery failed"
 }
 
+# A successor that closes with a copy of the wake a restoration is still
+# delivering must not leave the watcher dark once that delivery finishes.
+test_watch_extension_duplicate_close_during_restoration_keeps_the_watcher_armed() {
+  local repo home out status
+  repo="$TMP_ROOT/dup-restoring/repo"; home="$TMP_ROOT/dup-restoring/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  # The recovery watcher pid is dead and the handling confirmation is
+  # rejected, so delivery retires the successor mid-restoration, and that
+  # successor closes re-reporting the very wake being delivered.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --handling-delivered ] && exit 1
+state="${FM_HOME:?}/state"
+n=$(( $(cat "$state/.arm-count" 2>/dev/null || echo 0) + 1 ))
+printf '%s\n' "$n" > "$state/.arm-count"
+[ "$n" = 2 ] && trap 'kill "$sleeper"; printf "signal: %s/live-1.turn-ended\n" "$state"; exit 0' TERM
+printf 'watcher: started pid=999999 (beacon 0s) recovery-generation=gen-%s\n' "$n"
+if [ "$n" = 1 ]; then
+  sleep 1
+  printf 'signal: %s/live-1.turn-ended\n' "$state"
+  exit 0
+fi
+sleep 30 &
+sleeper=$!
+wait "$sleeper"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
+const state = `${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+writeFileSync(`${state}/live-1.meta`, "kind=ship\n");
+const wake = `FIRSTMATE WATCHER WAKE: signal: ${state}/live-1.turn-ended`;
+const handlers = new Map(); let tool = null; const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m) { if (m.includes(wake)) sent.push(m); return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+const arms = () => (existsSync(`${state}/.arm-count`) ? Number(readFileSync(`${state}/.arm-count`, "utf8").trim() || 0) : 0);
+const deadline = Date.now() + 15000;
+while (arms() < 3 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+if (arms() < 3) throw new Error(`a duplicate close during restoration left the watcher dark after ${arms()} arm(s)`);
+await new Promise((r) => setTimeout(r, 500));
+if (sent.length !== 1) throw new Error(`the wake must be delivered exactly once, saw ${sent.length}`);
+const again = await tool.execute();
+if (!/^watcher: unchanged - omp extension already owns an arm child/.test(again.content[0].text)) throw new Error(`no live successor arm after the restoration: ${again.content[0].text}`);
+await handlers.get("session_shutdown")({}, {});
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch duplicate close during restoration: $out"
+  [ -z "$out" ] || fail "omp watch duplicate close during restoration test printed output: $out"
+  pass ".omp watch extension: a duplicate close while a restoration delivers still leaves a successor arm"
+}
+
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
@@ -977,3 +1041,4 @@ test_watch_extension_handoff_collapses_duplicates_and_stays_bounded
 test_watch_extension_handoff_replays_a_live_undelivered_wake
 test_watch_extension_retired_close_keeps_the_watcher_armed
 test_watch_extension_duplicate_close_retries_a_failed_delivery
+test_watch_extension_duplicate_close_during_restoration_keeps_the_watcher_armed
