@@ -66,6 +66,8 @@ A main follow-up counts as delivered once Pi accepts it, never once the model re
 The reason is that a follow-up queued while main is streaming joins the running run without a `before_agent_start`.
 The extension header owns how consumption is observed and why it only decides what a replacement replays.
 
+That store is bounded rather than append-only, and the extension header's "Handoff retention" section owns the liveness, identity, and bound rules that retire a record instead of replaying it forever.
+
 ### omp session replacement
 
 omp's replacement follows its own generation-owner contract in `.omp/extensions/fm-primary-omp-watch.ts`, whose header owns its differences from Pi:
@@ -413,14 +415,16 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 The guard and session-start suites prove that active generation evidence tolerates a fresh-beacon handoff.
 They also prove that a legacy or handoff-phase watcher marker from an absent replacement extension still raises the outage diagnostic.
 
-### omp watch extension
+### Replacement handoff retention
 
-`tests/fm-omp-harness.test.sh` covers the omp replacement handoff's retention rules:
+`tests/fm-omp-harness.test.sh` and `tests/fm-pi-watch-extension.test.sh` each cover their extension's replacement-handoff retention rules:
 
 - A stored wake whose every named task has lost its `state/<id>.meta` is dropped at load and never delivered.
 - Identical undelivered wakes collapse to one, however many arm closes minted them.
 - The record bound and the age cut-off drop the oldest first.
 - A live task's undelivered wake still survives a session replacement and is replayed.
+- An arm close whose wake is retired as dead or duplicate still starts a successor arm, including while a restoration is delivering, so retiring a record never leaves supervision dark.
+- A duplicate close re-drives a queued wake whose earlier delivery failed instead of stranding it.
 
 ### Arm, recovery, triage, and lock suites
 
