@@ -22,7 +22,11 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
+#                 "LOAD_GUARD: memory and CPU monitoring could not be armed - <reason>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#          On every locked run, bin/fm-load-guard.sh arm converges this home to
+#          an armed memory and CPU load guard, or to disarmed when
+#          config/load-guard is off; an already-armed home is not rewritten.
 #          When a RUNNING secondmate home is fast-forwarded, its target is
 #          firstmate's own current default-branch commit. A local worktree uses
 #          a purely local fast-forward with no origin fetch; a remote route hands
@@ -1582,6 +1586,16 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     && [ -d "$DATA" ] && [ -x "$SCRIPT_DIR/fm-contributions.sh" ]; then
     "$SCRIPT_DIR/fm-contributions.sh" arm --if-owned >/dev/null \
       || echo "MISSING: contribution observation could not be armed; coverage is unconfirmed"
+  fi
+  # Converge every home to an armed memory and CPU load guard, or to disarmed
+  # when config/load-guard says off. Idempotent: an already-armed home is not
+  # rewritten. Local only, and locked like every other mutating sweep here.
+  if local_phase && [ -x "$SCRIPT_DIR/fm-load-guard.sh" ]; then
+    if ! load_guard_err=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-load-guard.sh" arm 2>&1 >/dev/null); then
+      load_guard_err=${load_guard_err//$'\n'/ }
+      echo "LOAD_GUARD: memory and CPU monitoring could not be armed - ${load_guard_err:-no reason given}"
+    fi
   fi
   if [ -n "$fleet_sync_pid" ]; then
     wait "$fleet_sync_pid" || true

@@ -11,7 +11,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Calm preference](#calm-preference-configcalm), and [load guard](#load-guard-configload-guard) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
@@ -1363,6 +1363,47 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 - So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 - A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## Load guard (config/load-guard)
+
+Every home watches this machine's memory and CPU through `bin/fm-load-guard.sh`, so the fleet sheds load before the captain's machine runs out of either.
+The locked session-start bootstrap arms it automatically and idempotently in every home, secondmate homes included, as `state/load-guard.check.sh` with its `bin/fm-check-register.sh` trust binding.
+The watcher then runs it on its normal `FM_CHECK_INTERVAL` cadence and turns its one line into a `check:` wake starting `load-guard:`.
+Registering the check is itself a reason to watch, so an armed home keeps a watcher even with no work under way.
+
+**What is measured**
+
+| Platform | Memory free | CPU idle |
+| --- | --- | --- |
+| macOS | `memory_pressure` system-wide free percentage | idle column of the measured (second) `iostat` sample |
+| Linux | `MemAvailable` / `MemTotal` from `/proc/meminfo` | idle plus iowait share between two `/proc/stat` samples |
+
+A metric that cannot be measured is unknown, and an unknown metric never wakes anyone and never refuses a spawn.
+Each probe is bounded to `FM_LOAD_GUARD_SAMPLE_SECS` (default 1, valid 1..5) plus 4 seconds, well inside `FM_CHECK_TIMEOUT`.
+
+**The file**
+
+`config/load-guard` is optional, local, and per home; it is not inherited by secondmate homes.
+It holds one setting per line, `#` starts a comment, and blank lines are ignored.
+
+| Line | Default | Effect |
+| --- | --- | --- |
+| `off` | absent | Disables the wake, the spawn gate, and arming; the next session start disarms the check. |
+| `memory_free_alert_pct=<1..99>` | 25 | Wake when memory free is below this percentage. |
+| `cpu_idle_alert_pct=<1..99>` | 10 | Wake when CPU idle is below this percentage. |
+| `memory_free_spawn_floor_pct=<0..99>` | 15 | `bin/fm-spawn.sh` refuses a new launch below this memory free percentage; `0` never refuses; must not exceed the memory alert threshold. |
+| `remind_secs=<0 or 60..86400>` | 1800 | Remind at most this often while a high-load episode persists; `0` wakes only when an episode starts or worsens. |
+
+A malformed file keeps every default, and the check reports the problem once until the file changes; `off` is honored even in a malformed file.
+`FM_LOAD_GUARD=off` in the environment has the same effect as the `off` line.
+
+**Repeat reporting and spawns**
+
+- `state/.load-guard` records the current high-load episode, so a sustained condition wakes when it starts, when another metric joins it, and once per `remind_secs`, never on every poll.
+- A metric that cannot be measured on one poll keeps its recorded state, and the episode ends on the first poll on which no measured metric is crossed.
+- `bin/fm-spawn.sh` reads `bin/fm-load-guard.sh status` before every local launch: a crossed threshold prints a warning, and memory free below the spawn floor refuses a fresh launch unless `FM_LOAD_GUARD_OVERRIDE=<reason>` is set, which the task record keeps as `load_guard_override`.
+- A relaunch only warns, because it replaces a worker that already exists.
+- `bin/fm-load-guard.sh disarm` retires the check by hand; without `off` in this file, the next session start arms it again.
+
 ## Mail plane (.env)
 
 The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.
@@ -2262,6 +2303,9 @@ FM_MAIL_TIMEOUT=20   # mail-plane IMAP/SMTP socket timeout in seconds; invalid o
 FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 probes on every run, other values must be 60..86400
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
+FM_LOAD_GUARD=           # "off" disables the memory and CPU load guard, its spawn gate, and arming, like an "off" line in config/load-guard
+FM_LOAD_GUARD_OVERRIDE=  # reason that lets fm-spawn.sh launch below the load guard's memory spawn floor; recorded as load_guard_override in the task record
+FM_LOAD_GUARD_SAMPLE_SECS=1   # 1..5 seconds between the two CPU samples the load guard takes
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims

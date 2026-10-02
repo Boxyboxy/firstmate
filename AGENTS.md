@@ -92,6 +92,7 @@ config/wedge-defer-parked-gate  optional presence flag opting this home into the
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/watched-tools.json  optional list of the tools this home depends on, read by the update check armed with bin/fm-tool-update-check.sh; LOCAL, gitignored, firstmate-maintained but human-editable, and NOT inherited by secondmate homes; see docs/configuration.md "Watched tool updates"
+config/load-guard  optional memory and CPU load-guard thresholds or an "off" opt-out; LOCAL, gitignored, and not inherited; see docs/configuration.md "Load guard"
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -135,6 +136,7 @@ state/               runtime records and signals; gitignored
   x-watch.check.sh   generated Relay poll shim; present only when opted in (section 14)
   tool-updates.check.sh  generated watched-tool update poll shim and its .check-trust binding; present only after bin/fm-tool-update-check.sh arm; its report record .tool-updates is what keeps one pending update from being reported on every poll
   mail.check.sh      generated received-mail poll shim and its .check-trust binding; present only after bin/fm-mail-check.sh arm; report record .mail-check (mail schema: docs/configuration.md "Mail plane")
+  load-guard.check.sh  generated memory and CPU load-guard shim and its .check-trust binding, armed by every locked session start unless config/load-guard is off; episode record .load-guard keeps a sustained condition from waking every poll
   .mail-seen .mail-woken .mail-retry .mail-retry-pos .mail-turn .mail-seen.lock  mail-plane poll cursor, emission journal, transient-fetch retry set, retry-scan position, contended-slot turn flag, and overlapping-poll lock; written only by bin/fm-mail.sh (mail schema: docs/configuration.md "Mail plane")
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   procevent/         registered process-to-event sources, one private record per canonical source id; written only by bin/fm-procevent.sh, and their presence alone keeps supervision required (section 13)
@@ -461,6 +463,7 @@ Handle actionable wakes as follows:
 3. For `check:`, act on the named poll result, including merges, contribution signals, Relay events, process-to-event source results, and captain inbox notes; a handled inbox note is also acknowledged with `bin/fm-inbox.sh drain --ack <id>`, or it stays counted as still waiting for firstmate.
    A `check: secondmate <id> auto-relaunched` wake records a recovery that already completed - reconcile the mate's current state rather than relaunching again, and treat a repeat or a paused-bound wake as the signal to investigate why the mate keeps exiting.
    When the note needs a durable answer the submitter can read, publish it with `bin/fm-inbox.sh reply <id>` (the script header owns the reply contract) rather than leaving the answer only in this transcript.
+   A `check:` line starting `load-guard:` means this machine is short of memory or CPU: load `housekeeping` and follow its load-guard section before spawning more work.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
 Load `bearings` on a contributions check wake or when filing work linked to an upstream issue; its contribution-follow-up section owns triage and exact signal acknowledgement.

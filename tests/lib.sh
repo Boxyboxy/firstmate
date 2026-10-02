@@ -33,6 +33,12 @@ FM_TEST_LIB_SOURCED=1
 # suite's fixtures were written against.
 umask 022
 
+# Pin the memory and CPU load guard off. Otherwise every fixture spawn would
+# read this host's real load - refusing whenever the developer's machine is
+# short of memory - and every fixture bootstrap would arm a real check in its
+# scratch home. tests/fm-load-guard.test.sh unsets it to exercise the guard.
+export FM_LOAD_GUARD=off
+
 # Fixture Git isolation for every suite that reaches this library; the helper's
 # header owns the invariant and the layers it deliberately leaves in force.
 # shellcheck source=tests/git-config-helpers.sh
