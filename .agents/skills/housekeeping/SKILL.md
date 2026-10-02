@@ -129,6 +129,6 @@ It means this machine is short of memory or CPU right now, so respond before doi
 3. Never kill or signal a process this home does not own, and never kill by name or pattern.
    Stopping one of this home's own workers goes through `bin/fm-control.sh`, never a direct kill, and never discards unlanded work.
 4. When the load is not the fleet's, tell the captain plainly which processes are using the memory or CPU, and that the fleet is holding back rather than adding to it.
-5. Lift the throttle and release held spawns once the guard stops reporting and `bin/fm-load-guard.sh status` shows the reading back under its thresholds.
+5. Lift the throttle and release held spawns once the guard stops reporting and `bin/fm-load-guard.sh status` prints `verdict=ok`.
 
 A wake that names `config/load-guard` as invalid is a configuration problem rather than load: report the named error so the file can be corrected.

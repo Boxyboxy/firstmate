@@ -1392,9 +1392,9 @@ It holds one setting per line, `#` starts a comment, and blank lines are ignored
 | `cpu_idle_alert_pct=<1..99>` | 10 | Wake when CPU idle is below this percentage. |
 | `memory_free_spawn_floor_pct=<0..99>` | 15 | `bin/fm-spawn.sh` refuses a new launch below this memory free percentage; `0` never refuses; must not exceed the memory alert threshold. |
 | `remind_secs=<0 or 60..86400>` | 1800 | Remind at most this often while a high-load episode persists; `0` wakes only when an episode starts or worsens. |
-| `clear_secs=<0 or 60..86400>` | 900 | A metric leaves a high-load episode, and memory counts as back above the spawn floor, only after it has been measured clear for this long; `0` takes the first clear poll. |
+| `clear_secs=<0 or 60..86400>` | 900 | For wakes, a metric leaves a high-load episode, and memory counts as back above the spawn floor, only after it has been measured clear for this long; `0` takes the first clear poll. |
 
-A malformed file keeps every default, and the check reports the problem once until the file changes; `off` is honored even in a malformed file.
+A malformed file keeps every default, and the check reports the problem once, then again only when the reported problem changes; `off` is honored even in a malformed file.
 `FM_LOAD_GUARD=off` in the environment has the same effect as the `off` line.
 
 **Repeat reporting and spawns**
@@ -1408,6 +1408,7 @@ A malformed file keeps every default, and the check reports the problem once unt
 - Memory falling below the spawn floor inside an episode sends its own wake, once per crossing, because new spawns are refused from then on.
   The record holds that state until memory has been measured at or above the floor for `clear_secs`, so a sustained or hovering reading does not wake again, and a later fall after such a recovery does.
 - `bin/fm-spawn.sh` reads `bin/fm-load-guard.sh status` before every local launch: a crossed threshold prints a warning, and memory free below the spawn floor refuses new work unless `FM_LOAD_GUARD_OVERRIDE=<reason>` is set, which the task record keeps as `load_guard_override`.
+  That reading is a fresh measurement: the episode record and `clear_secs` shape wakes only, so a refusal lifts as soon as memory is measured at or above the floor.
 - Recovery of a task that already exists is never refused and only warns, because it replaces a worker rather than adding one.
   That covers `--relaunch` and every launch of an id whose task record is already in the home, which is how a dead secondmate is respawned by the liveness sweep or by hand.
 - `bin/fm-load-guard.sh disarm` retires the check by hand; without `off` in this file, the next session start arms it again.
@@ -2311,10 +2312,10 @@ FM_MAIL_TIMEOUT=20   # mail-plane IMAP/SMTP socket timeout in seconds; invalid o
 FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 probes on every run, other values must be 60..86400
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
+FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
 FM_LOAD_GUARD=           # "off" disables the memory and CPU load guard, its spawn gate, and arming, like an "off" line in config/load-guard
 FM_LOAD_GUARD_OVERRIDE=  # reason that lets fm-spawn.sh launch below the load guard's memory spawn floor; recorded as load_guard_override in the task record
 FM_LOAD_GUARD_SAMPLE_SECS=1   # 1..5 seconds between the two CPU samples the load guard takes
-FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_PROCEVENT_OWNER_LEASE_SECONDS=600    # how long a source runner keeps going with no activity in its owning home; 1..86400
