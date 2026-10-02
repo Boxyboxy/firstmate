@@ -45,9 +45,13 @@ The adapter branch's own contents were retired by captain ruling and the branch 
 `main`, because `main` had already absorbed omp support more completely than the branch had: the
 primary-side watcher bridge `.omp/extensions/fm-primary-omp-watch.ts`, the tracked worker posture
 overlay, and the omp adapter reference under the harness-adapters skill all live upstream.
-What sits on the branch above `main` is therefore a thin, deliberately small omp layer: the
-`config/omp-max-time` runtime bound, `bin/fm-omp-update.sh` with its `/updatefirstmate` step, and
-this skill.
+What sits on the branch above `main` is therefore a thin, deliberately small layer: the
+`config/omp-max-time` runtime bound, `bin/fm-omp-update.sh` with its `/updatefirstmate` step and
+its stopped-fleet gate, this skill, the generated ship brief's work-in-progress checkpoint rule, and a
+few captain-requested additions that are harness-neutral and candidates to land upstream - the
+`/housekeeping` skill with `bin/fm-housekeeping.sh`, the memory and CPU load guard
+(`bin/fm-load-guard.sh` and its spawn gate), the `adjudicate-review-outcomes` skill, the bounded
+omp and Pi replacement-handoff replay, and the file-fed contribution-input assembly.
 Keep it that way.
 If a sweep's merge starts producing structural conflicts across spawn, PR-merge, teardown or the
 turn-end guard, that is the signal that omp work has been reimplemented on the branch instead of
