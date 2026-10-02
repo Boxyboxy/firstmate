@@ -141,6 +141,13 @@
 #   even when they select different backends. A fresh spawn first takes the
 #   per-home task-set lock and refuses rather than waits when forced teardown owns
 #   it; relaunch is exempt because the existing task's control lock covers it.
+#   Every local launch then reads `fm-load-guard.sh status`: a crossed memory or
+#   CPU threshold warns, and memory free below the load guard's spawn floor
+#   refuses a fresh launch unless FM_LOAD_GUARD_OVERRIDE=<reason> is set, which
+#   is recorded as load_guard_override; an unknown reading never refuses, and
+#   recovery of a task that already exists - a --relaunch, or any launch of an
+#   id whose task record is already here, such as a dead secondmate's respawn -
+#   only warns (docs/configuration.md "Load guard").
 #   A fresh Treehouse-backed spawn also takes the project-identity lock in the local
 #   root Firstmate home's state directory before slot allocation and holds it through
 #   task metadata publication. Teardown holds that same lock while proving and
@@ -1612,6 +1619,53 @@ if [ "$KIND" = secondmate ]; then
   fi
   [ "$remote_spawn_rc" -eq 3 ] || exit "$remote_spawn_rc"
 fi
+# Load guard (bin/fm-load-guard.sh owns measurement, thresholds, and the off
+# switch): every local launch reads it first. A crossed threshold warns; memory
+# free below the spawn floor refuses a fresh launch unless
+# FM_LOAD_GUARD_OVERRIDE carries a reason, which the task record keeps as
+# load_guard_override. An unmeasurable or unreadable reading never refuses.
+# Only NEW work is ever refused: recovering a task that already exists replaces
+# a worker rather than adding one, so it only warns. That covers --relaunch and
+# every launch of an id whose task record is already in this home, which is how
+# a dead secondmate is respawned (bin/fm-secondmate-liveness-lib.sh); refusing
+# that respawn would ledger failed attempts and park its auto-recovery.
+# A remote secondmate has already returned above; this host's load is not its.
+LOAD_GUARD_OVERRIDE_REASON=
+spawn_recovers_existing_task() {
+  [ "$RELAUNCH" -eq 1 ] || [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]
+}
+spawn_load_guard() {
+  local reading verdict summary floor config_error override
+  [ -x "$SCRIPT_DIR/fm-load-guard.sh" ] || return 0
+  reading=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-load-guard.sh" status 2>/dev/null) || return 0
+  verdict=$(printf '%s\n' "$reading" | sed -n 's/^verdict=//p')
+  summary=$(printf '%s\n' "$reading" | sed -n 's/^summary=//p')
+  floor=$(printf '%s\n' "$reading" | sed -n 's/^memory_free_spawn_floor_pct=//p')
+  config_error=$(printf '%s\n' "$reading" | sed -n 's/^config_error=//p')
+  [ -z "$config_error" ] || echo "warning: load guard $config_error" >&2
+  case "$verdict" in
+    alert)
+      echo "warning: this machine is under load ($summary); launching $ID adds to it - throttle workers and hold further spawns until it clears (bin/fm-load-guard.sh)" >&2
+      ;;
+    refuse)
+      if spawn_recovers_existing_task; then
+        echo "warning: memory is below the load guard's spawn floor of ${floor}% free ($summary); launching $ID anyway because it recovers a task that already exists (bin/fm-load-guard.sh)" >&2
+        return 0
+      fi
+      override=$(printf '%s' "${FM_LOAD_GUARD_OVERRIDE:-}" | tr '\n\r\t' '   ' | sed 's/^ *//; s/ *$//')
+      if [ -n "$override" ]; then
+        echo "warning: memory is below the load guard's spawn floor of ${floor}% free ($summary); launching $ID anyway under FM_LOAD_GUARD_OVERRIDE: $override" >&2
+        LOAD_GUARD_OVERRIDE_REASON=$override
+        return 0
+      fi
+      echo "error: spawn refused - memory is below the load guard's spawn floor of ${floor}% free ($summary); task $ID stays queued until memory recovers, or set FM_LOAD_GUARD_OVERRIDE=<reason> to launch anyway (bin/fm-load-guard.sh)" >&2
+      exit 1
+      ;;
+  esac
+  return 0
+}
+spawn_load_guard
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
 # default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
@@ -4763,6 +4817,7 @@ preserve_relaunch_meta() {
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
+  [ -z "$LOAD_GUARD_OVERRIDE_REASON" ] || echo "load_guard_override=$LOAD_GUARD_OVERRIDE_REASON"
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta
   fi

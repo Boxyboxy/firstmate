@@ -376,6 +376,39 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
 }
 
+# The spawn load guard refuses NEW work below its memory floor. A dead
+# secondmate dies exactly when memory is short, so its respawn must never be
+# refused: a refusal ledgers a failed attempt on every tick and parks
+# auto-recovery behind the bound. tests/lib.sh pins the guard off, so this case
+# turns it back on and feeds it a 10%-free reading through its own /proc seam.
+test_sweep_respawns_dead_secondmate_below_load_guard_spawn_floor() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-load-guard)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  mkdir -p "$w/proc"
+  printf 'MemTotal:       1000000 kB\nMemAvailable:   100000 kB\n' > "$w/proc/meminfo"
+
+  out=$(PATH="$tmuxfb:$fb:$BASE_PATH" env -u FM_LOAD_GUARD FM_HOME="$w/home" \
+    FM_LOAD_GUARD_PLATFORM=linux FM_LOAD_GUARD_PROC_DIR="$w/proc" \
+    "$ROOT/bin/fm-load-guard.sh" status)
+  assert_contains "$out" "verdict=refuse" "the fixture reading is not below the spawn floor"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" -u FM_LOAD_GUARD \
+    FM_LOAD_GUARD_PLATFORM=linux FM_LOAD_GUARD_PROC_DIR="$w/proc")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1" \
+    "a dead secondmate's respawn was not handled silently below the load guard's spawn floor"
+  assert_contains "$(cat "$log")" "new-window" \
+    "a dead secondmate was not relaunched below the load guard's spawn floor"
+  assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" \
+    "the relaunch ledger does not record a completed recovery"
+  assert_no_grep 'failed' "$w/home/state/.secondmate-relaunch-sm1" \
+    "the load guard ledgered a failed recovery attempt"
+  pass "sweep: a dead secondmate is respawned even when memory is below the load guard's spawn floor"
+}
+
 test_sweep_skips_mate_whose_liveness_lock_is_held() {
   local w fb tmuxfb log out holder i=0
   w=$(new_world sweep-lock-held)
@@ -707,6 +740,7 @@ test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_respawns_dead_secondmate_below_load_guard_spawn_floor
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
