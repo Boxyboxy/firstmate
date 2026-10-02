@@ -125,7 +125,7 @@ It means this machine is short of memory or CPU right now, so respond before doi
    Compare this home's live workers, from the structured fleet view, with the machine's top memory and CPU consumers, for example from `ps -axo pid,ppid,rss,%cpu,comm`.
    A worker counts as this home's only when its recorded endpoint or process tree ties it to a task this home owns.
 2. While the condition persists, throttle this home's own workers: tell each to run one job at a time and to start no helper agents or parallel subprocesses, and hold every new spawn.
-   `bin/fm-spawn.sh` already warns over a threshold and refuses below the memory floor; an override reason is for a launch the captain explicitly wants anyway, never a way around the hold.
+   `bin/fm-spawn.sh` already warns over a threshold and refuses new work below the memory floor, while recovery of a task that already exists only warns; an override reason is for a launch the captain explicitly wants anyway, never a way around the hold.
 3. Never kill or signal a process this home does not own, and never kill by name or pattern.
    Stopping one of this home's own workers goes through `bin/fm-control.sh`, never a direct kill, and never discards unlanded work.
 4. When the load is not the fleet's, tell the captain plainly which processes are using the memory or CPU, and that the fleet is holding back rather than adding to it.

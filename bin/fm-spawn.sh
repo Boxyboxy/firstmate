@@ -144,8 +144,10 @@
 #   Every local launch then reads `fm-load-guard.sh status`: a crossed memory or
 #   CPU threshold warns, and memory free below the load guard's spawn floor
 #   refuses a fresh launch unless FM_LOAD_GUARD_OVERRIDE=<reason> is set, which
-#   is recorded as load_guard_override; an unknown reading never refuses and a
-#   relaunch only warns (docs/configuration.md "Load guard").
+#   is recorded as load_guard_override; an unknown reading never refuses, and
+#   recovery of a task that already exists - a --relaunch, or any launch of an
+#   id whose task record is already here, such as a dead secondmate's respawn -
+#   only warns (docs/configuration.md "Load guard").
 #   A fresh Treehouse-backed spawn also takes the project-identity lock in the local
 #   root Firstmate home's state directory before slot allocation and holds it through
 #   task metadata publication. Teardown holds that same lock while proving and
@@ -1621,10 +1623,17 @@ fi
 # switch): every local launch reads it first. A crossed threshold warns; memory
 # free below the spawn floor refuses a fresh launch unless
 # FM_LOAD_GUARD_OVERRIDE carries a reason, which the task record keeps as
-# load_guard_override. An unmeasurable or unreadable reading never refuses, and
-# a relaunch only warns, because it replaces a worker that already exists.
+# load_guard_override. An unmeasurable or unreadable reading never refuses.
+# Only NEW work is ever refused: recovering a task that already exists replaces
+# a worker rather than adding one, so it only warns. That covers --relaunch and
+# every launch of an id whose task record is already in this home, which is how
+# a dead secondmate is respawned (bin/fm-secondmate-liveness-lib.sh); refusing
+# that respawn would ledger failed attempts and park its auto-recovery.
 # A remote secondmate has already returned above; this host's load is not its.
 LOAD_GUARD_OVERRIDE_REASON=
+spawn_recovers_existing_task() {
+  [ "$RELAUNCH" -eq 1 ] || [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]
+}
 spawn_load_guard() {
   local reading verdict summary floor config_error override
   [ -x "$SCRIPT_DIR/fm-load-guard.sh" ] || return 0
@@ -1640,8 +1649,8 @@ spawn_load_guard() {
       echo "warning: this machine is under load ($summary); launching $ID adds to it - throttle workers and hold further spawns until it clears (bin/fm-load-guard.sh)" >&2
       ;;
     refuse)
-      if [ "$RELAUNCH" -eq 1 ]; then
-        echo "warning: memory is below the load guard's spawn floor of ${floor}% free ($summary); relaunching $ID anyway because it replaces an existing worker (bin/fm-load-guard.sh)" >&2
+      if spawn_recovers_existing_task; then
+        echo "warning: memory is below the load guard's spawn floor of ${floor}% free ($summary); launching $ID anyway because it recovers a task that already exists (bin/fm-load-guard.sh)" >&2
         return 0
       fi
       override=$(printf '%s' "${FM_LOAD_GUARD_OVERRIDE:-}" | tr '\n\r\t' '   ' | sed 's/^ *//; s/ *$//')

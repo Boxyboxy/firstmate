@@ -36,7 +36,8 @@ umask 022
 # Pin the memory and CPU load guard off. Otherwise every fixture spawn would
 # read this host's real load - refusing whenever the developer's machine is
 # short of memory - and every fixture bootstrap would arm a real check in its
-# scratch home. tests/fm-load-guard.test.sh unsets it to exercise the guard.
+# scratch home. A case that exercises the guard unsets it and feeds the
+# guard's own measurement seams (tests/fm-load-guard.test.sh).
 export FM_LOAD_GUARD=off
 
 # Fixture Git isolation for every suite that reaches this library; the helper's

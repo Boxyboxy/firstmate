@@ -1392,6 +1392,7 @@ It holds one setting per line, `#` starts a comment, and blank lines are ignored
 | `cpu_idle_alert_pct=<1..99>` | 10 | Wake when CPU idle is below this percentage. |
 | `memory_free_spawn_floor_pct=<0..99>` | 15 | `bin/fm-spawn.sh` refuses a new launch below this memory free percentage; `0` never refuses; must not exceed the memory alert threshold. |
 | `remind_secs=<0 or 60..86400>` | 1800 | Remind at most this often while a high-load episode persists; `0` wakes only when an episode starts or worsens. |
+| `clear_secs=<0 or 60..86400>` | 900 | A metric leaves a high-load episode only after it has been measured clear for this long; `0` lets it leave on the first clear poll. |
 
 A malformed file keeps every default, and the check reports the problem once until the file changes; `off` is honored even in a malformed file.
 `FM_LOAD_GUARD=off` in the environment has the same effect as the `off` line.
@@ -1399,9 +1400,13 @@ A malformed file keeps every default, and the check reports the problem once unt
 **Repeat reporting and spawns**
 
 - `state/.load-guard` records the current high-load episode, so a sustained condition wakes when it starts, when another metric joins it, and once per `remind_secs`, never on every poll.
-- A metric that cannot be measured on one poll keeps its recorded state, and the episode ends on the first poll on which no measured metric is crossed.
-- `bin/fm-spawn.sh` reads `bin/fm-load-guard.sh status` before every local launch: a crossed threshold prints a warning, and memory free below the spawn floor refuses a fresh launch unless `FM_LOAD_GUARD_OVERRIDE=<reason>` is set, which the task record keeps as `load_guard_override`.
-- A relaunch only warns, because it replaces a worker that already exists.
+- A wake is only ever sent on a poll that measures a crossed metric, and a reminder that comes due on any other poll is sent on the next one that does.
+- A metric joins the episode the moment it is measured crossed and leaves only after it has been measured clear for `clear_secs`.
+  A reading that hovers around its threshold therefore stays one episode, rather than ending it and starting a new one on alternate polls.
+- A metric that cannot be measured on one poll keeps its recorded state, and the episode ends when no metric is left in it.
+- `bin/fm-spawn.sh` reads `bin/fm-load-guard.sh status` before every local launch: a crossed threshold prints a warning, and memory free below the spawn floor refuses new work unless `FM_LOAD_GUARD_OVERRIDE=<reason>` is set, which the task record keeps as `load_guard_override`.
+- Recovery of a task that already exists is never refused and only warns, because it replaces a worker rather than adding one.
+  That covers `--relaunch` and every launch of an id whose task record is already in the home, which is how a dead secondmate is respawned by the liveness sweep or by hand.
 - `bin/fm-load-guard.sh disarm` retires the check by hand; without `off` in this file, the next session start arms it again.
 
 ## Mail plane (.env)

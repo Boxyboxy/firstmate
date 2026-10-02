@@ -150,15 +150,89 @@ test_episode_alerts_once_then_reminds_then_ends() {
   out=$(guard "$home" check FM_LOAD_GUARD_NOW=12400)
   assert_contains "$out" "still high after 40m" "no reminder once remind_secs elapsed"
 
+  # Recovery is silent, and the episode ends only once the reading has stayed
+  # clear for clear_secs (default 900).
   set_linux "$home" 60 60
   out=$(guard "$home" check FM_LOAD_GUARD_NOW=12700)
   assert_equals '' "$out" "recovery printed a wake line"
-  assert_absent "$home/state/.load-guard" "recovery did not end the episode"
+  assert_present "$home/state/.load-guard" "the first clear poll ended the episode"
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=13300)
+  assert_equals '' "$out" "a still-clear poll printed a wake line"
+  assert_present "$home/state/.load-guard" "the episode ended before the reading stayed clear for clear_secs"
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=13600)
+  assert_equals '' "$out" "the end of an episode printed a wake line"
+  assert_absent "$home/state/.load-guard" "a reading clear for clear_secs did not end the episode"
 
   set_linux "$home" 20 60
-  out=$(guard "$home" check FM_LOAD_GUARD_NOW=13000)
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=13900)
   assert_contains "$out" "- high load" "a returning condition was not reported as a new episode"
-  pass "a sustained condition alerts at its start, when it worsens, and once per remind_secs, and ends on recovery"
+  pass "a sustained condition alerts at its start, when it worsens, and once per remind_secs, and ends after a sustained recovery"
+}
+
+# The reviewer's trace: CPU idle hovering around its 10% threshold on the 300s
+# poll cadence. Without a clear hold each dip below was a brand-new episode.
+test_oscillation_around_a_threshold_stays_one_episode() {
+  local home out now
+  home=$(make_home oscillate)
+  set_linux "$home" 60 5
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=40000)
+  assert_contains "$out" "CPU 5% idle (alert below 10%) - high load" "the episode did not start"
+
+  now=40300
+  while [ "$now" -lt 41500 ]; do
+    set_linux "$home" 60 11
+    out=$(guard "$home" check FM_LOAD_GUARD_NOW="$now")
+    assert_equals '' "$out" "a reading just clear of the threshold printed a wake line at $now"
+    set_linux "$home" 60 6
+    out=$(guard "$home" check FM_LOAD_GUARD_NOW="$((now + 300))")
+    assert_equals '' "$out" "a reading dipping back under the threshold re-alerted at $((now + 300))"
+    now=$((now + 600))
+  done
+
+  # remind_secs after the start, the poll happens to read clear: no wake, and
+  # the reminder is not lost - it goes out on the next crossed poll.
+  set_linux "$home" 60 11
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=41800)
+  assert_equals '' "$out" "a reminder was sent on a poll that measured nothing crossed"
+  set_linux "$home" 60 6
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=42100)
+  assert_contains "$out" "CPU 6% idle (alert below 10%) - still high after 35m" "an oscillating episode never sent its reminder"
+
+  # A second metric hovering around its own threshold joins once, not on every
+  # other poll.
+  set_linux "$home" 24 6
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=42400)
+  assert_contains "$out" "memory 24% free (alert below 25%), CPU 6% idle (alert below 10%) - load worsened" "a newly crossed metric was not news"
+  set_linux "$home" 26 6
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=42700)
+  assert_equals '' "$out" "a metric easing just over its threshold printed a wake line"
+  set_linux "$home" 24 6
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=43000)
+  assert_equals '' "$out" "a metric dipping back under its threshold was reported as worsening again"
+
+  # Clear for the whole of clear_secs ends it; the next crossing is a new episode.
+  set_linux "$home" 60 60
+  for now in 43300 43600 43900; do
+    out=$(guard "$home" check FM_LOAD_GUARD_NOW="$now")
+    assert_equals '' "$out" "a clear poll printed a wake line at $now"
+    assert_present "$home/state/.load-guard" "the episode ended at $now, before clear_secs of clear readings"
+  done
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=44200)
+  assert_equals '' "$out" "the end of the episode printed a wake line"
+  assert_absent "$home/state/.load-guard" "clear_secs of clear readings did not end the episode"
+  set_linux "$home" 60 5
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=44500)
+  assert_contains "$out" "- high load" "a crossing after the episode ended was not a new episode"
+
+  # clear_secs=0 opts back into ending on the first clear poll.
+  printf 'clear_secs=0\n' > "$home/config/load-guard"
+  set_linux "$home" 60 60
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=44800)
+  assert_absent "$home/state/.load-guard" "clear_secs=0 did not end the episode on the first clear poll"
+  printf 'clear_secs=30\n' > "$home/config/load-guard"
+  out=$(guard "$home" status)
+  assert_contains "$(field "$out" config_error)" "clear_secs must be 0 or 60..86400" "an out-of-range clear_secs was accepted"
+  pass "a reading hovering around a threshold stays one episode: no re-alert per poll, one reminder per remind_secs, and an end only after clear_secs of clear readings"
 }
 
 test_unmeasured_metric_keeps_the_episode() {
@@ -175,7 +249,19 @@ test_unmeasured_metric_keeps_the_episode() {
   set_linux "$home" 60 4
   out=$(guard "$home" check FM_LOAD_GUARD_NOW=20600)
   assert_equals '' "$out" "a CPU sample returning mid-episode re-alerted as a new episode"
-  pass "a metric that cannot be measured on one poll keeps its recorded episode state"
+
+  # The reminder comes due on a poll that cannot sample the crossed metric. It
+  # is not sent then, and it is not swallowed either: the next measured poll
+  # sends it instead of waiting another remind_secs.
+  cp "$home/proc/stat" "$home/proc/stat.later"
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=21800)
+  assert_equals '' "$out" "a reminder was sent on a poll that could not measure the crossed metric"
+  set_linux "$home" 60 4
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=22100)
+  assert_contains "$out" "CPU 4% idle (alert below 10%) - still high after 35m" "a reminder due on an unmeasured poll was dropped"
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=22400)
+  assert_equals '' "$out" "the reminder was sent twice"
+  pass "a metric that cannot be measured on one poll keeps its recorded episode state and never swallows a due reminder"
 }
 
 test_config_thresholds_off_and_malformed() {
@@ -330,13 +416,68 @@ test_spawn_warns_refuses_and_records_override() {
   pass "spawn warns over an alert threshold, refuses below the memory floor unless overridden with a recorded reason, and never refuses on an unknown reading"
 }
 
+# A secondmate home that passes spawn's home validation, as the liveness suite
+# builds it.
+make_secondmate_home() {  # <dir> <id>
+  local dir=$1 id=$2
+  mkdir -p "$dir/bin" "$dir/data" "$dir/state" "$dir/config" "$dir/projects"
+  printf '%s\n' "$id" > "$dir/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$dir/AGENTS.md"
+  printf 'charter\n' > "$dir/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$dir/.gitignore"
+  git -C "$dir" init -q -b main
+}
+
+spawn_secondmate_with_load() {  # <home> <secondmate-home> <fakebin> [fm-spawn args...]
+  local home=$1 sm=$2 fakebin=$3
+  shift 3
+  FM_LOAD_GUARD_PLATFORM=linux FM_LOAD_GUARD_PROC_DIR="$home/proc" \
+    FM_LOAD_GUARD_PROC_STAT_LATER="$home/proc/stat.later" \
+    fm_test_run_spawn "$home" "$sm" "$fakebin" "$@" --secondmate
+}
+
+# The gate refuses NEW work only. A dead secondmate is respawned with the same
+# `fm-spawn.sh <id> --secondmate` a first launch uses, and what tells them apart
+# is the task record already in the home.
+test_spawn_never_refuses_recovery_of_an_existing_task() {
+  local case_dir home fakebin sm out status
+  case_dir="$TMP_ROOT/spawn-recovery"
+  home="$case_dir/home"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
+  fm_test_spawn_home "$home" claude
+  mkdir -p "$home/proc"
+  set_linux "$home" 10 60
+  sm="$case_dir/sm-new"
+  make_secondmate_home "$sm" sm-new
+
+  out=$(spawn_secondmate_with_load "$home" "$sm" "$fakebin" sm-new "$sm")
+  status=$?
+  expect_code 1 "$status" "a brand-new secondmate below the spawn floor was not refused: $out"
+  assert_contains "$out" "error: spawn refused - memory is below the load guard's spawn floor of 15% free" "the new secondmate was not refused by the load guard"
+  assert_absent "$home/state/sm-new.meta" "a refused secondmate left a task record"
+
+  sm="$case_dir/sm-dead"
+  make_secondmate_home "$sm" sm-dead
+  fm_write_meta "$home/state/sm-dead.meta" "window=firstmate:fm-sm-dead" "kind=secondmate" \
+    "harness=claude" "home=$sm"
+  out=$(spawn_secondmate_with_load "$home" "$sm" "$fakebin" sm-dead)
+  status=$?
+  expect_code 0 "$status" "respawning an existing secondmate below the spawn floor was refused: $out"
+  assert_not_contains "$out" "spawn refused" "the respawn of an existing secondmate was refused"
+  assert_contains "$out" "launching sm-dead anyway because it recovers a task that already exists" "the recovery did not warn about the load"
+  assert_no_grep 'load_guard_override=' "$home/state/sm-dead.meta" "a recovery recorded an override it never needed"
+  pass "below the memory floor a new secondmate is refused, while the respawn of one that already has a task record only warns"
+}
+
 test_linux_parser_reads_meminfo_and_stat_deltas
 test_darwin_parser_reads_memory_pressure_and_measured_iostat_row
 test_unmeasurable_readings_never_alarm
 test_healthy_reading_is_silent
 test_episode_alerts_once_then_reminds_then_ends
+test_oscillation_around_a_threshold_stays_one_episode
 test_unmeasured_metric_keeps_the_episode
 test_config_thresholds_off_and_malformed
 test_arm_is_idempotent_executes_and_follows_off
 test_bootstrap_arms_every_home
 test_spawn_warns_refuses_and_records_override
+test_spawn_never_refuses_recovery_of_an_existing_task

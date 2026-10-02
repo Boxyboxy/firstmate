@@ -41,12 +41,16 @@
 # keeps the defaults and is reported once, never silently.
 #
 # Re-alert dedupe: state/.load-guard records the current high-load episode -
-# when it started, when it last alerted, and which metrics were crossed. The
-# check alerts when an episode starts, when a metric newly joins it, and then at
-# most once per remind_secs (default 1800, 0 = episode start only) while it
-# persists. A metric that is unknown on a poll keeps its recorded state rather
-# than ending or restarting the episode. The episode ends on the first poll on
-# which no measured metric is crossed.
+# when it started, when it last alerted, and which metrics are in it. The check
+# alerts when an episode starts, when a metric newly joins it, and then at most
+# once per remind_secs (default 1800, 0 = episode start only) while it persists,
+# and only on a poll that measures a crossed metric. A metric joins the episode
+# the moment it is measured crossed and leaves only after it has been measured
+# clear for clear_secs (default 900, 0 = the first clear poll), so a reading
+# that hovers around its threshold stays one episode instead of ending and
+# restarting it on alternate polls. A metric that is unknown on a poll keeps its
+# recorded state rather than leaving or rejoining the episode. The episode ends
+# when no metric is left in it.
 #
 # Test seams, never needed in a live home: FM_LOAD_GUARD_PLATFORM forces the
 # parser (darwin|linux), FM_LOAD_GUARD_PROC_DIR replaces /proc, and
@@ -97,6 +101,7 @@ DEFAULT_MEMORY_ALERT=25
 DEFAULT_CPU_ALERT=10
 DEFAULT_SPAWN_FLOOR=15
 DEFAULT_REMIND=1800
+DEFAULT_CLEAR=900
 
 SAMPLE_SECS=${FM_LOAD_GUARD_SAMPLE_SECS:-1}
 case "$SAMPLE_SECS" in
@@ -120,6 +125,7 @@ MEMORY_ALERT=$DEFAULT_MEMORY_ALERT
 CPU_ALERT=$DEFAULT_CPU_ALERT
 SPAWN_FLOOR=$DEFAULT_SPAWN_FLOOR
 REMIND=$DEFAULT_REMIND
+CLEAR=$DEFAULT_CLEAR
 
 # pct_in_range <value> <min> <max>: a plain whole number inside the range.
 pct_in_range() {
@@ -135,7 +141,7 @@ pct_in_range() {
 # because it is the one unambiguous thing the file can say.
 config_load() {
   local line key value min mem=$DEFAULT_MEMORY_ALERT cpu=$DEFAULT_CPU_ALERT
-  local floor=$DEFAULT_SPAWN_FLOOR remind=$DEFAULT_REMIND error=
+  local floor=$DEFAULT_SPAWN_FLOOR remind=$DEFAULT_REMIND clear=$DEFAULT_CLEAR error=
   [ "${FM_LOAD_GUARD:-}" != off ] || GUARD_OFF=1
   [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ] || return 0
   if [ ! -f "$CONFIG_FILE" ] || [ ! -r "$CONFIG_FILE" ]; then
@@ -169,12 +175,15 @@ config_load() {
           *) floor=$((10#$value)) ;;
         esac
         ;;
-      remind_secs)
-        if [ "$value" = 0 ] || pct_in_range "$value" 60 86400; then
-          remind=$((10#$value))
-        else
+      remind_secs | clear_secs)
+        if [ "$value" != 0 ] && ! pct_in_range "$value" 60 86400; then
           [ -n "$error" ] || error="$key must be 0 or 60..86400"
+          continue
         fi
+        case "$key" in
+          remind_secs) remind=$((10#$value)) ;;
+          *) clear=$((10#$value)) ;;
+        esac
         ;;
       *)
         [ -n "$error" ] || error="unrecognized key '$key'"
@@ -192,6 +201,7 @@ config_load() {
   CPU_ALERT=$cpu
   SPAWN_FLOOR=$floor
   REMIND=$remind
+  CLEAR=$clear
 }
 
 # --- measurement ------------------------------------------------------------
@@ -312,6 +322,8 @@ reading_summary() {
 REC_SINCE=
 REC_LAST=
 REC_CROSSED=
+REC_MEMORY_CLEAR_SINCE=
+REC_CPU_CLEAR_SINCE=
 REC_CONFIG_ERROR=
 
 record_read() {
@@ -319,6 +331,8 @@ record_read() {
   REC_SINCE=''
   REC_LAST=''
   REC_CROSSED=''
+  REC_MEMORY_CLEAR_SINCE=''
+  REC_CPU_CLEAR_SINCE=''
   REC_CONFIG_ERROR=''
   [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || return 0
   [ "$(head -n 1 "$RECORD" 2>/dev/null)" = "schema=$RECORD_SCHEMA" ] || return 0
@@ -327,6 +341,8 @@ record_read() {
       since) case "$value" in '' | *[!0-9]*) ;; *) REC_SINCE=$value ;; esac ;;
       last) case "$value" in '' | *[!0-9]*) ;; *) REC_LAST=$value ;; esac ;;
       crossed) case "$value" in memory | cpu | memory,cpu) REC_CROSSED=$value ;; esac ;;
+      memory_clear_since) case "$value" in '' | *[!0-9]*) ;; *) REC_MEMORY_CLEAR_SINCE=$value ;; esac ;;
+      cpu_clear_since) case "$value" in '' | *[!0-9]*) ;; *) REC_CPU_CLEAR_SINCE=$value ;; esac ;;
       config_error) REC_CONFIG_ERROR=$value ;;
     esac
   done < "$RECORD"
@@ -334,10 +350,12 @@ record_read() {
     REC_SINCE=''
     REC_LAST=''
     REC_CROSSED=''
+    REC_MEMORY_CLEAR_SINCE=''
+    REC_CPU_CLEAR_SINCE=''
   fi
 }
 
-record_write() {  # <since> <last> <crossed> <config-error>
+record_write() {  # <since> <last> <crossed> <config-error> <memory-clear-since> <cpu-clear-since>
   local tmp
   if [ -z "$1" ] && [ -z "$4" ]; then
     rm -f -- "$RECORD"
@@ -350,6 +368,8 @@ record_write() {  # <since> <last> <crossed> <config-error>
     printf 'schema=%s\n' "$RECORD_SCHEMA"
     if [ -n "$1" ]; then
       printf 'since=%s\nlast=%s\ncrossed=%s\n' "$1" "$2" "$3"
+      [ -z "$5" ] || printf 'memory_clear_since=%s\n' "$5"
+      [ -z "$6" ] || printf 'cpu_clear_since=%s\n' "$6"
     fi
     [ -z "$4" ] || printf 'config_error=%s\n' "$4"
   } > "$tmp" || ! mv -f -- "$tmp" "$RECORD"; then
@@ -365,6 +385,39 @@ has_metric() {  # <set> <metric>
   return 1
 }
 
+# episode_metric <metric> <reading> <alert-threshold> <recorded-clear-since> <now>
+# decides whether <metric> is in the episode after this poll. It joins the
+# moment it is measured crossed, and leaves only once it has been measured clear
+# for CLEAR seconds, so a reading hovering around its threshold neither ends the
+# episode nor rejoins it as news. A metric that could not be measured keeps the
+# state the record gave it, so one failed probe changes nothing.
+# Sets EP_HELD (1 = in the episode) and EP_CLEAR_SINCE (when a held metric was
+# first measured clear, empty while it is crossed).
+EP_HELD=0
+EP_CLEAR_SINCE=
+
+episode_metric() {
+  local metric=$1 reading=$2 threshold=$3 clear_since=$4 now=$5
+  EP_HELD=0
+  EP_CLEAR_SINCE=''
+  if [ -n "$reading" ] && [ "$reading" -lt "$threshold" ]; then
+    EP_HELD=1
+    return 0
+  fi
+  has_metric "$REC_CROSSED" "$metric" || return 0
+  if [ -z "$reading" ]; then
+    EP_HELD=1
+    EP_CLEAR_SINCE=$clear_since
+    return 0
+  fi
+  [ -n "$clear_since" ] && [ "$clear_since" -le "$now" ] || clear_since=$now
+  if [ "$((now - clear_since))" -lt "$CLEAR" ]; then
+    EP_HELD=1
+    EP_CLEAR_SINCE=$clear_since
+  fi
+  return 0
+}
+
 duration_phrase() {
   local secs=$1
   if [ "$secs" -ge 3600 ]; then
@@ -377,7 +430,7 @@ duration_phrase() {
 # --- actions ----------------------------------------------------------------
 
 action_check() {
-  local now crossed='' measured_crossed=0 alert='' line='' since last
+  local now crossed='' alert='' line='' since last memory_clear_since cpu_clear_since
   config_load
   if [ "$GUARD_OFF" -eq 1 ]; then
     rm -f -- "$RECORD"
@@ -387,39 +440,31 @@ action_check() {
   measure
   now=$(now_epoch)
 
-  # A metric that could not be measured keeps the state the record gave it, so
-  # one failed probe neither ends nor restarts an episode.
-  if memory_crossed; then
-    crossed=memory
-    measured_crossed=1
-  elif [ -z "$MEMORY_FREE" ] && has_metric "$REC_CROSSED" memory; then
-    crossed=memory
-  fi
-  if cpu_crossed; then
-    crossed=${crossed:+$crossed,}cpu
-    measured_crossed=1
-  elif [ -z "$CPU_IDLE" ] && has_metric "$REC_CROSSED" cpu; then
-    crossed=${crossed:+$crossed,}cpu
-  fi
+  episode_metric memory "$MEMORY_FREE" "$MEMORY_ALERT" "$REC_MEMORY_CLEAR_SINCE" "$now"
+  [ "$EP_HELD" -eq 0 ] || crossed=memory
+  memory_clear_since=$EP_CLEAR_SINCE
+  episode_metric cpu "$CPU_IDLE" "$CPU_ALERT" "$REC_CPU_CLEAR_SINCE" "$now"
+  [ "$EP_HELD" -eq 0 ] || crossed=${crossed:+$crossed,}cpu
+  cpu_clear_since=$EP_CLEAR_SINCE
 
+  # Never alarm on a carried or held state alone: something measured now must
+  # be crossed. The reminder clock moves only when a line is actually emitted,
+  # so a reminder that comes due on such a poll fires on the next crossed one.
   since=$REC_SINCE
   last=$REC_LAST
-  if [ -z "$crossed" ]; then
-    since=''
-    last=''
-  elif [ -z "$REC_CROSSED" ]; then
-    since=$now last=$now
-    alert="high load"
-  elif { memory_crossed && ! has_metric "$REC_CROSSED" memory; } \
-    || { cpu_crossed && ! has_metric "$REC_CROSSED" cpu; }; then
-    last=$now
-    alert="load worsened, high since $(duration_phrase "$((now - since))") ago"
-  elif [ "$REMIND" -gt 0 ] && [ "$((now - last))" -ge "$REMIND" ]; then
-    last=$now
-    alert="still high after $(duration_phrase "$((now - since))")"
+  if memory_crossed || cpu_crossed; then
+    if [ -z "$REC_CROSSED" ]; then
+      since=$now last=$now
+      alert="high load"
+    elif { memory_crossed && ! has_metric "$REC_CROSSED" memory; } \
+      || { cpu_crossed && ! has_metric "$REC_CROSSED" cpu; }; then
+      last=$now
+      alert="load worsened, high since $(duration_phrase "$((now - since))") ago"
+    elif [ "$REMIND" -gt 0 ] && [ "$((now - last))" -ge "$REMIND" ]; then
+      last=$now
+      alert="still high after $(duration_phrase "$((now - since))")"
+    fi
   fi
-  # Never alarm on a carried state alone: something measured now must be crossed.
-  [ "$measured_crossed" -eq 1 ] || alert=
 
   if [ -n "$alert" ]; then
     line="load-guard: $(reading_summary) - $alert"
@@ -435,7 +480,8 @@ action_check() {
     fi
   fi
   [ -z "$line" ] || printf '%s\n' "$line"
-  record_write "${crossed:+$since}" "${crossed:+$last}" "$crossed" "$CONFIG_ERROR" || true
+  record_write "${crossed:+$since}" "${crossed:+$last}" "$crossed" "$CONFIG_ERROR" \
+    "$memory_clear_since" "$cpu_clear_since" || true
   return 0
 }
 

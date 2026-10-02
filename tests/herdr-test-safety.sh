@@ -12,6 +12,9 @@ set -u
 # tests/lib.sh and bin/fm-gate-refuse-lib.sh for why firstmate's own suite,
 # which the no-mistakes gate runs from a gate worktree, must be exempt).
 export FM_GATE_REFUSE_BYPASS=1
+# Pinned off for the same reason tests/lib.sh pins it: a real fm-spawn would
+# otherwise read this host's memory and refuse whenever the machine is short.
+export FM_LOAD_GUARD=off
 
 HERDR_TEST_SAFETY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
