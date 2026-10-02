@@ -1359,6 +1359,8 @@ test_crewmate_scaffolds_forbid_pool_administration() {
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_grep 'blocked [at=<epoch>]: {what you need}' "$brief" \
       "$mode ship brief gave the prohibition no exit for a genuine second-checkout need"
+    assert_grep "Commit work in progress at natural boundaries so an unexpected stop cannot destroy uncommitted work." "$brief" \
+      "$mode ship brief missing the natural-boundary checkpoint instruction"
   done
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-pool-scout alpha --scout >/dev/null 2>&1 \
