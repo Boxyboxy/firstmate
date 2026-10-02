@@ -13,7 +13,7 @@
 # guarantee because it cannot replace the executable.
 #
 # Two entry points, and only one of them may install:
-#   - the LIVE update path, step 4 of the /updatefirstmate skill
+#   - the LIVE update path, step 5 of the /updatefirstmate skill
 #     (.agents/skills/updatefirstmate/SKILL.md), runs this with no arguments so
 #     the recurring refresh actually swaps omp once the gate says the fleet is
 #     stopped. That skill owns the operator-facing contract.

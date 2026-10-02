@@ -203,8 +203,11 @@
 #   markers (omp publishes none of its own), sets the Firstmate-owned
 #   FM_OMP_HARNESS=omp detection marker, suppresses the first-run provider
 #   wizard with OMP_SKIP_SETUP=1, forces --auto-approve, pins the working
-#   directory with --cwd, and passes the tracked worker posture overlay
-#   .omp/fm-worker-overlay.yml through --config. That overlay pins composer
+#   directory with --cwd, passes the tracked worker posture overlay
+#   .omp/fm-worker-overlay.yml through --config, and carries the
+#   config/omp-max-time runtime bound as --max-time (default 3h; `off` omits
+#   the flag; docs/configuration.md "omp worker runtime bound" owns the format
+#   and omp_max_time_flag below refuses a malformed file). That overlay pins composer
 #   shape, plan mode off, prewalk off, and the non-interactive usage-reserve
 #   policy for the one session only (--auto-approve alone owns approval); the
 #   captain's own ~/.omp/agent/config.yml (model roles, providers, theme) is
