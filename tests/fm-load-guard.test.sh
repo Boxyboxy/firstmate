@@ -235,6 +235,85 @@ test_oscillation_around_a_threshold_stays_one_episode() {
   pass "a reading hovering around a threshold stays one episode: no re-alert per poll, one reminder per remind_secs, and an end only after clear_secs of clear readings"
 }
 
+# The CPU episode is over once its clear hold runs out. Memory crossing on that
+# same poll is a new episode with its own start, not the old one getting worse.
+test_crossing_as_the_last_metric_leaves_starts_a_new_episode() {
+  local home out now
+  home=$(make_home expired)
+  set_linux "$home" 60 5
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=100000)
+  assert_contains "$out" "CPU 5% idle (alert below 10%) - high load" "the CPU episode did not start"
+  set_linux "$home" 60 60
+  for now in 100300 100600 100900; do
+    out=$(guard "$home" check FM_LOAD_GUARD_NOW="$now")
+    assert_equals '' "$out" "a clear poll printed a wake line at $now"
+  done
+
+  set_linux "$home" 20 60
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=101200)
+  assert_contains "$out" "load-guard: memory 20% free (alert below 25%), CPU 60% idle - high load" "a crossing after the earlier episode ran out was not a new episode"
+  assert_not_contains "$out" "worsened" "a crossing after the earlier episode ran out was reported as that episode worsening"
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=102700)
+  assert_equals '' "$out" "the reminder fired before remind_secs elapsed since the new episode started"
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=103000)
+  assert_contains "$out" "still high after 30m" "the reminder did not count from the new episode's start"
+
+  # While an earlier metric is still inside its hold, a new crossing does worsen it.
+  set_linux "$home" 60 60
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=103300)
+  set_linux "$home" 60 5
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=103600)
+  assert_contains "$out" "CPU 5% idle (alert below 10%) - load worsened, high since 40m ago" "a crossing while an earlier metric was still held did not worsen the episode"
+  pass "a metric crossing on the poll the last earlier one leaves starts a new episode with its own start time"
+}
+
+# Memory sinking from the alert band to below the spawn floor is news even
+# though nothing new crossed an alert threshold: spawns are now refused.
+# remind_secs=0 leaves this wake as the only way firstmate hears of it.
+test_memory_falling_below_the_spawn_floor_wakes_once_per_crossing() {
+  local home out now
+  home=$(make_home floor)
+  printf 'remind_secs=0\n' > "$home/config/load-guard"
+  set_linux "$home" 24 60
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=200000)
+  assert_contains "$out" "memory 24% free (alert below 25%), CPU 60% idle - high load" "the episode did not start"
+  assert_not_contains "$out" "new spawns refused" "a reading above the spawn floor claimed spawns are refused"
+
+  set_linux "$home" 10 60
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=200300)
+  assert_contains "$out" "load-guard: memory 10% free (alert below 25%), CPU 60% idle - memory fell below the spawn floor, high since 5m ago; new spawns refused below 15% free" "memory falling below the spawn floor mid-episode did not wake"
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "the wake was not exactly one line: $out"
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=200600)
+  assert_equals '' "$out" "a sustained below-floor reading woke again"
+
+  # Hovering around the floor is the same crossing, not a new one per dip.
+  set_linux "$home" 16 60
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=200900)
+  assert_equals '' "$out" "a reading easing just over the spawn floor printed a wake line"
+  set_linux "$home" 14 60
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=201200)
+  assert_equals '' "$out" "a reading dipping back under the spawn floor woke again"
+
+  # At or above the floor for clear_secs is a recovery; the next fall wakes again.
+  set_linux "$home" 20 60
+  for now in 201500 201800 202100 202400; do
+    out=$(guard "$home" check FM_LOAD_GUARD_NOW="$now")
+    assert_equals '' "$out" "a reading above the spawn floor printed a wake line at $now"
+  done
+  set_linux "$home" 10 60
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=202700)
+  assert_contains "$out" "memory fell below the spawn floor, high since 45m ago; new spawns refused below 15% free" "a fall below the spawn floor after a sustained recovery did not wake again"
+
+  # A failed memory probe neither clears nor re-announces the state.
+  rm -f "$home/proc/meminfo"
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=203000)
+  assert_equals '' "$out" "an unmeasured memory reading printed a wake line"
+  set_linux "$home" 10 60
+  out=$(guard "$home" check FM_LOAD_GUARD_NOW=203300)
+  assert_equals '' "$out" "memory returning below the floor after one unmeasured poll woke again"
+  pass "memory falling below the spawn floor mid-episode wakes once per crossing, not per poll or per dip, and again after a sustained recovery"
+}
+
 test_unmeasured_metric_keeps_the_episode() {
   local home out
   home=$(make_home carried)
@@ -475,6 +554,8 @@ test_unmeasurable_readings_never_alarm
 test_healthy_reading_is_silent
 test_episode_alerts_once_then_reminds_then_ends
 test_oscillation_around_a_threshold_stays_one_episode
+test_crossing_as_the_last_metric_leaves_starts_a_new_episode
+test_memory_falling_below_the_spawn_floor_wakes_once_per_crossing
 test_unmeasured_metric_keeps_the_episode
 test_config_thresholds_off_and_malformed
 test_arm_is_idempotent_executes_and_follows_off

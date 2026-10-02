@@ -50,7 +50,13 @@
 # that hovers around its threshold stays one episode instead of ending and
 # restarting it on alternate polls. A metric that is unknown on a poll keeps its
 # recorded state rather than leaving or rejoining the episode. The episode ends
-# when no metric is left in it.
+# when no metric is left in it, and a metric that crosses on the poll the last
+# earlier one leaves starts a new episode rather than worsening the old one.
+# Memory falling below the spawn floor inside an episode is news of its own,
+# because new spawns are refused from then on: it alerts once per crossing, and
+# the record holds that state until memory has been measured at or above the
+# floor for clear_secs, so a sustained or hovering reading does not re-alert and
+# a later fall after such a recovery does.
 #
 # Test seams, never needed in a live home: FM_LOAD_GUARD_PLATFORM forces the
 # parser (darwin|linux), FM_LOAD_GUARD_PROC_DIR replaces /proc, and
@@ -324,6 +330,8 @@ REC_LAST=
 REC_CROSSED=
 REC_MEMORY_CLEAR_SINCE=
 REC_CPU_CLEAR_SINCE=
+REC_BELOW_FLOOR=
+REC_FLOOR_CLEAR_SINCE=
 REC_CONFIG_ERROR=
 
 record_read() {
@@ -333,6 +341,8 @@ record_read() {
   REC_CROSSED=''
   REC_MEMORY_CLEAR_SINCE=''
   REC_CPU_CLEAR_SINCE=''
+  REC_BELOW_FLOOR=0
+  REC_FLOOR_CLEAR_SINCE=''
   REC_CONFIG_ERROR=''
   [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || return 0
   [ "$(head -n 1 "$RECORD" 2>/dev/null)" = "schema=$RECORD_SCHEMA" ] || return 0
@@ -343,6 +353,8 @@ record_read() {
       crossed) case "$value" in memory | cpu | memory,cpu) REC_CROSSED=$value ;; esac ;;
       memory_clear_since) case "$value" in '' | *[!0-9]*) ;; *) REC_MEMORY_CLEAR_SINCE=$value ;; esac ;;
       cpu_clear_since) case "$value" in '' | *[!0-9]*) ;; *) REC_CPU_CLEAR_SINCE=$value ;; esac ;;
+      below_floor) [ "$value" != 1 ] || REC_BELOW_FLOOR=1 ;;
+      floor_clear_since) case "$value" in '' | *[!0-9]*) ;; *) REC_FLOOR_CLEAR_SINCE=$value ;; esac ;;
       config_error) REC_CONFIG_ERROR=$value ;;
     esac
   done < "$RECORD"
@@ -353,9 +365,15 @@ record_read() {
     REC_MEMORY_CLEAR_SINCE=''
     REC_CPU_CLEAR_SINCE=''
   fi
+  if ! has_metric "$REC_CROSSED" memory; then
+    REC_BELOW_FLOOR=0
+    REC_FLOOR_CLEAR_SINCE=''
+  fi
 }
 
-record_write() {  # <since> <last> <crossed> <config-error> <memory-clear-since> <cpu-clear-since>
+# record_write <since> <last> <crossed> <config-error> <memory-clear-since>
+#   <cpu-clear-since> <below-floor 0|1> <floor-clear-since>
+record_write() {
   local tmp
   if [ -z "$1" ] && [ -z "$4" ]; then
     rm -f -- "$RECORD"
@@ -370,6 +388,8 @@ record_write() {  # <since> <last> <crossed> <config-error> <memory-clear-since>
       printf 'since=%s\nlast=%s\ncrossed=%s\n' "$1" "$2" "$3"
       [ -z "$5" ] || printf 'memory_clear_since=%s\n' "$5"
       [ -z "$6" ] || printf 'cpu_clear_since=%s\n' "$6"
+      [ "$7" != 1 ] || printf 'below_floor=1\n'
+      [ -z "$8" ] || printf 'floor_clear_since=%s\n' "$8"
     fi
     [ -z "$4" ] || printf 'config_error=%s\n' "$4"
   } > "$tmp" || ! mv -f -- "$tmp" "$RECORD"; then
@@ -385,35 +405,37 @@ has_metric() {  # <set> <metric>
   return 1
 }
 
-# episode_metric <metric> <reading> <alert-threshold> <recorded-clear-since> <now>
-# decides whether <metric> is in the episode after this poll. It joins the
-# moment it is measured crossed, and leaves only once it has been measured clear
-# for CLEAR seconds, so a reading hovering around its threshold neither ends the
-# episode nor rejoins it as news. A metric that could not be measured keeps the
-# state the record gave it, so one failed probe changes nothing.
-# Sets EP_HELD (1 = in the episode) and EP_CLEAR_SINCE (when a held metric was
-# first measured clear, empty while it is crossed).
-EP_HELD=0
-EP_CLEAR_SINCE=
+# threshold_hold <was-held 0|1> <reading> <threshold> <recorded-clear-since> <now>
+# decides whether a reading counts as under <threshold> after this poll. It is
+# held the moment it is measured under, and released only once it has been
+# measured clear for CLEAR seconds, so a reading hovering around the threshold
+# neither drops the state nor re-enters it as news. A reading that could not be
+# measured keeps the state the record gave it, so one failed probe changes
+# nothing. Both an alert threshold (is the metric in the episode) and the spawn
+# floor (is memory below it) are held this way.
+# Sets HOLD_HELD (1 = held) and HOLD_CLEAR_SINCE (when a held reading was first
+# measured clear, empty while it is under the threshold).
+HOLD_HELD=0
+HOLD_CLEAR_SINCE=
 
-episode_metric() {
-  local metric=$1 reading=$2 threshold=$3 clear_since=$4 now=$5
-  EP_HELD=0
-  EP_CLEAR_SINCE=''
+threshold_hold() {
+  local was_held=$1 reading=$2 threshold=$3 clear_since=$4 now=$5
+  HOLD_HELD=0
+  HOLD_CLEAR_SINCE=''
   if [ -n "$reading" ] && [ "$reading" -lt "$threshold" ]; then
-    EP_HELD=1
+    HOLD_HELD=1
     return 0
   fi
-  has_metric "$REC_CROSSED" "$metric" || return 0
+  [ "$was_held" -eq 1 ] || return 0
   if [ -z "$reading" ]; then
-    EP_HELD=1
-    EP_CLEAR_SINCE=$clear_since
+    HOLD_HELD=1
+    HOLD_CLEAR_SINCE=$clear_since
     return 0
   fi
   [ -n "$clear_since" ] && [ "$clear_since" -le "$now" ] || clear_since=$now
   if [ "$((now - clear_since))" -lt "$CLEAR" ]; then
-    EP_HELD=1
-    EP_CLEAR_SINCE=$clear_since
+    HOLD_HELD=1
+    HOLD_CLEAR_SINCE=$clear_since
   fi
   return 0
 }
@@ -431,6 +453,7 @@ duration_phrase() {
 
 action_check() {
   local now crossed='' alert='' line='' since last memory_clear_since cpu_clear_since
+  local was_memory=0 was_cpu=0 survived=0 below_floor=0 floor_clear_since=''
   config_load
   if [ "$GUARD_OFF" -eq 1 ]; then
     rm -f -- "$RECORD"
@@ -440,26 +463,47 @@ action_check() {
   measure
   now=$(now_epoch)
 
-  episode_metric memory "$MEMORY_FREE" "$MEMORY_ALERT" "$REC_MEMORY_CLEAR_SINCE" "$now"
-  [ "$EP_HELD" -eq 0 ] || crossed=memory
-  memory_clear_since=$EP_CLEAR_SINCE
-  episode_metric cpu "$CPU_IDLE" "$CPU_ALERT" "$REC_CPU_CLEAR_SINCE" "$now"
-  [ "$EP_HELD" -eq 0 ] || crossed=${crossed:+$crossed,}cpu
-  cpu_clear_since=$EP_CLEAR_SINCE
+  ! has_metric "$REC_CROSSED" memory || was_memory=1
+  ! has_metric "$REC_CROSSED" cpu || was_cpu=1
+  threshold_hold "$was_memory" "$MEMORY_FREE" "$MEMORY_ALERT" "$REC_MEMORY_CLEAR_SINCE" "$now"
+  if [ "$HOLD_HELD" -eq 1 ]; then
+    crossed=memory
+    survived=$was_memory
+  fi
+  memory_clear_since=$HOLD_CLEAR_SINCE
+  threshold_hold "$was_cpu" "$CPU_IDLE" "$CPU_ALERT" "$REC_CPU_CLEAR_SINCE" "$now"
+  if [ "$HOLD_HELD" -eq 1 ]; then
+    crossed=${crossed:+$crossed,}cpu
+    [ "$was_cpu" -eq 0 ] || survived=1
+  fi
+  cpu_clear_since=$HOLD_CLEAR_SINCE
+  # The spawn floor never exceeds the memory alert threshold, so memory below
+  # the floor is always in the episode, and the floor state lives and ends with
+  # memory's place in it.
+  if has_metric "$crossed" memory; then
+    threshold_hold "$REC_BELOW_FLOOR" "$MEMORY_FREE" "$SPAWN_FLOOR" "$REC_FLOOR_CLEAR_SINCE" "$now"
+    below_floor=$HOLD_HELD
+    floor_clear_since=$HOLD_CLEAR_SINCE
+  fi
 
   # Never alarm on a carried or held state alone: something measured now must
   # be crossed. The reminder clock moves only when a line is actually emitted,
   # so a reminder that comes due on such a poll fires on the next crossed one.
+  # An episode none of whose recorded metrics is still in it is over, so a
+  # crossing on that poll starts a new one instead of worsening the old one.
   since=$REC_SINCE
   last=$REC_LAST
   if memory_crossed || cpu_crossed; then
-    if [ -z "$REC_CROSSED" ]; then
+    if [ "$survived" -eq 0 ]; then
       since=$now last=$now
       alert="high load"
-    elif { memory_crossed && ! has_metric "$REC_CROSSED" memory; } \
-      || { cpu_crossed && ! has_metric "$REC_CROSSED" cpu; }; then
+    elif { memory_crossed && [ "$was_memory" -eq 0 ]; } \
+      || { cpu_crossed && [ "$was_cpu" -eq 0 ]; }; then
       last=$now
       alert="load worsened, high since $(duration_phrase "$((now - since))") ago"
+    elif below_spawn_floor && [ "$REC_BELOW_FLOOR" -eq 0 ]; then
+      last=$now
+      alert="memory fell below the spawn floor, high since $(duration_phrase "$((now - since))") ago"
     elif [ "$REMIND" -gt 0 ] && [ "$((now - last))" -ge "$REMIND" ]; then
       last=$now
       alert="still high after $(duration_phrase "$((now - since))")"
@@ -481,7 +525,7 @@ action_check() {
   fi
   [ -z "$line" ] || printf '%s\n' "$line"
   record_write "${crossed:+$since}" "${crossed:+$last}" "$crossed" "$CONFIG_ERROR" \
-    "$memory_clear_since" "$cpu_clear_since" || true
+    "$memory_clear_since" "$cpu_clear_since" "$below_floor" "$floor_clear_since" || true
   return 0
 }
 
