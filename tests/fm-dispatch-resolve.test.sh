@@ -150,8 +150,24 @@ cat "${QUOTA_AXI_FIXTURE:?}"
 SH
 chmod +x "$FAKEBIN/quota-axi"
 
+cat > "$FAKEBIN/omp" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${OMP_CALLS:?}"
+[ "${FAKE_OMP_FAIL:-0}" = 1 ] && exit 1
+case "$1" in
+  usage) cat "${OMP_USAGE_FIXTURE:?}" ;;
+  dry-balance) cat "${OMP_BALANCE_FIXTURE:?}" ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$FAKEBIN/omp"
+
 RESPONSE="$TMP_ROOT/response.json"
+OMP_USAGE_FIXTURE="$TMP_ROOT/omp-usage.json"
+OMP_BALANCE_FIXTURE="$TMP_ROOT/omp-balance.json"
 export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" QUOTA_AXI_CALLS="$LOG/quota-axi.calls" QUOTA_AXI_FIXTURE="$QUOTA" CHILD_ENV_LOG="$LOG/child-env"
+export OMP_CALLS="$LOG/omp.calls" OMP_USAGE_FIXTURE OMP_BALANCE_FIXTURE
 
 reset_log() {
   rm -rf "$LOG"
@@ -792,6 +808,62 @@ assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  -> eligible, unranked: provider codex has no quota row for account codex-home: disclosed uncertainty' "native Codex never infers an account from a Pi lane"
 assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex-work/gpt-5.6-terra'" "the lane with headroom is chosen"
 assert_equals '--json' "$(cat "$LOG/quota-axi.calls")" "schema 6 needs one quota-axi --json read"
+
+cat > "$RULES" <<'JSON'
+{"rules":[{"when":"x","use":[
+  {"harness":"omp","model":"anthropic/claude-sonnet-4-5","provider":"anthropic"},
+  {"harness":"cursor","model":"composer-1"}
+]}]}
+JSON
+cat > "$OMP_USAGE_FIXTURE" <<'JSON'
+{
+  "generatedAt": 1000,
+  "reports": [{
+    "provider": "anthropic",
+    "limits": [
+      {
+        "scope": {"provider": "anthropic", "windowId": "5h", "shared": true},
+        "window": {"durationMs": 1000, "resetsAt": 1500},
+        "amount": {"used": 20, "remaining": 80}
+      },
+      {
+        "scope": {"provider": "anthropic", "windowId": "7d", "shared": true},
+        "window": {"durationMs": 2000, "resetsAt": 2000},
+        "amount": {"used": 40, "remaining": 60}
+      }
+    ],
+    "metadata": {"email": "pool@example.com", "orgName": "Pool Org"}
+  }]
+}
+JSON
+cat > "$OMP_BALANCE_FIXTURE" <<'JSON'
+{
+  "model": "anthropic/claude-sonnet-4-5",
+  "provider": "anthropic",
+  "samples": 100,
+  "concurrency": 32,
+  "success": {
+    "total": 100,
+    "accounts": [{"account": "pool@example.com (Pool Org)", "count": 100, "percent": 100}]
+  },
+  "failure": {"total": 0, "reasons": []}
+}
+JSON
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6" run code out err "$BRIEF"
+expect_code 0 "$code" "omp Anthropic usage exits 0"
+assert_contains "$(cat "$LOG/omp.calls")" 'usage --json --provider anthropic' "resolver reads omp's own Anthropic usage"
+assert_contains "$(cat "$LOG/omp.calls")" 'dry-balance --json --model anthropic/claude-sonnet-4-5' "resolver checks the account omp can choose"
+assert_contains "$out" 'candidate: omp:anthropic/claude-sonnet-4-5  provider=anthropic  scope=model:claude-sonnet-4-5  remaining=60%  spendPriority=0.6667  runway=through_reset  -> eligible' "omp Anthropic uses its balanced account usage"
+assert_contains "$out" "  profile: --harness 'omp' --model 'anthropic/claude-sonnet-4-5'" "omp Anthropic outranks the quota-axi candidate"
+
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6" FAKE_OMP_FAIL=1 run code out err "$BRIEF"
+expect_code 0 "$code" "failed omp usage remains nonfatal"
+assert_contains "$out" 'candidate: omp:anthropic/claude-sonnet-4-5  provider=anthropic  -> eligible, unranked: provider anthropic not in the quota snapshot: disclosed uncertainty' "failed omp evidence stays eligible and unranked"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'composer-1'" "known evidence wins without borrowing Claude Code quota"
+pass "omp Anthropic candidates use omp account evidence and preserve uncertainty"
+cp "$LANE_RULES" "$RULES"
 
 SCHEMA6_NATIVE="$TMP_ROOT/schema6-native.json"
 jq '
