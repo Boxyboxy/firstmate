@@ -1182,7 +1182,7 @@ After the answer, code applies all remaining checks and ranking:
 - The confidence floor and the matched rule's `approval` and `floor`.
 - Each candidate's `provider` and `floor`.
 - Every applicable account-wide and model/product row from one `quota-axi --json` snapshot.
-- For an omp `anthropic/...` candidate, omp's own account pool from one `omp usage --json --provider anthropic` read and the accounts `omp dry-balance --json --model` selects for that model.
+- For an omp `anthropic/...` or `claude-*` candidate, omp's own account pool from one `omp usage --json --provider anthropic` read and the accounts `omp dry-balance --json --model` selects for that model.
 - The numeric `spendPriority` argmax over candidates, using each candidate's limiting row.
 
 The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and schema 6 and implements the [account-matching contract](../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility).

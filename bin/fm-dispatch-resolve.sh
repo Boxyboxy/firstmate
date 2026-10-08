@@ -25,7 +25,7 @@
 #   most probable other option that clears its own floor), the rule's declared
 #   `approval` and `floor`, each profile's declared `provider` and `floor`, the
 #   quota rows from ONE quota-axi --json snapshot (schema 5 or 6), and omp's own
-#   Anthropic account evidence for omp `anthropic/...` candidates. Each ordinary
+#   Anthropic account evidence for omp `anthropic/...` and `claude-*` candidates. Each ordinary
 #   candidate binds to one row through quota_row in bin/fm-quota-axi-lib.sh.
 #   An omp Anthropic candidate binds only to an `accountKey: omp` row derived
 #   from `omp usage --json --provider anthropic` and the accounts selected by
@@ -364,7 +364,11 @@ fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an inval
 OMP_ANTHROPIC_MODELS=$(jq -r '
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   ([((.rules // [])[]) | profiles(.use)[]] + profiles(.default // null))
-  | map(select(.harness == "omp" and ((.model // "") | startswith("anthropic/"))) | .model)
+  | map(select(.harness == "omp" and (
+      .provider == "anthropic" or
+      ((.model // "") | startswith("anthropic/")) or
+      ((.model // "") | startswith("claude-"))
+    )) | .model)
   | unique | .[]
 ' "$RULES")
 if [ -n "$OMP_ANTHROPIC_MODELS" ] && command -v omp >/dev/null 2>&1 \
@@ -373,12 +377,13 @@ if [ -n "$OMP_ANTHROPIC_MODELS" ] && command -v omp >/dev/null 2>&1 \
   while IFS= read -r model; do
     [ -n "$model" ] || continue
     if omp dry-balance --json --model "$model" > "$OMP_QUOTA" 2>/dev/null \
-      && jq -e --arg model "$model" '
-        type == "object" and .model == $model and .provider == "anthropic" and
+      && jq -e '
+        type == "object" and (.model | type) == "string" and (.model | length) > 0 and
+        .provider == "anthropic" and
         (.success.total | type) == "number" and (.success.accounts | type) == "array" and
         (.failure.total | type) == "number"
       ' "$OMP_QUOTA" >/dev/null 2>&1; then
-      jq -c . "$OMP_QUOTA" >> "$OMP_BALANCES"
+      jq -c --arg requestedModel "$model" '. + {requestedModel: $requestedModel}' "$OMP_QUOTA" >> "$OMP_BALANCES"
     fi
   done <<< "$OMP_ANTHROPIC_MODELS"
 
@@ -433,7 +438,7 @@ if [ -n "$OMP_ANTHROPIC_MODELS" ] && command -v omp >/dev/null 2>&1 \
            ($labels | length) == 0 or ($metrics | length) != ($labels | length) or any($metrics[]; . == null)
         then empty
         else {
-          scope: ("model:" + bare($balance.model)),
+          scope: ("model:" + bare($balance.requestedModel)),
           status: "known",
           effectivePercentRemaining: ($metrics | map(.pct) | min),
           runway: {status: (if any($metrics[]; .runway == "exhausted_now") then "exhausted_now"

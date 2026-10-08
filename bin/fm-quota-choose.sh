@@ -365,7 +365,7 @@ for c in "${CANDIDATES[@]}"; do
   [ -n "$model" ] || die "invalid candidate: $c"
   fm_control_harness_supported "$harness" || die "unknown harness: $harness"
   provider_for_harness "$harness" "$model" >/dev/null || case "$harness" in
-    omp) die "omp quota mapping covers only the anthropic, openai-codex, and claude-bridge prefixes: $model" ;;
+    omp) die "omp quota mapping covers only the Anthropic, openai-codex, and claude-bridge model families: $model" ;;
     *) die "unknown harness: $harness" ;;
   esac
 done
