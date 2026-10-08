@@ -373,7 +373,7 @@ function actionableTaskIds(message: string): string[] {
 
 function actionableStaleEndpoints(message: string): string[] {
   const endpoints: string[] = [];
-  for (const match of message.matchAll(/^stale:\s+(\S+)\s*$/gm)) endpoints.push(match[1]);
+  for (const match of message.matchAll(/^stale:[ \t]+(\S+)/gm)) endpoints.push(match[1]);
   return endpoints;
 }
 

@@ -996,6 +996,8 @@ pending.push(record(`signal: ${state}/live-1.inbox/001.msg`));
 // Pane-only stale wakes are live only while a task record names the endpoint.
 pending.push(record("stale: default:wGONE:p2"));
 pending.push(record("stale: default:wLIVE:p2"));
+pending.push(record("stale: default:wGONE-SUFFIX:p2 (idle 255s, last activity unchanged)"));
+pending.push(record("stale: default:wLIVE:p2 (herdr: agent blocked on prompt)"));
 // A wake that names no task at all cannot be proven dead and must survive.
 pending.push(record("check: inactive-outcome"));
 seedHandoff(pending);
@@ -1016,16 +1018,25 @@ const deadOnly = (message) => /gone-/i.test(message) && !/live-1/.test(message);
 if (stored.some((entry) => entry.message === "stale: default:wGONE:p2")) {
   throw new Error("a pane-only stale wake with no matching meta survived the load");
 }
+if (stored.some((entry) => entry.message.startsWith("stale: default:wGONE-SUFFIX:p2 "))) {
+  throw new Error("a suffixed stale wake with no matching meta survived the load");
+}
 if (!stored.some((entry) => entry.message === "stale: default:wLIVE:p2")) {
   throw new Error("a pane-only stale wake with matching meta was retired");
 }
-if (stored.length !== 5) throw new Error(`load must retain only the judgeable-live records, kept ${stored.length}`);
+if (!stored.some((entry) => entry.message.startsWith("stale: default:wLIVE:p2 (herdr:"))) {
+  throw new Error("a suffixed stale wake with matching meta was retired");
+}
+if (stored.length !== 6) throw new Error(`load must retain only the judgeable-live records, kept ${stored.length}`);
 if (stored.some((entry) => deadOnly(entry.message))) throw new Error("a wake naming only torn-down tasks survived the load");
 if (!stored.some((entry) => entry.message === "check: inactive-outcome")) throw new Error("a wake naming no task must survive the load");
 await new Promise((r) => setTimeout(r, 6000));
 if (sent.length === 0) throw new Error("the live records were never delivered");
 if (!sent.some((wake) => wake.m.includes("stale: default:wLIVE:p2"))) {
   throw new Error("a pane-only stale wake with matching meta was not delivered");
+}
+if (!sent.some((wake) => wake.m.includes("stale: default:wLIVE:p2 (herdr:"))) {
+  throw new Error("a suffixed stale wake with matching meta was not delivered");
 }
 for (const wake of sent) {
   if (deadOnly(wake.m)) throw new Error(`a wake for a torn-down task was delivered: ${wake.m}`);
