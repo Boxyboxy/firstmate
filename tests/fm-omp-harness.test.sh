@@ -944,7 +944,7 @@ export const record = (message, mintedAt) => ({
   message,
   predecessorArmPid: String(7000 + seq),
 });
-export const taskRecord = (id) => writeFileSync(`${state}/${id}.meta`, "kind=ship\n");
+export const taskRecord = (id, endpoint = `fm-${id}`) => writeFileSync(`${state}/${id}.meta`, `kind=ship\nwindow=${endpoint}\n`);
 export const ownLock = () => writeFileSync(`${state}/.lock`, `${process.pid}\n`);
 export const seedHandoff = (pending) => writeFileSync(handoffPath, `${JSON.stringify({ version: 2, pending })}\n`, { mode: 0o600 });
 export const storedHandoff = () => (existsSync(handoffPath) ? JSON.parse(readFileSync(handoffPath, "utf8")).pending : []);
@@ -980,6 +980,7 @@ import { pathToFileURL } from "node:url";
 const { state, record, taskRecord, ownLock, seedHandoff, storedHandoff } = await import(pathToFileURL(process.env.SEED).href);
 ownLock();
 taskRecord("live-1");
+taskRecord("live-pane", "default:wLIVE:p2");
 const pending = [];
 // The measured shape: one torn-down task turn-end signal, re-minted once per
 // arm close until it filled the store.
@@ -989,6 +990,12 @@ pending.push(record(`signal: ${state}/gone-1.status ${state}/gone-2.status`));
 // ...while one naming a live task among them is not.
 pending.push(record(`signal: ${state}/gone-1.status ${state}/live-1.status`));
 pending.push(record(`signal: ${state}/live-1.turn-ended`));
+// Inbox paths identify their worker just like status and turn-ended paths.
+pending.push(record(`signal: ${state}/gone-1.inbox/001.msg`));
+pending.push(record(`signal: ${state}/live-1.inbox/001.msg`));
+// Pane-only stale wakes are live only while a task record names the endpoint.
+pending.push(record("stale: default:wGONE:p2"));
+pending.push(record("stale: default:wLIVE:p2"));
 // A wake that names no task at all cannot be proven dead and must survive.
 pending.push(record("check: inactive-outcome"));
 seedHandoff(pending);
@@ -1005,12 +1012,21 @@ await handlers.get("session_start")({}, {});
 // The store is rewritten at load, so dead records cannot be carried into
 // another session even if this one delivers nothing.
 const stored = storedHandoff();
-const deadOnly = (message) => /gone-/.test(message) && !/live-1/.test(message);
-if (stored.length !== 3) throw new Error(`load must retain only the judgeable-live records, kept ${stored.length}`);
+const deadOnly = (message) => /gone-/i.test(message) && !/live-1/.test(message);
+if (stored.some((entry) => entry.message === "stale: default:wGONE:p2")) {
+  throw new Error("a pane-only stale wake with no matching meta survived the load");
+}
+if (!stored.some((entry) => entry.message === "stale: default:wLIVE:p2")) {
+  throw new Error("a pane-only stale wake with matching meta was retired");
+}
+if (stored.length !== 5) throw new Error(`load must retain only the judgeable-live records, kept ${stored.length}`);
 if (stored.some((entry) => deadOnly(entry.message))) throw new Error("a wake naming only torn-down tasks survived the load");
 if (!stored.some((entry) => entry.message === "check: inactive-outcome")) throw new Error("a wake naming no task must survive the load");
 await new Promise((r) => setTimeout(r, 6000));
 if (sent.length === 0) throw new Error("the live records were never delivered");
+if (!sent.some((wake) => wake.m.includes("stale: default:wLIVE:p2"))) {
+  throw new Error("a pane-only stale wake with matching meta was not delivered");
+}
 for (const wake of sent) {
   if (deadOnly(wake.m)) throw new Error(`a wake for a torn-down task was delivered: ${wake.m}`);
 }
@@ -1020,7 +1036,7 @@ EOF
   status=$?
   expect_code 0 "$status" "omp watch handoff liveness: $out"
   [ -z "$out" ] || fail "omp watch handoff liveness test printed output: $out"
-  pass ".omp watch extension: a handoff record whose task has no state/<id>.meta is dropped at load and never delivered"
+  pass ".omp watch extension: handoff wakes naming torn-down tasks or unmatched stale endpoints are dropped, while live and worker-free wakes survive"
 }
 
 test_watch_extension_handoff_collapses_duplicates_and_stays_bounded() {

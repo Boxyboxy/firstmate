@@ -64,15 +64,17 @@
 // fresh token for the same unread reason, every shutdown re-persists the lot,
 // and the next session pays one model turn per record. Three rules bound it,
 // applied together wherever the store is read or written:
-//   - Liveness. A "signal:" reason names <state>/<id>.status and
-//     <state>/<id>.turn-ended files (bin/fm-watch.sh's scan_signals), and
-//     state/<id>.meta is that task's record: bin/fm-spawn.sh publishes it
-//     before the worker can write any signal file and bin/fm-teardown.sh
-//     removes it with the backlog transition. A record whose every named task
-//     has lost its meta is about work that no longer exists and is dropped
-//     rather than replayed. A record naming one live task among torn-down ones
-//     stays, and a reason naming no task at all (a "stale:", "check:" or
-//     "heartbeat" line) is unjudgeable, never dropped.
+//   - Liveness. A "signal:" reason can name <state>/<id>.status,
+//     <state>/<id>.turn-ended, or <state>/<id>.inbox/...; a "stale:" reason
+//     names the worker endpoint that bin/fm-watch.sh inspected. state/<id>.meta
+//     is that task's record, and its window field is the endpoint:
+//     bin/fm-spawn.sh publishes it before the worker can write any signal file,
+//     and bin/fm-teardown.sh removes it with the backlog transition. A record
+//     whose every named task has lost its meta, or whose stale endpoint matches
+//     no complete readable meta set, is about work that no longer exists and is
+//     dropped rather than replayed. One live task or endpoint keeps a coalesced
+//     record, and a reason naming no worker at all remains unjudgeable and is
+//     never dropped.
 //   - Identity. The wake is its message; the token only records which close
 //     minted it. Undelivered records collapse by message, keeping the earliest,
 //     so one unread reason is one queued turn however often it re-fires. A
@@ -82,7 +84,7 @@
 //     FM_OMP_HANDOFF_MAX_AGE_MS, oldest dropped first.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // typebox resolves inside omp's extension loader (verified, omp 18.1.11); the
@@ -354,25 +356,59 @@ function nodeErrorCode(error: unknown): string {
     : "";
 }
 
-// The task ids a wake reason is ABOUT, read from the signal files the watcher
-// names. Only paths inside this home's own state directory identify a task this
-// extension can judge; a foreign path is left unjudged rather than guessed at.
+// The task ids a wake reason is ABOUT, read from the worker-owned paths the
+// watcher names. Only paths inside this home's own state directory identify a
+// task this extension can judge; a foreign path is left unjudged rather than
+// guessed at.
 function actionableTaskIds(message: string): string[] {
   const ids = new Set<string>();
   for (const word of message.split(/\s+/)) {
     if (!word.startsWith(`${state}/`)) continue;
     const name = word.slice(state.length + 1);
-    const signal = /^([^/]+)\.(?:status|turn-ended)$/.exec(name);
-    if (signal) ids.add(signal[1]);
+    const workerPath = /^([^/]+)\.(?:status|turn-ended)$/.exec(name) ?? /^([^/]+)\.inbox(?:\/|$)/.exec(name);
+    if (workerPath) ids.add(workerPath[1]);
   }
   return [...ids];
 }
 
-// Live while ANY named task still has a record: one torn-down task in a
-// coalesced batch must not silence the others.
+function actionableStaleEndpoints(message: string): string[] {
+  const endpoints: string[] = [];
+  for (const match of message.matchAll(/^stale:\s+(\S+)\s*$/gm)) endpoints.push(match[1]);
+  return endpoints;
+}
+
+// null means this home's complete endpoint inventory could not be read, so the
+// wake stays live rather than treating uncertainty as proof of teardown.
+function staleEndpointIsLive(endpoint: string): boolean | null {
+  let names: string[];
+  try {
+    names = readdirSync(state).filter((name) => name.endsWith(".meta"));
+  } catch {
+    return null;
+  }
+  for (const name of names) {
+    let lines: string[];
+    try {
+      lines = readFileSync(`${state}/${name}`, "utf8").split("\n");
+    } catch {
+      return null;
+    }
+    const endpoints = lines.filter((line) => line.startsWith("window="));
+    if (endpoints.length !== 1) return null;
+    if (endpoints[0].slice("window=".length) === endpoint) return true;
+  }
+  return false;
+}
+
+// Live while ANY named worker still has a record: one torn-down worker in a
+// coalesced batch must not silence the others. A reason naming no worker stays
+// live, as does a stale endpoint when the metadata inventory is unreadable.
 function pendingActionableIsLive(pending: PendingActionableClose): boolean {
   const ids = actionableTaskIds(pending.message);
-  return ids.length === 0 || ids.some((id) => existsSync(`${state}/${id}.meta`));
+  if (ids.some((id) => existsSync(`${state}/${id}.meta`))) return true;
+  const endpoints = actionableStaleEndpoints(pending.message);
+  if (endpoints.some((endpoint) => staleEndpointIsLive(endpoint) !== false)) return true;
+  return ids.length === 0 && endpoints.length === 0;
 }
 
 // createPendingActionable mints `<pid>-<Date.now()>-<seq>`, and
