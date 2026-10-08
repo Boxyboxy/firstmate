@@ -24,12 +24,15 @@
 #   rule's declared `min_confidence` on that rule's probability, falling to the
 #   most probable other option that clears its own floor), the rule's declared
 #   `approval` and `floor`, each profile's declared `provider` and `floor`, the
-#   quota rows from ONE quota-axi --json snapshot (schema 5 or 6; each
-#   candidate binds to one row through quota_row in
-#   bin/fm-quota-axi-lib.sh, so a Pi lane such as openai-codex-work/...
-#   reads its own account's row and an expanded provider with no row for the
-#   candidate is unmeasured, never blocked), and the spendPriority argmax over
-#   the eligible candidates. The model never sees quota, catalogs, approvals,
+#   quota rows from ONE quota-axi --json snapshot (schema 5 or 6), and omp's own
+#   Anthropic account evidence for omp `anthropic/...` candidates. Each ordinary
+#   candidate binds to one row through quota_row in bin/fm-quota-axi-lib.sh.
+#   An omp Anthropic candidate binds only to an `accountKey: omp` row derived
+#   from `omp usage --json --provider anthropic` and the accounts selected by
+#   `omp dry-balance --json --model`; it never borrows Claude Code's account.
+#   Missing or incomplete evidence is unmeasured, never blocked. The resolver
+#   then takes the spendPriority argmax over the eligible candidates. The model
+#   never sees quota, catalogs, approvals,
 #   confidence floors, `why`, or `use`. With no rules, it returns a non-clear
 #   result so firstmate keeps using the existing intake.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
@@ -243,9 +246,12 @@ fi
 
 RESP_FILE=$(mktemp) || die "mktemp failed"
 QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
-TASK_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA"; die "mktemp failed"; }
-SEND_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA" "$TASK_TEXT"; die "mktemp failed"; }
-trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT" "$SEND_TEXT"' EXIT
+OMP_USAGE=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA"; die "mktemp failed"; }
+OMP_BALANCES=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA" "$OMP_USAGE"; die "mktemp failed"; }
+OMP_QUOTA=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA" "$OMP_USAGE" "$OMP_BALANCES"; die "mktemp failed"; }
+TASK_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA" "$OMP_USAGE" "$OMP_BALANCES" "$OMP_QUOTA"; die "mktemp failed"; }
+SEND_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA" "$OMP_USAGE" "$OMP_BALANCES" "$OMP_QUOTA" "$TASK_TEXT"; die "mktemp failed"; }
+trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$OMP_USAGE" "$OMP_BALANCES" "$OMP_QUOTA" "$TASK_TEXT" "$SEND_TEXT"' EXIT
 
 never_send_off() {
   echo "dispatch-resolve: off ($1; nothing sent)" >&2
@@ -349,6 +355,106 @@ jq -e --slurpfile rules "$RULES" '
 command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
 quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
 fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
+
+# omp's Anthropic pool is independent of Claude Code's account. Resolve the
+# accounts omp can actually choose for each configured model, then express the
+# selected accounts' usage in quota-axi's comparable row shape. A missing tool,
+# failed read, unmatched account, or incomplete cycle remains absent evidence;
+# evaluate() keeps that candidate eligible and discloses it as unranked.
+OMP_ANTHROPIC_MODELS=$(jq -r '
+  def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
+  ([((.rules // [])[]) | profiles(.use)[]] + profiles(.default // null))
+  | map(select(.harness == "omp" and ((.model // "") | startswith("anthropic/"))) | .model)
+  | unique | .[]
+' "$RULES")
+if [ -n "$OMP_ANTHROPIC_MODELS" ] && command -v omp >/dev/null 2>&1 \
+  && omp usage --json --provider anthropic > "$OMP_USAGE" 2>/dev/null; then
+  : > "$OMP_BALANCES"
+  while IFS= read -r model; do
+    [ -n "$model" ] || continue
+    if omp dry-balance --json --model "$model" > "$OMP_QUOTA" 2>/dev/null \
+      && jq -e --arg model "$model" '
+        type == "object" and .model == $model and .provider == "anthropic" and
+        (.success.total | type) == "number" and (.success.accounts | type) == "array" and
+        (.failure.total | type) == "number"
+      ' "$OMP_QUOTA" >/dev/null 2>&1; then
+      jq -c . "$OMP_QUOTA" >> "$OMP_BALANCES"
+    fi
+  done <<< "$OMP_ANTHROPIC_MODELS"
+
+  if jq -e '
+    type == "object" and (.generatedAt | type) == "number" and
+    (.reports | type) == "array"
+  ' "$OMP_USAGE" >/dev/null 2>&1; then
+    jq --slurpfile usage "$OMP_USAGE" --slurpfile balances "$OMP_BALANCES" '
+      ($usage[0]) as $u |
+      def bare($model): $model | split("/") | last;
+      def account_label($report): "\($report.metadata.email) (\($report.metadata.orgName))";
+      def account_metric($report):
+        [$report.limits[]? |
+          select(.scope.provider == "anthropic" and (.scope | has("tier") | not)) |
+          {
+            duration: .window.durationMs,
+            resetsAt: .window.resetsAt,
+            used: .amount.used,
+            remaining: .amount.remaining
+          }
+        ] as $limits |
+        if ($limits | length) == 0 or any($limits[];
+          ([.duration, .resetsAt, .used, .remaining] | any(type != "number")) or
+          .duration <= 0 or .resetsAt <= $u.generatedAt
+        ) then null
+        else [$limits[] |
+          (100 * ((.resetsAt - $u.generatedAt) / .duration) | if . > 100 then 100 else . end) as $time_left |
+          (100 - $time_left) as $elapsed |
+          (if $elapsed > 0 then .used / $elapsed elif .used == 0 then 0 else null end) as $burn |
+          if $time_left <= 0 or $burn == null then empty else
+            . + {
+              timeLeft: $time_left,
+              burn: $burn,
+              gap: ((.remaining / $time_left) - $burn)
+            }
+          end
+        ] as $windows |
+        if ($windows | length) != ($limits | length) then null
+        else {
+          pct: ($windows | map(.remaining) | min),
+          spendPriority: (($windows | map(.gap * .duration) | add) / ($windows | map(.duration) | add) * 10000 | round / 10000),
+          runway: (if any($windows[]; .remaining <= 0) then "exhausted_now"
+                   elif any($windows[]; .burn > 0 and (.remaining / .burn) < .timeLeft) then "projected_exhaustion"
+                   else "through_reset" end)
+        }
+        end
+        end;
+      def model_row($balance):
+        [$balance.success.accounts[]?.account] as $labels |
+        [$u.reports[]? | select(.provider == "anthropic" and (account_label(.) as $label | $labels | index($label))) | account_metric(.)] as $metrics |
+        if $balance.failure.total != 0 or $balance.success.total <= 0 or
+           ($labels | length) == 0 or ($metrics | length) != ($labels | length) or any($metrics[]; . == null)
+        then empty
+        else {
+          scope: ("model:" + bare($balance.model)),
+          status: "known",
+          effectivePercentRemaining: ($metrics | map(.pct) | min),
+          runway: {status: (if any($metrics[]; .runway == "exhausted_now") then "exhausted_now"
+                            elif any($metrics[]; .runway == "projected_exhaustion") then "projected_exhaustion"
+                            else "through_reset" end)},
+          selection: {spendPriority: ($metrics | map(.spendPriority) | min)}
+        }
+        end;
+      [$balances[] | model_row(.)] as $rows |
+      .providers |= map(select(.provider != "anthropic" or .accountKey != "omp")) |
+      .providers += [{
+        provider: "anthropic",
+        accountKey: "omp",
+        quotaSemantics: {
+          status: (if ($rows | length) > 0 then "known" else "unknown" end),
+          effectiveAvailability: $rows
+        }
+      }]
+    ' "$QUOTA" > "$OMP_QUOTA" 2>/dev/null && cat "$OMP_QUOTA" > "$QUOTA"
+  fi
+fi
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
 RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
