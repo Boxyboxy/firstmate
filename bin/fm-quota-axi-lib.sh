@@ -32,7 +32,7 @@ FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 FM_QUOTA_ROW_JQ='
   def quota_lane($harness; $model):
     if $harness == "codex" then "codex-home"
-    elif $harness == "omp" and (($model // "") | startswith("anthropic/")) then "omp"
+    elif $harness == "omp" and ((($model // "") | startswith("anthropic/")) or (($model // "") | startswith("claude-"))) then "omp"
     elif ($harness == "pi" or $harness == "pi-signed") and (($model // "") | contains("/"))
     then ($model | split("/") | first | if . == "codex-native" then "codex-home" else . end)
     else "" end;
@@ -174,6 +174,7 @@ fm_quota_provider_for_harness() {
         anthropic/*)     printf 'anthropic\n' ;;
         openai-codex/*)  printf 'codex\n' ;;
         claude-bridge/*) printf 'claude\n' ;;
+        claude-*)        printf 'anthropic\n' ;;
         *)               return 1 ;;
       esac
       ;;

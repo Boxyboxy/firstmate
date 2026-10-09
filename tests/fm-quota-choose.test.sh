@@ -231,18 +231,18 @@ ok "omp openai-codex prefix matches the bare codex model scope"
 
 OMP_ANTHROPIC="$LAB/omp-anthropic.json"
 jq '.providers += [(.providers[] | select(.provider == "claude") | .provider = "anthropic")]' "$LAB/captured.json" > "$OMP_ANTHROPIC"
-out=$(call_choose --snapshot "$OMP_ANTHROPIC" --candidate omp:anthropic/claude-sonnet-4-5)
-[ "$out" = "omp anthropic/claude-sonnet-4-5" ] || fail "omp Anthropic prefix returned: $out"
+out=$(call_choose --snapshot "$OMP_ANTHROPIC" --candidate omp:claude-opus-5-5)
+[ "$out" = "omp claude-opus-5-5" ] || fail "omp Anthropic model returned: $out"
 ok "omp anthropic prefix maps to independent Anthropic evidence"
 
 if err=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:ollama/qwen3:8b --candidate claude:claude-3-5-sonnet 2>&1); then
   fail "unmapped omp prefix unexpectedly selected a later candidate"
 fi
-[ "$err" = "error: omp quota mapping covers only the anthropic, openai-codex, and claude-bridge prefixes: ollama/qwen3:8b" ] || fail "unmapped omp prefix returned: $err"
+[ "$err" = "error: omp quota mapping covers only the Anthropic, openai-codex, and claude-bridge model families: ollama/qwen3:8b" ] || fail "unmapped omp prefix returned: $err"
 if err=$(call_choose --snapshot "$LAB/captured.json" --candidate omp 2>&1); then
   fail "bare omp candidate unexpectedly selected"
 fi
-[ "$err" = "error: omp quota mapping covers only the anthropic, openai-codex, and claude-bridge prefixes: default" ] || fail "bare omp candidate returned: $err"
+[ "$err" = "error: omp quota mapping covers only the Anthropic, openai-codex, and claude-bridge model families: default" ] || fail "bare omp candidate returned: $err"
 ok "omp without a mapped prefix fails closed"
 
 out=$(call_choose --snapshot "$LAB/captured.json" --candidate codex:default)
