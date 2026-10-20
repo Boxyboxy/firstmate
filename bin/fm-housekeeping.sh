@@ -27,37 +27,76 @@
 # --- how a container is classified ------------------------------------------
 #
 # Kill-lists are built by POSITIVE selection: a container is removed only when
-# this script can say whose finished work it belongs to, or (when stopped) can
-# see that nothing protects it. Each container is tested in this fixed order and
-# stops at the first verdict:
+# this script can say whose finished work it belongs to, when the agent that
+# started it labelled it disposable and every rule 3 check passes, or (when
+# stopped) can see that nothing protects it. Each container is tested in this
+# fixed order and stops at the first verdict:
 #
 #   1. keep:configured    - name matches the configured keep-list (below).
 #   2. keep:live-task     - name, compose project, or compose working_dir carries
 #                           the id of a task with a live state/<id>.meta.
-#   3. keep:serving       - running with a published host port. Docker binds that
+#   3. reclaim:expired-disposable
+#                         - running with a published host port, and every check
+#                           in "disposable containers" below passes. Removed only
+#                           under --apply. If any check fails or cannot be made,
+#                           the verdict falls through to 4 exactly as before.
+#   4. keep:serving       - running with a published host port. Docker binds that
 #                           port for as long as the container runs, so the port
 #                           binding itself is the structural in-use signal; no
 #                           name prefix is consulted.
-#   4. keep:stack-claimed - its compose working_dir exists on disk and holds a
+#   5. keep:stack-claimed - its compose working_dir exists on disk and holds a
 #                           stack manifest (stack.sh, compose.sh, or a compose
 #                           yaml), so something on disk still claims it.
-#   5. orphan             - the same match against a KNOWN but finished task id
+#   6. orphan             - the same match against a KNOWN but finished task id
 #                           (a data/<id>/ directory holding brief.md or report.md
 #                           with no state/<id>.meta and no data/secondmates.md
 #                           record; other data/ directories such as handoff/ are
 #                           not tasks and never match).
 #                           Running orphans are removed only under --apply.
-#   6. keep:unattributed  - running and none of the above: KEPT and reported for
+#   7. keep:unattributed  - running and none of the above: KEPT and reported for
 #                           the captain to judge. Unattributable is never a
 #                           delete reason.
-#   7. reclaim:stopped    - stopped, unprotected, and in no protected compose
+#   8. reclaim:stopped    - stopped, unprotected, and in no protected compose
 #                           project. A stopped container is doing nothing now,
-#                           and one a live stack owns is protected by 1, 2, 3, 4,
+#                           and one a live stack owns is protected by 1, 2, 4, 5,
 #                           or by project propagation below.
 #
 # Protection propagates across a compose project: if any member is kept by 1, 2,
-# 3, or 4, every member of that project is kept, so a stack with one stopped
+# 4, or 5, every member of that project is kept, so a stack with one stopped
 # member never loses it.
+#
+# --- disposable containers ---------------------------------------------------
+#
+# A published port keeps a container forever under rule 4, and agent test
+# databases publish one so their tests can connect. An agent that forgets to
+# remove its database therefore leaks it: on 20 Oct 2026 eight finished agents'
+# databases had held memory for 7 to 22 hours and were removed by hand. An agent
+# that starts a throwaway container opts in to reclamation with three labels:
+#
+#   docker run -d --name <job>-pg \
+#     --label firstmate.disposable=true \
+#     --label firstmate.job=<job> \
+#     --label firstmate.expires=$(( $(date +%s) + 12 * 3600 )) \
+#     -p 127.0.0.1::5432 postgres:16
+#
+# firstmate.expires is UTC epoch seconds; the default is start time plus 12
+# hours. Rule 3 applies only when every check below holds:
+#
+#   * firstmate.disposable is exactly "true".
+#   * firstmate.job matches [A-Za-z0-9][A-Za-z0-9._-]* (at most 128 characters).
+#   * firstmate.expires is whole epoch seconds and is in the past.
+#   * the container is in no compose project.
+#   * every published host port is a single TCP port, and no process other than
+#     Docker's own port proxy (com.docker.*, vpnkit*, docker-proxy, rootlesskit)
+#     holds an ESTABLISHED connection on it, per
+#     `lsof -nP -iTCP:<port> -sTCP:ESTABLISHED`. lsof sees only processes it may
+#     inspect, so run housekeeping as the user who runs the agents.
+#
+# The checks run again immediately before removal. A missing, partial, or
+# malformed label set, a failed docker inspect, a missing lsof, an lsof error,
+# a UDP or ranged port, or a live client keeps the container under rule 4.
+# Unlabelled containers behave exactly as before. Expiry alone is never enough:
+# a test still connected after its expiry keeps its database.
 #
 # --- the two delete-path refusals -------------------------------------------
 #
@@ -94,10 +133,11 @@
 #                         volumes have no attribution and the phase would reclaim
 #                         almost nothing.
 #   4. build cache      - `docker builder prune -f`.
-#   5. orphaned running containers of finished tasks.
-#   6. dangling volumes again - repeat the two-sample removal after orphan
-#                         removal because its volumes become dangling only once
-#                         the container is gone. Skipping this rerun cost a real
+#   5. orphaned running containers of finished tasks, then expired disposable
+#                         containers.
+#   6. dangling volumes again - repeat the two-sample removal after orphan and
+#                         expired-disposable removal because their volumes become
+#                         dangling only once the container is gone. Skipping this rerun cost a real
 #                         sweep 1.3 GB after it had already reclaimed 42.3 GB.
 #   7. unused images    - `docker image prune -a -f`, only with --images. Largest
 #                         reclaim, most expensive to get back, and the base
@@ -291,6 +331,123 @@ has_stack_manifest() { # <dir>
   return 1
 }
 
+# --- disposable containers (rule 3; contract in the header) ------------------
+
+DISPOSABLE_FMT='{{index .Config.Labels "firstmate.disposable"}}|{{index .Config.Labels "firstmate.job"}}|{{index .Config.Labels "firstmate.expires"}}|{{.State.StartedAt}}'
+
+# duration <seconds>: compact non-negative duration such as 22h05m or 7m.
+duration() {
+  local s="$1"
+  [ "$s" -ge 0 ] 2>/dev/null || s=0
+  if [ "$s" -ge 3600 ]; then
+    printf '%dh%02dm' "$((s / 3600))" "$((s % 3600 / 60))"
+  else
+    printf '%dm' "$((s / 60))"
+  fi
+}
+
+# epoch_of_docker_time <RFC3339 time>: epoch seconds on BSD or GNU date, or
+# nothing. Only the reported age uses it, never the verdict.
+epoch_of_docker_time() {
+  local t="${1%%.*}"
+  t="${t%Z}"
+  [ -n "$t" ] || return 0
+  date -j -u -f '%Y-%m-%dT%H:%M:%S' "$t" +%s 2>/dev/null ||
+    date -u -d "$t" +%s 2>/dev/null
+}
+
+# published_tcp_host_ports <ports>: one host port per line from docker's Ports
+# column. Fails when any published entry is UDP, ranged, or unreadable, because
+# the client check below can only vouch for single TCP ports.
+published_tcp_host_ports() {
+  printf '%s\n' "$1" | tr ',' '\n' | awk '
+    /->/ {
+      entry = $0
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", entry)
+      host = entry; sub(/->.*/, "", host)
+      target = entry; sub(/.*->/, "", target)
+      port = host; sub(/.*:/, "", port)
+      if (target !~ /^[0-9]+\/tcp$/ || port !~ /^[0-9]+$/) { bad = 1; exit }
+      if (!(port in seen)) { seen[port] = 1; print port; n++ }
+    }
+    END { if (bad || n == 0) exit 1 }
+  '
+}
+
+is_docker_port_proxy() { # <command name>
+  case "$1" in
+    com.docker.*|vpnkit|vpnkit-*|docker-proxy|rootlesskit) return 0 ;;
+  esac
+  return 1
+}
+
+# port_client_state <port>: 0 no client, 1 a client is connected, 2 unknown.
+port_client_state() {
+  local port="$1" out="$WORK/lsof.out" err="$WORK/lsof.err" status line
+  have lsof || return 2
+  lsof +c 0 -nP -iTCP:"$port" -sTCP:ESTABLISHED -Fc </dev/null >"$out" 2>"$err"
+  status=$?
+  # lsof exits 1 both when nothing matches and on error; only a silent 1 is
+  # "nothing matches".
+  if [ "$status" = 1 ] && [ ! -s "$out" ] && [ ! -s "$err" ]; then
+    return 0
+  fi
+  [ "$status" = 0 ] || return 2
+  while IFS= read -r line; do
+    case "$line" in
+      c*) is_docker_port_proxy "${line#c}" || return 1 ;;
+    esac
+  done <"$out"
+  return 0
+}
+
+# expired_disposable <name> <project> <ports>: succeeds only when rule 3
+# applies. Sets DISPOSABLE_NOTE to the reclaim reason on success, or to why a
+# labelled container was kept on failure (empty for an unlabelled one).
+expired_disposable() {
+  local name="$1" project="$2" ports="$3" raw flag job expires started now port
+  local started_epoch age=''
+  DISPOSABLE_NOTE=''
+  if ! raw="$(docker inspect --format "$DISPOSABLE_FMT" "$name" </dev/null 2>/dev/null)"; then
+    DISPOSABLE_NOTE='its labels could not be read'
+    return 1
+  fi
+  IFS='|' read -r flag job expires started <<<"$raw"
+  [ -n "$flag$job$expires" ] || return 1
+  if [ "$flag" != true ] || ! [[ "$job" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] ||
+    ! [[ "$expires" =~ ^[1-9][0-9]{0,10}$ ]]; then
+    DISPOSABLE_NOTE='its firstmate disposable labels are missing or malformed'
+    return 1
+  fi
+  if [ -n "$project" ]; then
+    DISPOSABLE_NOTE="disposable job $job, but in compose project $project"
+    return 1
+  fi
+  now="$(date +%s)"
+  if [ "$now" -lt "$expires" ]; then
+    DISPOSABLE_NOTE="disposable job $job, expires in $(duration $((expires - now)))"
+    return 1
+  fi
+  if ! published_tcp_host_ports "$ports" >"$WORK/disposable-ports"; then
+    DISPOSABLE_NOTE="expired disposable job $job, but a published port is not a single TCP port"
+    return 1
+  fi
+  while IFS= read -r port; do
+    port_client_state "$port"
+    case "$?" in
+      0) ;;
+      1) DISPOSABLE_NOTE="expired disposable job $job, but a client is connected on port $port"
+         return 1 ;;
+      *) DISPOSABLE_NOTE="expired disposable job $job, but clients on port $port could not be checked"
+         return 1 ;;
+    esac
+  done <"$WORK/disposable-ports"
+  started_epoch="$(epoch_of_docker_time "$started")"
+  [ -n "$started_epoch" ] && age="up $(duration $((now - started_epoch))), "
+  DISPOSABLE_NOTE="expired disposable of job $job, ${age}expired $(duration $((now - expires))) ago, no client connected"
+  return 0
+}
+
 match_task_id() { # <name> <project> <working_dir> <label-task>; echoes "live|done <id>"
   local hay="$1 $2 $3" label="$4" id best_live='' best_done=''
   if [ -n "$label" ]; then
@@ -367,8 +524,11 @@ while [ "$INVENTORY_OK" = 1 ] && IFS='|' read -r name state project task ports w
     kind="${match%% *}"; id="${match#* }"
     if [ "$kind" = live ]; then
       verdict='keep:live-task'; reason="owned by live task $id"
+    elif [ "$serving" = 1 ] && expired_disposable "$name" "${project:-}" "${ports:-}"; then
+      verdict='reclaim:expired-disposable'; reason="$DISPOSABLE_NOTE"
     elif [ "$serving" = 1 ]; then
       verdict='keep:serving'; reason='running with a bound host port'
+      [ -n "$DISPOSABLE_NOTE" ] && reason="$reason; $DISPOSABLE_NOTE"
     elif has_stack_manifest "${wd:-}"; then
       verdict='keep:stack-claimed'; reason="claimed by the stack at $wd"
     elif [ "$kind" = 'done' ]; then
@@ -407,9 +567,11 @@ awk -F'|' '$3 ~ /^keep:/ {print $1}' "$WORK/classified" | sort -u >"$WORK/keep-n
 awk -F'|' '$2 == "running" && $3 == "orphan" {print $1}' "$WORK/classified" | sort -u >"$WORK/kill-running"
 awk -F'|' '$2 != "running" && ($3 == "orphan" || $3 == "reclaim:stopped") {print $1}' \
   "$WORK/classified" | sort -u >"$WORK/kill-stopped"
+awk -F'|' '$3 == "reclaim:expired-disposable" {print $1}' "$WORK/classified" | sort -u >"$WORK/kill-expired"
+awk -F'|' '$3 == "reclaim:expired-disposable" {print $1 "|" $5}' "$WORK/classified" >"$WORK/remove-notes"
 awk -F'|' '$2 == "running" {print $1}' "$WORK/classified" | sort -u >"$WORK/running-names"
 awk -F'|' '$2 == "running" && $3 ~ /^keep:/ {print $1}' "$WORK/classified" | sort -u >"$WORK/keep-running"
-cat "$WORK/kill-running" "$WORK/kill-stopped" | sort -u >"$WORK/kill-names"
+cat "$WORK/kill-running" "$WORK/kill-stopped" "$WORK/kill-expired" | sort -u >"$WORK/kill-names"
 
 # --- report ------------------------------------------------------------------
 
@@ -546,7 +708,7 @@ fi
 # --- phases 2-7 --------------------------------------------------------------
 
 remove_containers() { # <list-file> <label>
-  local list="$1" label="$2" name protection
+  local list="$1" label="$2" name protection detail
   [ -s "$list" ] || return 0
   while IFS= read -r name; do
     [ -n "$name" ] || continue
@@ -572,7 +734,8 @@ remove_containers() { # <list-file> <label>
       continue
     fi
     if docker rm -f "$name" >/dev/null 2>&1; then
-      note "  removed $label container $name"
+      detail="$(awk -F'|' -v name="$name" '$1 == name { print " (" $2 ")"; exit }' "$WORK/remove-notes")"
+      note "  removed $label container $name$detail"
     else
       warn "could not remove $label container $name"
       EXIT=1
@@ -603,7 +766,8 @@ current_container_protection() { # <name>
     [ -n "${project:-}" ] && printf '%s\n' "$project" >>"$target_projects"
     if matches_keep_pattern "$name" || claimed_by_keep_dir "$name" "${wd:-}" ||
       current_live_task_owns "$name" "${project:-}" "${wd:-}" "${task:-}" ||
-      { [ "$state" = running ] && case "${ports:-}" in *'->'*) true ;; *) false ;; esac; } ||
+      { [ "$state" = running ] && case "${ports:-}" in *'->'*) true ;; *) false ;; esac &&
+        ! expired_disposable "$name" "${project:-}" "${ports:-}"; } ||
       has_stack_manifest "${wd:-}"; then
       [ "$target_running" = 1 ] && printf '%s\n' "$target" >"$WORK/current-protected-running"
       return 0
@@ -616,7 +780,8 @@ current_container_protection() { # <name>
     grep -qxF "${project:-}" "$target_projects" || continue
     if matches_keep_pattern "$name" || claimed_by_keep_dir "$name" "${wd:-}" ||
       current_live_task_owns "$name" "${project:-}" "${wd:-}" "${task:-}" ||
-      { [ "$state" = running ] && case "${ports:-}" in *'->'*) true ;; *) false ;; esac; } ||
+      { [ "$state" = running ] && case "${ports:-}" in *'->'*) true ;; *) false ;; esac &&
+        ! expired_disposable "$name" "${project:-}" "${ports:-}"; } ||
       has_stack_manifest "${wd:-}"; then
       [ "$target_running" = 1 ] && printf '%s\n' "$target" >"$WORK/current-protected-running"
       return 0
@@ -874,6 +1039,7 @@ run_reclamation_plan() {
   plan_volume_pass 'first volume pass after stopped containers' first
   plan_prune 'build cache' builder prune -f
   plan_remove_containers "$WORK/kill-running" orphaned
+  plan_remove_containers "$WORK/kill-expired" 'expired disposable'
   plan_volume_pass 'second volume pass after orphan removal' second
   if [ "$IMAGES" = 1 ]; then
     plan_prune 'unused images' image prune -a -f
