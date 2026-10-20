@@ -62,6 +62,11 @@ The prefix is not a good enough signal on its own, because the next such stack w
 The structural signals are a bound host port on a running container and a stack manifest on disk that claims a container, regardless of its name.
 The configured keep-list is a second line of defence behind that, not the only one.
 
+One labelled exception narrows the bound-port signal.
+An agent test database publishes a port so its tests can connect, so a forgotten one would be kept forever.
+An agent that starts a throwaway container labels it disposable with a job name and an expiry, and the script reclaims it once it has expired, sits in no compose project, and has no client connected.
+The script header ("disposable containers") owns the labels and every check; an unlabelled container is never reclaimed this way.
+
 Anything the script cannot attribute is KEPT, never removed, and reported for the captain to judge.
 Unattributable is not a delete reason.
 When the report lists containers it could not attribute, relay them; do not add them to the keep-list on the captain's behalf, and do not decide they look disposable.
@@ -85,10 +90,11 @@ Phases run in ascending cost to re-acquire, so an interrupted run has spent the 
    The worktree phase's detect-and-report boundary is not reused here because no report can recover destroyed volume data.
    Deciding a destructive question from the shape of a string instead of an authoritative fact is the same defect class as the original filter failure.
    The volume phase keeps anything whose anonymity it cannot prove.
-3. **Orphaned running containers with no live owner.**
-   This is the only phase that stops something that is currently running, and it acts only on containers positively attributed to a task that has finished.
+3. **Orphaned running containers with no live owner, then expired disposable containers.**
+   This is the only phase that stops something that is currently running.
+   It acts only on containers positively attributed to a task that has finished, or labelled disposable by the agent that started them and past their expiry with no client connected.
 4. **Volumes again.**
-   An orphan's volumes only become dangling once its container is gone, so the earlier volume pass could not see them.
+   An orphan's or expired disposable container's volumes only become dangling once the container is gone, so the earlier volume pass could not see them.
    Skipping this rerun cost a real sweep 1.3 GB after it had already reclaimed 42.3 GB.
 5. **Unused images, opt-in only.**
    Images are the largest reclaim and the most expensive to get back, and the base images live stacks rebuild from are among them.

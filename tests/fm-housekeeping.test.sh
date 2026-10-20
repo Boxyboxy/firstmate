@@ -79,6 +79,16 @@ case "$cmd" in
     if [ -s "$FM_TEST_CONTAINER_INSPECT_FAIL" ] && grep -qxF "$name" "$FM_TEST_CONTAINER_INSPECT_FAIL"; then
       exit 1
     fi
+    case "$*" in
+      *firstmate.disposable*)
+        # Real docker prints an empty string for every absent label.
+        awk -F'|' -v name="$name" '
+          $1 == name { print $2 "|" $3 "|" $4 "|" $5; found = 1; exit }
+          END { if (!found) print "|||" }
+        ' "$FM_TEST_CONTAINER_LABELS"
+        exit 0
+        ;;
+    esac
     # Real `docker inspect --format '{{println .Name}}'` prints one line per
     # volume, and docker inspect appends a final newline to the whole result, so
     # the output ALWAYS ends with a trailing empty line (a zero-volume container
@@ -174,7 +184,31 @@ if case " $* " in *' --yes '*) true ;; *) false ;; esac &&
   done <"$FM_TEST_TREEHOUSE_LATE_LIVE"
 fi
 FAKE
-  chmod +x "$bin/docker" "$bin/treehouse"
+  # Fake lsof models `lsof -Fc` output for ESTABLISHED connections on one TCP
+  # port: a p line and a c line per process, exit 1 and silence when nothing
+  # matches. Clients listed in lsof.late join only from the second call on, so a
+  # case can connect a client between classification and removal.
+  cat >"$bin/lsof" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FM_TEST_LSOF_LOG"
+count=$(( $(cat "$FM_TEST_LSOF_COUNT") + 1 ))
+printf '%s\n' "$count" >"$FM_TEST_LSOF_COUNT"
+if [ -s "$FM_TEST_LSOF_FAIL" ]; then
+  echo 'lsof: WARNING: fixture failure' >&2
+  exit 1
+fi
+port=''
+for a in "$@"; do
+  case "$a" in -iTCP:*) port="${a#-iTCP:}" ;; esac
+done
+sources="$FM_TEST_LSOF_CLIENTS"
+[ "$count" -ge 2 ] && sources="$sources $FM_TEST_LSOF_LATE"
+# shellcheck disable=SC2086
+out=$(awk -F'|' -v port="$port" '$1 == port { n++; print "p" (1000 + n); print "c" $2 }' $sources)
+[ -n "$out" ] || exit 1
+printf '%s\n' "$out"
+FAKE
+  chmod +x "$bin/docker" "$bin/treehouse" "$bin/lsof"
   printf '%s\n' "$bin"
 }
 
@@ -197,6 +231,12 @@ fm_hk_case() {
   : >"$dir/container.late-live"
   : >"$dir/container.stop-after-late"
   : >"$dir/volume-metadata"
+  : >"$dir/container-labels"
+  : >"$dir/lsof.clients"
+  : >"$dir/lsof.late"
+  : >"$dir/lsof.fail"
+  : >"$dir/lsof.log"
+  printf '0\n' >"$dir/lsof.count"
   printf '0\n' >"$dir/container-sample-count"
   mkdir -p "$dir/container-samples"
   printf '0\n' >"$dir/volume-sample-count"
@@ -219,6 +259,20 @@ fm_hk_container() {
   printf '%s|%s|%s|%s|%s|%s\n' "$2" "$3" "$4" "$5" "$6" "$7" >>"$1/containers"
 }
 
+# fm_hk_labels <dir> <name> <disposable> <job> <expires> [<started-at>]: the
+# firstmate disposable labels docker inspect reports for <name>.
+fm_hk_labels() {
+  printf '%s|%s|%s|%s|%s\n' "$2" "$3" "$4" "$5" "${6:-2026-10-20T00:00:00.123456789Z}" \
+    >>"$1/container-labels"
+}
+
+# fm_hk_lsof <dir> <port> <command>...: processes holding an ESTABLISHED
+# connection on <port>.
+fm_hk_lsof() {
+  local dir="$1" port="$2" cmd; shift 2
+  for cmd in "$@"; do printf '%s|%s\n' "$port" "$cmd" >>"$dir/lsof.clients"; done
+}
+
 fm_hk_run() { # <dir> <args...>
   local dir="$1"; shift
   local bin; bin=$(fm_hk_fakes "$dir")
@@ -237,6 +291,10 @@ fm_hk_run() { # <dir> <args...>
     FM_TEST_CONTAINER_STOP_AFTER_LATE="$dir/container.stop-after-late" \
     FM_TEST_CONTAINER_INSPECT_FAIL="$dir/container.inspect-fail" \
     FM_TEST_VOLUME_METADATA="$dir/volume-metadata" \
+    FM_TEST_CONTAINER_LABELS="$dir/container-labels" \
+    FM_TEST_LSOF_CLIENTS="$dir/lsof.clients" FM_TEST_LSOF_LATE="$dir/lsof.late" \
+    FM_TEST_LSOF_FAIL="$dir/lsof.fail" FM_TEST_LSOF_LOG="$dir/lsof.log" \
+    FM_TEST_LSOF_COUNT="$dir/lsof.count" \
     FM_HOUSEKEEPING_VOLUME_STABILITY_SECONDS=0 \
     "$HOUSEKEEPING" "$@" >"$dir/out" 2>"$dir/err"
 }
@@ -808,6 +866,191 @@ test_inspection_failure_skips_reclaim_fail_closed() {
   pass 'a genuine inspection failure returns nonzero and skips the whole reclaim'
 }
 
+# --- expired disposable containers --------------------------------------------
+
+HK_PAST=1700000000     # long expired
+HK_FUTURE=4102444800   # 1 Jan 2100
+
+# fm_hk_disposable_case <name>: a fleet with the captain's serving stack and one
+# agent test database labelled disposable on host port 55001.
+fm_hk_disposable_case() {
+  local dir
+  dir=$(fm_hk_case "$1")
+  fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
+  fm_hk_container "$dir" lane-c31-pg running '' '' '127.0.0.1:55001->5432/tcp, [::1]:55001->5432/tcp' ''
+  printf '%s\n' "$dir"
+}
+
+test_expired_disposable_without_client_is_reclaimed() {
+  local dir volume
+  dir=$(fm_hk_disposable_case expired-disposable)
+  volume=$(printf '1%.0s' {1..64})
+  fm_hk_labels "$dir" lane-c31-pg true lane-c31 "$HK_PAST"
+  # Docker's own port proxy holds sockets on the port; it is not a client.
+  fm_hk_lsof "$dir" 55001 com.docker.backend
+  printf 'lane-c31-pg|%s\n' "$volume" >"$dir/container-mounts"
+  printf '%s|com.docker.volume.anonymous|\n' "$volume" >"$dir/volume-metadata"
+
+  fm_hk_run "$dir" --no-worktrees
+  expect_code 0 "$?" 'dry run with an expired disposable container'
+  [ -s "$dir/docker.rm" ] && fail 'the dry run removed a container'
+  assert_grep 'reclaim lane-c31-pg' "$dir/out" 'the dry run did not list the expired disposable container'
+  assert_grep 'expired disposable of job lane-c31, up ' "$dir/out" \
+    'the dry run did not name the job and age'
+  assert_grep 'keep    wffui-pg' "$dir/out" 'the unlabelled serving stack was not kept'
+  assert_grep '-iTCP:55001' "$dir/lsof.log" 'the client check did not look at the published host port'
+  assert_grep "$volume" "$dir/out" 'the dry run did not model the volume the container leaves dangling'
+
+  : >"$dir/lsof.log"
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply with an expired disposable container'
+  assert_grep lane-c31-pg "$dir/docker.rm" 'the expired disposable container survived the sweep'
+  assert_no_grep wffui-pg "$dir/docker.rm" 'removed the unlabelled serving stack'
+  assert_grep 'removed expired disposable container lane-c31-pg (expired disposable of job lane-c31' \
+    "$dir/out" 'apply did not report the job of the removed container'
+  [ "$(grep -c -- '-iTCP:55001' "$dir/lsof.log")" -ge 2 ] ||
+    fail 'apply did not re-check clients immediately before removal'
+  assert_no_kept_name_removed "$dir"
+  pass 'an expired disposable container with no client is reclaimed by name'
+}
+
+test_unexpired_disposable_is_kept() {
+  local dir
+  dir=$(fm_hk_disposable_case unexpired-disposable)
+  fm_hk_labels "$dir" lane-c31-pg true lane-c31 "$HK_FUTURE"
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply with an unexpired disposable container'
+  assert_no_grep lane-c31-pg "$dir/docker.rm" 'removed a disposable container before it expired'
+  assert_grep 'running with a bound host port; disposable job lane-c31, expires in ' "$dir/out" \
+    'the kept reason did not say when it expires'
+  pass 'a disposable container is kept until it expires'
+}
+
+test_expired_disposable_with_live_client_is_kept() {
+  local dir
+  dir=$(fm_hk_disposable_case client-disposable)
+  fm_hk_labels "$dir" lane-c31-pg true lane-c31 "$HK_PAST"
+  fm_hk_lsof "$dir" 55001 com.docker.backend python3.13
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply with a client still connected'
+  assert_no_grep lane-c31-pg "$dir/docker.rm" 'removed an expired container a client still uses'
+  assert_grep 'a client is connected on port 55001' "$dir/out" 'the kept reason did not name the client port'
+  pass 'an expired disposable container with a live client is kept'
+}
+
+test_client_connecting_before_removal_keeps_disposable() {
+  local dir
+  dir=$(fm_hk_disposable_case late-client-disposable)
+  fm_hk_labels "$dir" lane-c31-pg true lane-c31 "$HK_PAST"
+  printf '55001|psql\n' >"$dir/lsof.late"
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply when a client connects after classification'
+  assert_no_grep lane-c31-pg "$dir/docker.rm" 'removed a container whose client connected before removal'
+  assert_grep 'kept expired disposable container lane-c31-pg: it became protected before removal' "$dir/out" \
+    'the removal-time re-check did not report the late client'
+  pass 'a client that connects before removal keeps the container'
+}
+
+test_unverifiable_client_check_keeps_disposable() {
+  local dir
+  dir=$(fm_hk_disposable_case lsof-error-disposable)
+  fm_hk_labels "$dir" lane-c31-pg true lane-c31 "$HK_PAST"
+  printf 'fail\n' >"$dir/lsof.fail"
+  fm_hk_container "$dir" lane-udp-dns running '' '' '127.0.0.1:55053->53/udp' ''
+  fm_hk_labels "$dir" lane-udp-dns true lane-udp "$HK_PAST"
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply when clients cannot be checked'
+  assert_no_grep lane-c31-pg "$dir/docker.rm" 'removed a container whose clients could not be checked'
+  assert_grep 'clients on port 55001 could not be checked' "$dir/out" \
+    'the kept reason did not say the client check failed'
+  assert_no_grep lane-udp-dns "$dir/docker.rm" 'removed a container with a UDP port lsof -iTCP cannot check'
+  assert_grep 'a published port is not a single TCP port' "$dir/out" \
+    'the kept reason did not name the uncheckable port'
+  pass 'a client check that cannot be made keeps the container'
+}
+
+test_missing_or_malformed_disposable_labels_are_kept() {
+  local dir
+  dir=$(fm_hk_disposable_case malformed-disposable)
+  fm_hk_labels "$dir" lane-c31-pg true lane-c31 ''
+  fm_hk_container "$dir" lane-p157-pg running '' '' '127.0.0.1:55002->5432/tcp' ''
+  fm_hk_labels "$dir" lane-p157-pg true lane-p157 soon
+  fm_hk_container "$dir" lane-237-pg running '' '' '127.0.0.1:55003->5432/tcp' ''
+  fm_hk_labels "$dir" lane-237-pg yes lane-237 "$HK_PAST"
+  fm_hk_container "$dir" lane-fold-pg running '' '' '127.0.0.1:55004->5432/tcp' ''
+  fm_hk_labels "$dir" lane-fold-pg true '' "$HK_PAST"
+  fm_hk_container "$dir" lane-krew-pg running '' '' '127.0.0.1:55005->5432/tcp' ''
+  fm_hk_labels "$dir" lane-krew-pg true 'krew e15' "$HK_PAST"
+  fm_hk_container "$dir" plain-pg running '' '' '127.0.0.1:55006->5432/tcp' ''
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply with missing and malformed disposable labels'
+  [ -s "$dir/docker.rm" ] && fail "removed containers with malformed labels: $(tr '\n' ' ' <"$dir/docker.rm")"
+  [ "$(grep -c 'disposable labels are missing or malformed' "$dir/out")" = 5 ] ||
+    fail 'not every malformed label set was reported as kept'
+  assert_grep 'plain-pg                     running with a bound host port (running)' "$dir/out" \
+    'an unlabelled serving container is no longer reported exactly as before'
+  [ -s "$dir/lsof.log" ] && fail 'checked clients for a container whose labels were malformed'
+  pass 'missing or malformed disposable labels keep the container'
+}
+
+test_disposable_in_compose_project_is_kept() {
+  local dir
+  dir=$(fm_hk_case compose-disposable)
+  fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
+  fm_hk_container "$dir" lanestack-db-1 running lanestack '' '127.0.0.1:55001->5432/tcp' ''
+  fm_hk_labels "$dir" lanestack-db-1 true lanestack "$HK_PAST"
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply with a disposable compose member'
+  assert_no_grep lanestack-db-1 "$dir/docker.rm" 'removed a disposable container that belongs to a compose project'
+  assert_grep 'but in compose project lanestack' "$dir/out" 'the kept reason did not name the compose project'
+  pass 'a disposable container in a compose project is kept'
+}
+
+test_keep_list_wins_over_expired_disposable() {
+  local dir code
+  dir=$(fm_hk_disposable_case keep-list-disposable)
+  fm_hk_labels "$dir" lane-c31-pg true lane-c31 "$HK_PAST"
+  printf '%s\n' 'lane-c31-*' >"$dir/home/config/housekeeping-keep"
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  expect_code 0 "$?" 'apply with an expired disposable on the keep-list'
+  assert_no_grep lane-c31-pg "$dir/docker.rm" 'removed an expired disposable container the keep-list names'
+  assert_grep 'keep    lane-c31-pg' "$dir/out" 'the keep-list match was not reported as kept'
+
+  dir=$(fm_hk_case both-lists-disposable)
+  fm_hk_container "$dir" wffui-pg running '' '' '127.0.0.1:55931->5432/tcp' ''
+  # One name classified both ways: kept as a compose member, reclaimed alone.
+  fm_hk_container "$dir" shared-name running stack '' '127.0.0.1:55001->5432/tcp' ''
+  fm_hk_container "$dir" shared-name running '' '' '127.0.0.1:55002->5432/tcp' ''
+  fm_hk_labels "$dir" shared-name true lane-shared "$HK_PAST"
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  code=$?
+  expect_code 3 "$code" 'apply with an expired disposable name also on the keep-list'
+  [ -s "$dir/docker.rm" ] && fail 'deleted a name that was also on the keep-list'
+  assert_grep 'shared-name' "$dir/err" 'the colliding name was not named in the refusal'
+  pass 'the keep-list wins over expiry and the name-intersection refusal still holds'
+}
+
+test_only_expired_disposables_running_refuses() {
+  local dir code
+  dir=$(fm_hk_case only-disposables)
+  fm_hk_container "$dir" lane-c31-pg running '' '' '127.0.0.1:55001->5432/tcp' ''
+  fm_hk_labels "$dir" lane-c31-pg true lane-c31 "$HK_PAST"
+
+  fm_hk_run "$dir" --apply --no-worktrees
+  code=$?
+  expect_code 3 "$code" 'apply that would stop every running container'
+  [ -s "$dir/docker.rm" ] && fail 'deleted despite refusing the run'
+  pass 'a run that would stop every running container still refuses'
+}
+
 test_unattributable_fleet_yields_empty_kill_list
 test_degraded_id_listing_still_reclaims_nothing
 test_refuses_a_listing_it_cannot_parse
@@ -834,3 +1077,12 @@ test_dry_run_deletes_nothing
 test_dry_run_models_post_stopped_volume_pass
 test_capture_helper_success_when_mounts_end_with_blank_line
 test_inspection_failure_skips_reclaim_fail_closed
+test_expired_disposable_without_client_is_reclaimed
+test_unexpired_disposable_is_kept
+test_expired_disposable_with_live_client_is_kept
+test_client_connecting_before_removal_keeps_disposable
+test_unverifiable_client_check_keeps_disposable
+test_missing_or_malformed_disposable_labels_are_kept
+test_disposable_in_compose_project_is_kept
+test_keep_list_wins_over_expired_disposable
+test_only_expired_disposables_running_refuses

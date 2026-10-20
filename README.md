@@ -192,7 +192,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/stow`            | Sweep the session for uncaptured durable knowledge, persist the open work records this session knows are unfiled or now wrong, curate tiered startup memory with decay and cold archival, enforce each home's budget or surface the required decision, cascade to registered second mates, and report what is safe to reset |
 | `/adjudicate-review-outcomes` | Answer review findings already posted on a task's pull request: re-measure each one at the current head, fix or refuse it with evidence, and post one disposition comment back onto that pull request; see the [adjudication procedure](.agents/skills/adjudicate-review-outcomes/SKILL.md) |
 | `/omp-firstmate-leverage` | Run the recurring omp maintenance sweep: update omp, fast-forward firstmate through `/updatefirstmate`, merge the default branch into the omp adapter branch and publish it, and audit which omp capabilities firstmate never uses; see the [sweep procedure](.agents/skills/omp-firstmate-leverage/SKILL.md) |
-| `/housekeeping`    | Reclaim disk left by finished crew work - stale worktrees, stopped and orphaned containers, dangling volumes, build cache, and opt-in unused images - with a dry-run report first and the delete path only on the captain's word, never touching live tasks or captain-owned stacks |
+| `/housekeeping`    | Reclaim disk left by finished crew work - stale worktrees, stopped, orphaned, and expired disposable containers, dangling volumes, build cache, and opt-in unused images - with a dry-run report first and the delete path only on the captain's word, never touching live tasks or captain-owned stacks |
 
 Bearings invocation examples:
 
